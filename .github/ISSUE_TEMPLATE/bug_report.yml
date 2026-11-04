@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in natpair or its Terraform module doesn't work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report security problems privately instead. See SECURITY.md.
+        Remove account IDs, IP addresses and other private details from logs before you paste them.
+  - type: input
+    id: natpair-version
+    attributes:
+      label: natpair version
+      description: The release the NATs run, such as v0.1.0.
+    validations:
+      required: true
+  - type: input
+    id: module-version
+    attributes:
+      label: Terraform module version
+      description: The ref in the module source, such as v0.1.0.
+    validations:
+      required: true
+  - type: input
+    id: region
+    attributes:
+      label: AWS region
+      placeholder: us-west-2
+    validations:
+      required: true
+  - type: input
+    id: instance-type
+    attributes:
+      label: Instance type
+      placeholder: c7gn.medium
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, what happened instead, and a timeline with UTC times (for example, when the owner failed, when the standby took over, when traffic recovered).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: natpair logs
+      description: The relevant lines from `journalctl -u natpair` on both NATs, covering the timeline above.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: other
+    attributes:
+      label: Anything else
+      description: Configuration changes, other logs, or steps to reproduce.

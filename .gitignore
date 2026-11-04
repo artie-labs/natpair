@@ -1,0 +1,14 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+*.key
+*.pem
+/bin/
+*.mock.go
+terraform/.terraform.lock.hcl
+campaign-results/
+/dist/
+/natpair

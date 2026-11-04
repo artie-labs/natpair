@@ -1,0 +1,71 @@
+#!/bin/bash
+# First boot of a natpair NAT: write its configuration, install the pinned
+# release, then reboot so the services start in the order deploy/install.sh
+# sets up.
+set -euo pipefail
+
+install -d -m 0755 /etc/natpair
+cat >/etc/natpair/config.json <<'CONFIG'
+${config}
+CONFIG
+
+cd "$(mktemp -d)"
+# The instance may get its public IP after it boots, so retry the steps that
+# need the network. Anything else that fails stops here, in the boot log.
+archive_url="${release_url}/${release}/natpair_linux_arm64.tar.gz"
+case "$archive_url" in
+  s3://*) download() { aws s3 cp --only-show-errors "$archive_url" release.tar.gz; } ;;
+  *) download() { curl --fail --silent --show-error --location --output release.tar.gz "$archive_url"; } ;;
+esac
+until download; do
+  sleep 5
+done
+until dnf install -y conntrack-tools iptables-nft; do
+  sleep 5
+done
+echo "${release_sha256}  release.tar.gz" | sha256sum -c -
+tar -xzf release.tar.gz
+./deploy/install.sh ./natpair
+%{ if datadog_secret != "" ~}
+
+# The Datadog agent ships natpair's logs and the host's metrics, tagged
+# service:natpair so monitors can select them. The API key stays out of the
+# user data, which anyone who can describe the instance can read. A failure
+# here is logged but doesn't stop the boot, because the NAT must reboot into
+# natpair even without its agent.
+install_datadog() {
+  local api_key
+  api_key=$(aws secretsmanager get-secret-value --region "${split(":", datadog_secret)[3]}" --secret-id "${datadog_secret}" --query SecretString --output text) || return
+  curl -fsSL --retry 5 -o install_agent.sh https://install.datadoghq.com/scripts/install_script_agent7.sh || return
+  DD_API_KEY="$api_key" DD_SITE="${datadog_site}" DD_INSTALL_ONLY=true \
+    DD_HOST_TAGS="service:natpair,natpair_pair:${pair}" bash install_agent.sh || return
+  echo "logs_enabled: true" >>/etc/datadog-agent/datadog.yaml || return
+  install -d -o dd-agent -g dd-agent /etc/datadog-agent/conf.d/journald.d || return
+  cat >/etc/datadog-agent/conf.d/journald.d/conf.yaml <<'JOURNALD' || return
+logs:
+  - type: journald
+    include_units:
+      - natpair.service
+      - natpair-bootstrap.service
+      - conntrackd.service
+    service: natpair
+    source: natpair
+    tags:
+      - natpair_pair:${pair}
+JOURNALD
+  # The network check also reports the connection table's size.
+  # ENA metrics count packets AWS queued or dropped at the instance's network
+  # limits, the sign that the NAT is too small.
+  cat >/etc/datadog-agent/conf.d/network.d/conf.yaml <<'NETWORK' || return
+init_config:
+instances:
+  - collect_aws_ena_metrics: true
+NETWORK
+  usermod -a -G systemd-journal dd-agent || return
+  systemctl enable datadog-agent
+}
+# set -e doesn't apply to a function whose status is checked, so each step
+# returns on failure.
+install_datadog || echo "Datadog agent install failed, so this NAT boots without it" >&2
+%{ endif ~}
+reboot

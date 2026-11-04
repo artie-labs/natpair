@@ -1,0 +1,104 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  # Decides which checks a pull request needs. A skipped job counts as passing,
+  # so the required checks still pass on pull requests that only change docs.
+  # On pushes, or if this job fails, every check runs.
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            go:
+              - "**/*.go"
+              - go.mod
+              - go.sum
+              - Makefile
+              - test.Dockerfile
+              - .golangci.yaml
+              - "internal/**"
+              - "deploy/**"
+              - "terraform/receiver/**"
+              - .github/workflows/checks.yml
+            terraform:
+              - "terraform/**"
+              - "examples/**"
+              - .github/workflows/checks.yml
+
+  test:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Check go.mod is tidy
+        run: go mod tidy -diff
+      - name: Run tests with the race detector
+        run: make test
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
+      - name: golangci-lint with test build tags
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
+          args: --build-tags privileged,campaign,localfixture
+      - name: Build release binaries
+        run: make build
+      - name: Check the install script
+        run: sh -n deploy/install.sh
+
+  # Tests that change iptables, network namespaces and BPF objects run in a
+  # disposable privileged container.
+  privileged-tests:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make test-privileged
+
+  terraform:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.terraform == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+      - run: terraform -chdir=terraform fmt -check
+      - run: terraform -chdir=terraform init -backend=false -input=false
+      - run: terraform -chdir=terraform validate
+      - run: terraform fmt -check -recursive examples
+      # The examples pin the module to a release tag. Point them at this
+      # checkout's module instead, so a change that breaks them fails here.
+      - name: Validate the examples
+        run: |
+          for dir in examples/*/; do
+            sed -i 's|"git::https://github.com/artie-labs/natpair.git//terraform?ref=[^"]*"|"../../terraform"|' "$dir"main.tf
+            grep -q '"../../terraform"' "$dir"main.tf
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+          done

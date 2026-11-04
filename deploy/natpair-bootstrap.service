@@ -1,0 +1,14 @@
+[Unit]
+Description=Close worker forwarding and prepare NAT networking
+Wants=network-online.target
+After=network-online.target
+Before=conntrackd.service natpair.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/natpair bootstrap --config /etc/natpair/config.json
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

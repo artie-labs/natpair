@@ -1,0 +1,12 @@
+{
+  "lease_table": "natpair-leases",
+  "pair": "example",
+  "shared_eni": "eni-0shared0",
+  "shared_address": "10.0.1.100/24",
+  "shared_public_ip": "192.0.2.100",
+  "protected_cidrs": [
+    "10.0.16.0/20"
+  ],
+  "probe_url": "https://abcdefghijklmnopqrstuvwxyz012345.lambda-url.us-east-2.on.aws/",
+  "peer_ip": "10.0.1.11"
+}

@@ -1,0 +1,21 @@
+[Unit]
+Description=Check NAT health and own the shared worker path
+Requires=natpair-bootstrap.service
+Wants=conntrackd.service
+After=natpair-bootstrap.service conntrackd.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/natpair run --config /etc/natpair/config.json
+# Close forwarding however the daemon stopped. The kernel deadline also
+# closes it on its own within 4 seconds.
+ExecStopPost=/usr/local/bin/natpair fence-close --config /etc/natpair/config.json
+Restart=always
+RestartSec=1
+KillMode=control-group
+TimeoutStopSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

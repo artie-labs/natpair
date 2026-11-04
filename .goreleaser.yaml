@@ -1,0 +1,51 @@
+# Builds natpair's release tarballs and publishes them, with checksums.txt, as
+# a GitHub release for the tag. The release workflow runs this when a vX.Y.Z
+# tag is pushed. NATs from the Terraform module download
+# natpair_linux_arm64.tar.gz from that release and check it against
+# release_sha256, so the archive names must not change.
+version: 2
+
+project_name: natpair
+
+builds:
+  - main: ./cmd/natpair
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [arm64, amd64]
+    flags: [-trimpath]
+    # The daemon reports the release it runs, which the updater compares with
+    # the pinned one.
+    ldflags: [-s -w, "-X main.release={{ .Tag }}"]
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - deploy/*
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: artie-labs
+    name: natpair
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs(\\(.*\\))?!?:"
+      - "^test(\\(.*\\))?!?:"
+      - "^chore(\\(.*\\))?!?:"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
