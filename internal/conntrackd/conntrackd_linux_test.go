@@ -115,7 +115,13 @@ func TestHandover(t *testing.T) {
 		connect(t, b.ns, "10.0.16.5", 5000)
 		require.Eventually(t, func() bool { return strings.Contains(a.copies(t), "sport=5000 ") }, 5*time.Second, 100*time.Millisecond)
 		assert.Contains(t, nsRun(t, a.ns, "conntrack", "-L", "-p", "tcp"), "sport=4000 ")
-		nsRun(t, a.ns, "conntrack", "-D", "-s", "10.0.16.0/24")
+		// A connection from the same subnet that wasn't translated, like the
+		// NAT's own, must survive the cleanup.
+		connectTo(t, a.ns, "10.0.16.5", "203.0.113.10", 6000)
+		nsRun(t, a.ns, "conntrack", "-D", "--reply-dst", "10.99.1.100")
+		entries := nsRun(t, a.ns, "conntrack", "-L", "-p", "tcp")
+		assert.NotContains(t, entries, "sport=4000 ")
+		assert.Contains(t, entries, "sport=6000 ")
 		require.NoError(t, a.client.TakeOver(t.Context()))
 		assert.Contains(t, nsRun(t, a.ns, "conntrack", "-L", "-p", "tcp"), "sport=5000 ")
 	}
@@ -168,11 +174,17 @@ func (r replica) copies(t *testing.T) string {
 	return copies
 }
 
-// connect opens a TCP connection from addr:port in namespace ns. Its SYN
-// leaves through the dummy interface, which creates a connection entry.
+// connect opens a TCP connection from addr:port in namespace ns to the
+// address the replica translates. Its SYN leaves through the dummy interface,
+// which creates a connection entry.
 func connect(t *testing.T, ns, addr string, port int) {
+	connectTo(t, ns, addr, "203.0.113.9", port)
+}
+
+// connectTo opens a TCP connection from addr:port to dst:443, as connect does.
+func connectTo(t *testing.T, ns, addr, dst string, port int) {
 	_, _ = command.Run(t.Context(), 3*time.Second, "ip", "netns", "exec", ns, "curl", "-s", "--max-time", "1",
-		"--interface", addr, "--local-port", fmt.Sprint(port), "http://203.0.113.9:443/")
+		"--interface", addr, "--local-port", fmt.Sprint(port), "http://"+dst+":443/")
 	require.Eventually(t, func() bool {
 		return strings.Contains(nsRun(t, ns, "conntrack", "-L", "-p", "tcp"), fmt.Sprintf("sport=%d ", port))
 	}, 2*time.Second, 50*time.Millisecond)

@@ -83,7 +83,9 @@ type NAT struct {
 	// SharedPublicIP is the shared Elastic IP, seen by the receiver while serving.
 	SharedPublicIP netip.Addr `json:"shared_public_ip"`
 
-	// ProtectedCIDRs are the worker subnets behind the fence.
+	// ProtectedCIDRs are the sources this NAT forwards and translates to the
+	// shared address, all behind the fence. They may hold this NAT's own
+	// addresses, such as when they are the whole VPC.
 	ProtectedCIDRs []netip.Prefix `json:"protected_cidrs"`
 
 	// ProbeURL is the probe receiver, the Terraform module's receiver_url.
