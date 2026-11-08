@@ -32,11 +32,6 @@ variable "private_route_table_ids" {
   type        = list(string)
 }
 
-variable "private_cidrs" {
-  description = "CIDRs of the private subnets, such as [\"10.0.16.0/20\"]."
-  type        = list(string)
-}
-
 variable "shared_eip_allocation_id" {
   description = "Allocation ID of an existing Elastic IP for the shared address, such as eipalloc-0123456789abcdef0. The module associates it but never releases it."
   type        = string
@@ -80,8 +75,6 @@ module "natpair" {
   public_subnet_id         = var.public_subnet_id
   public_route_table_id    = var.public_route_table_id
   shared_eip_allocation_id = var.shared_eip_allocation_id
-  worker_route_table_ids   = var.private_route_table_ids
-  worker_cidrs             = var.private_cidrs
 
   instance_type   = var.instance_type
   max_connections = var.max_connections
@@ -91,6 +84,16 @@ module "natpair" {
 
   release        = var.release
   release_sha256 = var.release_sha256
+}
+
+# Each private subnet's default route goes to the shared ENI. Moving an
+# existing route here from a NAT Gateway is an in-place change.
+resource "aws_route" "private_default" {
+  for_each = toset(var.private_route_table_ids)
+
+  route_table_id         = each.value
+  destination_cidr_block = "0.0.0.0/0"
+  network_interface_id   = module.natpair.shared_eni_id
 }
 
 output "shared_public_ip" {

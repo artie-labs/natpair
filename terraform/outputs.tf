@@ -14,7 +14,7 @@ output "nat_public_ips" {
 }
 
 output "shared_eni_id" {
-  description = "The shared ENI that moves between the NATs."
+  description = "The shared ENI that moves between the NATs. Point each private route table's 0.0.0.0/0 route at it."
   value       = aws_network_interface.shared.id
 }
 

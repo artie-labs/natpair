@@ -1,6 +1,8 @@
 # One natpair NAT pair: both NAT instances, the shared ENI and its Elastic
-# IP, the worker routes, the lease table, the NATs' IAM role, the probe
-# receiver, and a private DynamoDB path. The NATs run stock Amazon Linux 2023
+# IP, the lease table, the NATs' IAM role, the probe receiver, and a private
+# DynamoDB path. Callers point their route tables' default routes at the
+# shared ENI (the shared_eni_id output), so moving a route to the pair is one
+# in-place change. The NATs run stock Amazon Linux 2023
 # and install the pinned natpair release at first boot.
 #
 # To upgrade, change release and release_sha256. The apply only rewrites the
@@ -31,7 +33,11 @@ data "aws_ami" "al2023" {
 }
 
 locals {
-  peer             = { a = "b", b = "a" }
+  peer = { a = "b", b = "a" }
+  # Every CIDR of the VPC unless the caller narrows it, so a new private subnet
+  # needs no change to the NATs.
+  vpc_cidrs        = sort([for association in data.aws_vpc.this.cidr_block_associations : association.cidr_block])
+  worker_cidrs     = coalesce(var.worker_cidrs, local.vpc_cidrs)
   shared_public_ip = data.aws_eip.shared.public_ip
   # Each NAT reads and writes only its pair's lease record and the board where
   # the NATs post health reports. The key format must match
@@ -143,7 +149,7 @@ resource "aws_security_group" "nat" {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
-    cidr_blocks = sort([for association in data.aws_vpc.this.cidr_block_associations : association.cidr_block])
+    cidr_blocks = local.vpc_cidrs
   }
 
   # With all TCP and UDP open in both directions, AWS doesn't track connections
@@ -221,23 +227,21 @@ resource "aws_eip_association" "shared" {
   allow_reassociation  = false
 }
 
-resource "aws_route" "worker" {
-  count = length(var.worker_route_table_ids)
-
-  route_table_id         = var.worker_route_table_ids[count.index]
-  destination_cidr_block = "0.0.0.0/0"
-  network_interface_id   = aws_network_interface.shared.id
-}
-
 # Lease renewals and health reports reach DynamoDB without depending on the
-# internet path the NATs forward. The endpoint keeps the default policy,
-# because workers' other DynamoDB traffic also uses these route tables. The NAT
-# policy already limits what natpair can do.
+# internet path the NATs forward. Only the public route table, where the NATs
+# live, gets it, so workers' DynamoDB traffic keeps leaving from the shared
+# address. A route table can use only one DynamoDB gateway endpoint, so a
+# second pair on the same public route table sets create_dynamodb_endpoint to
+# false and uses the first pair's. The endpoint keeps the default policy, so
+# anything else on the public subnet can keep using DynamoDB. The NAT policy
+# already limits what natpair can do.
 resource "aws_vpc_endpoint" "dynamodb" {
+  count = var.create_dynamodb_endpoint ? 1 : 0
+
   vpc_id            = data.aws_vpc.this.id
   service_name      = "com.amazonaws.${data.aws_region.current.region}.dynamodb"
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = concat([var.public_route_table_id], var.worker_route_table_ids)
+  route_table_ids   = [var.public_route_table_id]
 }
 
 # NATs
@@ -261,7 +265,7 @@ resource "aws_instance" "nat" {
       shared_eni       = aws_network_interface.shared.id
       shared_address   = "${aws_network_interface.shared.private_ip}/${split("/", data.aws_subnet.public.cidr_block)[1]}"
       shared_public_ip = local.shared_public_ip
-      protected_cidrs  = var.worker_cidrs
+      protected_cidrs  = local.worker_cidrs
       probe_url        = aws_lambda_function_url.receiver.function_url
       peer_ip          = aws_network_interface.nat[local.peer[each.key]].private_ip
       release_url      = trimsuffix(var.release_url, "/")
