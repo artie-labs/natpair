@@ -82,38 +82,39 @@ The module's `nat_instance_ids` output maps `a` and `b` to instance IDs.
 
 ## Move from a NAT Gateway
 
-The module adds each worker route table's default route, and a route table
-can have only one. So deploy the pair first without routes, check it, then
-move the routes. Traffic pauses only while the routes change.
+Deploy the pair first, check it, then point the routes at it. Changing a
+route's target is one in-place update, so workers keep a default route the
+whole time.
 
 1. **Choose the shared address.** The module won't take an Elastic IP that's
    still associated with the NAT Gateway. Either use a new Elastic IP and add
-   it to every allowlist that holds your current address ahead of the move, or keep the NAT
-   Gateway's address and accept an outage: delete the NAT Gateway first, then
-   continue from step 2 with that address. Workers have no internet access
-   until the new pair forwards.
-2. **Deploy the pair without routes.** Set `worker_cidrs` to every worker
-   subnet now, because running NATs don't pick up changes to it. Leave the
-   routes out:
+   it to every allowlist that holds your current address before the move, or
+   keep the NAT Gateway's address and accept an outage: delete the NAT
+   Gateway first, then continue from step 2 with that address. Workers have
+   no internet access until the new pair forwards.
+2. **Deploy the pair.** Add the module and apply, leaving the routes alone.
+   Wait for one NAT to log `forwarding open` and the other to log a health
+   round with `"ready":true`.
+3. **Move the routes.** In each private route table's default route, replace
+   the NAT Gateway target with the shared ENI:
 
    ```hcl
-   worker_cidrs           = ["10.0.16.0/20", "10.0.32.0/20"]
-   worker_route_table_ids = []
+   route {
+     cidr_block           = "0.0.0.0/0"
+     network_interface_id = module.natpair.shared_eni_id # was nat_gateway_id
+   }
    ```
 
-   Apply, then wait for one NAT to log `forwarding open` and the other to log
-   a health round with `"ready":true`. If the NAT Gateway still exists, the
-   DynamoDB endpoint isn't on the worker route tables yet, which is fine.
-3. **Move the routes.** In one change, remove the NAT Gateway's default routes
-   from your configuration and set `worker_route_table_ids`. Apply. Terraform
-   deletes the old routes and adds the new ones. Each route table has no
-   default route between those two calls. If a new route fails with `RouteAlreadyExists`, the old one
-   wasn't deleted yet, so apply again.
+   The same works on an `aws_route` resource. Apply, and the plan updates
+   each route in place. If another module owns the routes, such as
+   terraform-aws-vpc with `enable_nat_gateway`, turning it off deletes them.
+   The new routes are then created in the same apply, and each table has no
+   default route in between. If one fails with `RouteAlreadyExists`, apply
+   again.
 4. **Check** traffic from a worker as in [Verify a new pair](#verify-a-new-pair),
    then delete the NAT Gateway if it's still there.
 
-To go back, recreate the NAT Gateway, set `worker_route_table_ids = []` and
-point the routes at the NAT Gateway again.
+To go back, point the routes at the NAT Gateway again.
 
 ## Take a NAT out of service
 
@@ -179,16 +180,17 @@ Running NATs keep the image, configuration and boot script they launched
 with. These changes need new NATs:
 
 - `worker_cidrs`, `max_connections`, `release_url`,
-  `datadog_api_key_secret_arn` and `datadog_site`
+  `datadog_api_key_secret_arn` and `datadog_site`, and a new CIDR on the VPC
+  when `worker_cidrs` is left at its default
 - a newer Amazon Linux image
 - a module upgrade whose changelog says so
 
 A new NAT installs the pinned release at first boot.
 
-To add a worker subnet, add its CIDR to `worker_cidrs` first and replace both
-NATs as below. Only then add its route table to `worker_route_table_ids`.
-Otherwise the subnet gets a route through NATs that don't forward its
-traffic.
+A new private subnet inside the VPC's CIDRs only needs its default route.
+If you set `worker_cidrs` yourself, add the subnet's CIDR and replace both
+NATs first, then add its route. Otherwise the subnet gets a route through
+NATs that don't forward its traffic.
 
 Replace one NAT per apply, the standby first:
 
@@ -267,7 +269,7 @@ applies to either source.
 
 ## Remove a pair
 
-`terraform destroy` on the module removes the workers' default routes, so
-they lose internet access. Point the routes elsewhere first. It also removes
-the DynamoDB gateway endpoint, so the subnets' DynamoDB traffic goes back to
-its previous path. The Elastic IP you passed in isn't deleted.
+Point the private route tables' default routes elsewhere first, because the
+shared ENI goes away with the pair. Removing the module also removes the
+DynamoDB gateway endpoint on the public route table. The Elastic IP you passed
+in isn't deleted.

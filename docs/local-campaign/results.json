@@ -3,224 +3,224 @@
     "both_paths_verified": true,
     "case": "healthy-renewal-and-standby-readiness",
     "copied_probe_tuples_verified": true,
-    "elapsed_s": 14.17644034,
+    "elapsed_s": 14.163530966,
     "passed": true
   },
   {
     "case": "controller-stop",
-    "elapsed_s": 34.297002974,
-    "local_takeover_s": 0.10030975,
+    "elapsed_s": 39.175081309,
+    "local_takeover_s": 0.512128042,
     "passed": true,
     "restarted_owner_stayed_standby": true,
     "upload": {
       "ok": true,
-      "bytes": 6242304,
-      "max_progress_gap_s": 0.273244792,
+      "bytes": 6086656,
+      "max_progress_gap_s": 0.683276376,
       "same_connection": true,
       "receiver": {
-        "bytes": 6242304,
-        "sha256": "ad535dbb4f9e99fcdf6d1eabb987dfc17500936858e7feeae155f1d26f544aca",
+        "bytes": 6086656,
+        "sha256": "689c8cca0d5cc314f4f388b1381178b5d2a9b891738f4c0a90dcf946af6d42a1",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 33276,
-      "duration_s": 18.018677633
+      "local_port": 53932,
+      "duration_s": 18.013226967
     }
   },
   {
     "case": "controller-kill",
-    "elapsed_s": 35.219866558,
-    "local_takeover_s": 6.423097795,
+    "elapsed_s": 34.22029039,
+    "local_takeover_s": 6.37235842,
     "passed": true,
     "restarted_owner_stayed_standby": true,
     "upload": {
       "ok": true,
-      "bytes": 5136384,
-      "max_progress_gap_s": 3.186828835,
+      "bytes": 5259264,
+      "max_progress_gap_s": 3.191447251,
       "same_connection": true,
       "receiver": {
-        "bytes": 5136384,
-        "sha256": "d3fa19aa663342f1d245386e4c849949afb3a71b7f3a88ebfeb4fb80230ddc79",
+        "bytes": 5259264,
+        "sha256": "c18697783381a9a367ef628a5f6bbb12920a3c7551c0b64d3e4e63daf84e9b32",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 54712,
-      "duration_s": 18.014148258
+      "local_port": 54094,
+      "duration_s": 18.001013259
     }
   },
   {
     "case": "controller-pause",
-    "elapsed_s": 35.339680016,
-    "local_takeover_s": 6.547115211,
+    "elapsed_s": 34.234666724,
+    "local_takeover_s": 6.453844295,
     "passed": true,
     "restarted_owner_stayed_standby": true,
     "upload": {
       "ok": true,
-      "bytes": 5136384,
-      "max_progress_gap_s": 3.225024585,
+      "bytes": 5201920,
+      "max_progress_gap_s": 3.158369085,
       "same_connection": true,
       "receiver": {
-        "bytes": 5136384,
-        "sha256": "d3fa19aa663342f1d245386e4c849949afb3a71b7f3a88ebfeb4fb80230ddc79",
+        "bytes": 5201920,
+        "sha256": "e4ca4af9ed764bb4f6eb16089e53e4c5f83a70afe72de1e6c5e6c3c89a419bf3",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 45100,
-      "duration_s": 18.009358008
+      "local_port": 46620,
+      "duration_s": 18.014071591
     }
   },
   {
     "automatic_payload_detection": true,
     "case": "large-packet-active-path-failure",
-    "elapsed_s": 33.152624015,
-    "local_takeover_s": 5.451590544,
+    "elapsed_s": 32.165443764,
+    "local_takeover_s": 4.383414419,
     "passed": true,
     "upload": {
       "ok": true,
-      "bytes": 4055040,
-      "max_progress_gap_s": 6.424008836,
+      "bytes": 4087808,
+      "max_progress_gap_s": 6.38582292,
       "same_connection": true,
       "receiver": {
-        "bytes": 4055040,
-        "sha256": "018879127b01f11216878dec19e6c70737178544f024fca2f943b8d23c6569a1",
+        "bytes": 4087808,
+        "sha256": "c1f9cc12bb30f7f17e2113dd3826086b7fff050125fc11a972cc3d167402510e",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 47994,
-      "duration_s": 18.010305507
+      "local_port": 42028,
+      "duration_s": 18.022828341
     }
   },
   {
     "case": "planned-maintenance",
-    "elapsed_s": 35.238462141,
-    "local_takeover_s": 0.645586167,
+    "elapsed_s": 34.226735224,
+    "local_takeover_s": 0.531745875,
     "maintenance_survived_restart": true,
     "passed": true,
     "upload": {
       "ok": true,
-      "bytes": 6045696,
-      "max_progress_gap_s": 0.686527,
+      "bytes": 6086656,
+      "max_progress_gap_s": 0.685735167,
       "same_connection": true,
       "receiver": {
-        "bytes": 6045696,
-        "sha256": "83de7946faf4adafc50c977c469ed14eecaced62b79c58542b4685aa4f047abd",
+        "bytes": 6086656,
+        "sha256": "689c8cca0d5cc314f4f388b1381178b5d2a9b891738f4c0a90dcf946af6d42a1",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 56588,
-      "duration_s": 18.018356382
+      "local_port": 54618,
+      "duration_s": 18.01373205
     }
   },
   {
     "case": "worker-side-path-failure-does-not-trigger-switch",
-    "elapsed_s": 24.695257302999998,
+    "elapsed_s": 24.825827762,
     "passed": true,
     "takeover": false
   },
   {
     "case": "large-inbound-packet-active-path-failure",
-    "elapsed_s": 19.684231801,
+    "elapsed_s": 19.552039426,
     "inbound_payload_detection": true,
-    "local_takeover_s": 5.522231211,
+    "local_takeover_s": 5.389349711,
     "passed": true
   },
   {
     "case": "unknown-connection-is-reset",
-    "elapsed_s": 23.156818094,
-    "failed_after_takeover_s": 0.429873917,
+    "elapsed_s": 23.031449844,
+    "failed_after_takeover_s": 0.260445375,
     "passed": true,
     "unknown_connection_reset": true,
-    "upload_error": "read tcp4 10.94.1.10:58224-\u003e10.94.2.10:8444: read: connection reset by peer"
+    "upload_error": "read tcp4 10.94.1.10:50398-\u003e10.94.2.10:8444: read: connection reset by peer"
   },
   {
     "case": "restarted-standby-keeps-idle-connections",
-    "elapsed_s": 16.813625465,
+    "elapsed_s": 16.787652549,
     "idle_connection_survived_standby_restart": true,
     "passed": true,
     "upload": {
       "ok": true,
-      "bytes": 704512,
-      "max_progress_gap_s": 0.028386333,
+      "bytes": 712704,
+      "max_progress_gap_s": 0.029543583,
       "same_connection": true,
       "receiver": {
-        "bytes": 704512,
-        "sha256": "d4564381b84125c2f791a73685e9dac7e10d36d5b9e1dbf237a7d388d614f930",
+        "bytes": 712704,
+        "sha256": "96f96946c73e3812c9e674b8b902057ad75d90701aff9743bcc79f79f12cd88c",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 49638,
-      "duration_s": 2.667684834
+      "local_port": 48482,
+      "duration_s": 2.6470438769999998
     }
   },
   {
     "case": "receiver-outage-keeps-owner",
-    "elapsed_s": 29.241081597,
+    "elapsed_s": 29.187300888,
     "owner_kept_during_receiver_outage": true,
     "passed": true
   },
   {
     "case": "standby-without-conntrackd-takes-over",
-    "elapsed_s": 21.353838094,
-    "local_takeover_s": 6.109383128,
+    "elapsed_s": 20.766551676,
+    "local_takeover_s": 6.563806961,
     "passed": true,
     "took_over_without_conntrackd": true
   },
   {
     "case": "receiver-outage-during-owner-crash",
-    "elapsed_s": 28.432927347,
+    "elapsed_s": 24.579374386,
     "last_resort_takeover": true,
-    "local_takeover_s": 8.58456642,
+    "local_takeover_s": 6.386212003,
     "passed": true
   },
   {
     "case": "maintenance-waits-for-ready-standby",
-    "elapsed_s": 32.260410931,
+    "elapsed_s": 31.818266764,
     "handed_over_once_ready": true,
     "passed": true,
     "waited_for_ready_standby": true
   },
   {
     "case": "lease-outage-keeps-owner",
-    "elapsed_s": 32.15585518,
+    "elapsed_s": 32.237209015,
     "owner_kept_forwarding": true,
     "passed": true,
     "renewed_after_outage": true,
     "upload": {
       "ok": true,
       "bytes": 6184960,
-      "max_progress_gap_s": 0.029554458,
+      "max_progress_gap_s": 0.11194475,
       "same_connection": true,
       "receiver": {
         "bytes": 6184960,
         "sha256": "efa5177e00faf83c3bac53b0329ce06579252d830955cbe4596a87709c4e98f7",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 43524,
-      "duration_s": 18.00774834
+      "local_port": 48280,
+      "duration_s": 18.009175759
     }
   },
   {
     "case": "owner-loses-lease-service",
-    "elapsed_s": 34.099057808,
-    "local_takeover_s": 6.548724087,
+    "elapsed_s": 33.080368224,
+    "local_takeover_s": 6.432414128,
     "old_owner_closed_after_service_returned": true,
     "passed": true,
     "upload": {
       "ok": true,
-      "bytes": 6119424,
-      "max_progress_gap_s": 0.27607125,
+      "bytes": 6135808,
+      "max_progress_gap_s": 0.233417291,
       "same_connection": true,
       "receiver": {
-        "bytes": 6119424,
-        "sha256": "7d610dbc68041c1a27eb53104bad5e2a34aa72bf97cc0027299c529d702ac127",
+        "bytes": 6135808,
+        "sha256": "3eb73d5cf2edb2d351db3e981df4d5c659fe87dcdeca0857accc68f91f98d29f",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 33166,
-      "duration_s": 18.006065758
+      "local_port": 44034,
+      "duration_s": 18.001818425
     }
   },
   {
     "blocked_after_deadline": true,
     "case": "kernel-expiry-without-controller",
     "controller_running": false,
-    "elapsed_s": 3.223650585,
+    "elapsed_s": 3.273248335,
     "expired_rewrite_blocked": true,
     "forwarded_before_deadline": true,
-    "guard_jumps_after_three_restarts": 2,
+    "guard_jumps_after_three_restarts": 4,
     "passed": true
   }
 ]

@@ -31,9 +31,9 @@ flowchart LR
 ```
 
 The Terraform module in [`terraform/`](../terraform) creates all of it: both
-NATs, the shared ENI and its Elastic IP association, the private subnets'
-default routes, the DynamoDB table, the NATs' IAM role, the probe receiver and
-a DynamoDB gateway endpoint.
+NATs, the shared ENI and its Elastic IP association, the DynamoDB table, the
+NATs' IAM role, the probe receiver and a DynamoDB gateway endpoint. You point
+the private subnets' default routes at the shared ENI.
 
 ## Who owns the shared ENI: the lease
 
@@ -123,12 +123,13 @@ old release. See [operations](operations.md#upgrade) for the steps.
 - So the host firewall on each NAT is what filters traffic to the NAT itself.
   It accepts new connections only from the VPC and the peer, resets other TCP
   and drops everything else. Traffic the NAT forwards doesn't pass through it.
-- The module adds a DynamoDB gateway endpoint to the public route table and
-  every private route table it routes, so lease renewals and health reports
-  reach DynamoDB without depending on the internet path the NATs forward. This
-  also sends any other DynamoDB
-  traffic from those subnets through the endpoint. See
-  [limitations](../README.md#limitations).
+- The module adds a DynamoDB gateway endpoint to the public route table, so
+  lease renewals and health reports reach DynamoDB without depending on the
+  internet path the NATs forward. Workers' DynamoDB traffic goes through the
+  NATs like their other traffic, so it leaves from the shared Elastic IP.
+- By default the NATs forward traffic from every CIDR of the VPC. Their own
+  traffic, such as AWS API calls and lease renewals, always keeps their own
+  address and route, even though that address is inside the VPC.
 
 ## Security
 
