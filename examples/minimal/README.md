@@ -17,7 +17,7 @@ terraform apply \
   -var public_subnet_id=subnet-0123456789abcdef0 \
   -var public_route_table_id=rtb-0123456789abcdef0 \
   -var 'private_route_table_ids=["rtb-0fedcba9876543210"]' \
-  -var release=v0.1.0 \
+  -var release=v0.1.1 \
   -var release_sha256=<sha256 from checksums.txt>
 ```
 

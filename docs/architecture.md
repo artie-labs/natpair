@@ -143,9 +143,9 @@ old release. See [operations](operations.md#upgrade) for the steps.
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
-  root volumes aren't encrypted, so launching a NAT needs no KMS permissions.
-  They hold Amazon Linux, natpair, its configuration, and the Datadog API key
-  if you use Datadog. A Datadog API key can submit data but not read it.
+  root volumes are encrypted with the account's default EBS key, AWS managed
+  `aws/ebs` unless you've set another, so whoever launches the NATs needs
+  permission to use that key through EC2.
 - **Releases.** A NAT installs a release only if its SHA-256 matches
   `release_sha256`. Each release's files carry a GitHub build provenance
   attestation. To check one:

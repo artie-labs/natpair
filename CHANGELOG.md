@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-11-09
+
+### Changed
+
+- New NATs' root volumes are encrypted with the account's default EBS key, AWS
+  managed `aws/ebs` unless the account sets another. Running NATs keep their
+  volumes until you replace them. The release binary is the same as 0.1.0, so
+  pairs can move to the 0.1.1 module and keep `release = "v0.1.0"`.
+
 ## [0.1.0] - 2026-11-08
 
 ### Added
@@ -22,4 +31,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traffic from every CIDR of the VPC unless you set `worker_cidrs`.
 - Optional Datadog agent that ships natpair's logs and host metrics.
 
+[0.1.1]: https://github.com/artie-labs/natpair/releases/tag/v0.1.1
 [0.1.0]: https://github.com/artie-labs/natpair/releases/tag/v0.1.0
