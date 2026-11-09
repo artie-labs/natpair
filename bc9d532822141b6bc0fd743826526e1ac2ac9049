@@ -1,0 +1,8 @@
+Independent review of the full branch diff, then fixes:
+- [P2] Existing pairs would lose their worker routes when aws_route.worker is removed. Not a natpair code change: natpair has no released users, and the fck-nat-ha swap in ops carries moved { from = module.fck_nat_ha.aws_route.worker[0] to = aws_route.<name> }, confirmed to plan as 0 add, 0 destroy. Fixed docs that said workers' DynamoDB traffic 'keeps' leaving from the shared IP.
+- [P3] Packets the NAT sends from the shared address (resets to remote servers) left through the main table. Fixed: ip rule from <shared> lookup 7001 priority 6999, with unit and privileged tests.
+- [P4] DropStale tests didn't prove untranslated connections survive. Fixed: the conntrackd privileged test now adds an untranslated connection and asserts it survives while the translated stale entry is deleted.
+- [P4] Stale handoff.go comment, complete example README, redundant moved block for the endpoint count. Fixed.
+Dismissed with evidence: canary namespaces, conntrackd sync, IMDS, SSM, lease calls, bound sockets, download-direction replies (all traced, unchanged routing).
+Checks: go vet, go test -race, golangci-lint (only the existing controller.go:236 errcheck, which CI's pinned v2.13.2 passes), terraform fmt and validate for the module and both examples, actionlint, link check. Privileged tests and the 17-case campaign passed before the 6999 rule. Rerun pending Docker.
+- After review: the campaign failed on a Linux runner because go build couldn't read VCS status in a checkout owned by another user. Fixed with -buildvcs=false. The campaign reruns on a GitHub runner because local Docker is hung.
