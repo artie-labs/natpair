@@ -280,13 +280,12 @@ resource "aws_instance" "nat" {
     http_tokens = "required"
   }
 
-  # Unencrypted, so launching a NAT needs no KMS permissions: EBS has no AWS
-  # owned key, so encryption would use a KMS key in the account. The volume
-  # holds stock Amazon Linux, natpair and its configuration, and the Datadog
-  # API key, which can only submit data.
+  # Encrypted with the account's default EBS key, the AWS managed aws/ebs
+  # unless the account sets another. EC2 uses the key on behalf of whoever
+  # launches the NAT, so their KMS permissions apply.
   root_block_device {
     volume_type = "gp3"
-    encrypted   = false
+    encrypted   = true
   }
 
   tags = { Name = "${var.name}-nat-${each.key}", (local.pair_tag) = var.pair_id }

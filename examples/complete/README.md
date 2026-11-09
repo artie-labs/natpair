@@ -25,7 +25,7 @@ public_route_table_id      = "rtb-0123456789abcdef0"
 private_route_table_ids    = ["rtb-0fedcba9876543210"]
 shared_eip_allocation_id   = "eipalloc-0123456789abcdef0"
 datadog_api_key_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:datadog-api-key-AbCdEf"
-release                    = "v0.1.0"
+release                    = "v0.1.1"
 release_sha256             = "<sha256 from checksums.txt>"
 ```
 

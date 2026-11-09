@@ -58,7 +58,7 @@ variable "max_connections" {
 }
 
 variable "release" {
-  description = "natpair release tag the pair runs, such as v0.1.0. New NATs install it at first boot. Changing it pins a new release, which the NATs roll out to themselves one at a time."
+  description = "natpair release tag the pair runs, such as v0.1.1. New NATs install it at first boot. Changing it pins a new release, which the NATs roll out to themselves one at a time."
   type        = string
 
   # The NATs ignore a pin the updater can't use, so the roll wouldn't start.

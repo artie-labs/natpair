@@ -55,7 +55,7 @@ variable "datadog_api_key_secret_arn" {
 }
 
 variable "release" {
-  description = "natpair release the NATs run, such as v0.1.0."
+  description = "natpair release the NATs run, such as v0.1.1."
   type        = string
 }
 
@@ -67,7 +67,7 @@ variable "release_sha256" {
 }
 
 module "natpair" {
-  source = "git::https://github.com/artie-labs/natpair.git//terraform?ref=v0.1.0"
+  source = "git::https://github.com/artie-labs/natpair.git//terraform?ref=v0.1.1"
 
   name    = "natpair-main"
   pair_id = "natpair-main"

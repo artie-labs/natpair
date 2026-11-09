@@ -155,7 +155,7 @@ instead.
    SHA-256 of its `natpair_linux_arm64.tar.gz`:
 
    ```sh
-   curl -sL https://github.com/artie-labs/natpair/releases/download/v0.1.0/checksums.txt | grep linux_arm64
+   curl -sL https://github.com/artie-labs/natpair/releases/download/v0.1.1/checksums.txt | grep linux_arm64
    ```
 
 2. Add the module, and point each private route table's default route at the
@@ -167,7 +167,7 @@ instead.
    }
 
    module "natpair" {
-     source = "git::https://github.com/artie-labs/natpair.git//terraform?ref=v0.1.0"
+     source = "git::https://github.com/artie-labs/natpair.git//terraform?ref=v0.1.1"
 
      name    = "natpair"
      pair_id = "natpair"
@@ -178,7 +178,7 @@ instead.
 
      instance_type = "c7gn.medium"
 
-     release        = "v0.1.0"
+     release        = "v0.1.1"
      release_sha256 = "<64 hex digits from checksums.txt>"
    }
 

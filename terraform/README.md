@@ -18,7 +18,7 @@ resource "aws_eip" "shared" {
 }
 
 module "natpair" {
-  source = "git::https://github.com/artie-labs/natpair.git//terraform?ref=v0.1.0"
+  source = "git::https://github.com/artie-labs/natpair.git//terraform?ref=v0.1.1"
 
   name    = "natpair"
   pair_id = "natpair"
@@ -29,8 +29,8 @@ module "natpair" {
 
   instance_type = "c7gn.medium"
 
-  release = "v0.1.0"
-  # From checksums.txt in the v0.1.0 GitHub release, the line for
+  release = "v0.1.1"
+  # From checksums.txt in the v0.1.1 GitHub release, the line for
   # natpair_linux_arm64.tar.gz.
   release_sha256 = "<64 hex digits>"
 }
@@ -95,7 +95,7 @@ the policy applies. They need no action.
 | `pair_id` | ID for this NAT pair, unique in the AWS account. Its lease records start with it, and the natpair-pair tag that scopes each NAT's EC2 permissions carries it. Don't change it on a running pair. | `string` | n/a | yes |
 | `public_route_table_id` | Route table of the public subnet. The DynamoDB gateway endpoint is added to it. | `string` | n/a | yes |
 | `public_subnet_id` | Public subnet for both NATs and the shared ENI. An ENI can't move between availability zones, so the pair lives in this subnet's zone. | `string` | n/a | yes |
-| `release` | natpair release tag the pair runs, such as v0.1.0. New NATs install it at first boot. Changing it pins a new release, which the NATs roll out to themselves one at a time. | `string` | n/a | yes |
+| `release` | natpair release tag the pair runs, such as v0.1.1. New NATs install it at first boot. Changing it pins a new release, which the NATs roll out to themselves one at a time. | `string` | n/a | yes |
 | `release_sha256` | SHA-256 of the release's natpair_linux_arm64.tar.gz, from its checksums.txt. | `string` | n/a | yes |
 | `shared_eip_allocation_id` | Allocation ID of the Elastic IP for the shared ENI, the address worker traffic leaves from. It must not be associated with anything else. The module associates it but never creates or releases it, so the address outlives the pair. It may come from a resource created in the same apply. | `string` | n/a | yes |
 | `create_dynamodb_endpoint` | Whether to add a DynamoDB gateway endpoint to the public route table. A route table can use only one, so set it to false for a second pair whose public route table already has one. | `bool` | `true` | no |
