@@ -1,0 +1,26 @@
+# Weekly update pull requests, grouped per ecosystem so each week brings at
+# most one pull request for each. The workflows pin actions by commit SHA,
+# and Dependabot updates the SHA and its version comment together.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: terraform
+    directories: ["/terraform", "/examples/*"]
+    schedule:
+      interval: weekly
+    groups:
+      terraform:
+        patterns: ["*"]

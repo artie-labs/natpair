@@ -372,7 +372,9 @@ func TestCampaign(t *testing.T) {
 			l.ns(owner, l.binary, "fence-close", "--config", l.paths[owner])
 		}
 		rules := l.ns(owner, "iptables", "-S", "FORWARD")
-		l.require(strings.Count(rules, "-j NATPAIR") == 2, "guard jumps do not stack after restarts: "+rules)
+		// One jump each way per protected CIDR, however often the fence restarts.
+		jumps := 2 * len(l.configs[owner].ProtectedCIDRs)
+		l.require(strings.Count(rules, "-j NATPAIR") == jumps, "guard jumps do not stack after restarts: "+rules)
 		l.require(!l.fresh(), "the fence starts closed")
 		deadline := bootclock.Now() + 1500*time.Millisecond
 		l.writeDeadline(owner, deadline)
@@ -381,7 +383,7 @@ func TestCampaign(t *testing.T) {
 		l.require(!l.fresh(), "forwarding stops at the deadline without a controller")
 		l.writeDeadline(owner, deadline)
 		l.require(!l.fresh(), "rewriting the expired deadline keeps forwarding closed")
-		return map[string]any{"guard_jumps_after_three_restarts": 2, "forwarded_before_deadline": true, "blocked_after_deadline": true, "expired_rewrite_blocked": true, "controller_running": false}
+		return map[string]any{"guard_jumps_after_three_restarts": jumps, "forwarded_before_deadline": true, "blocked_after_deadline": true, "expired_rewrite_blocked": true, "controller_running": false}
 	})
 }
 
@@ -492,7 +494,10 @@ func (l *lab) setup() {
 		l.configs[nat.name] = config.NAT{
 			LeaseTable: "campaign", SharedENI: "eni-shared", SharedAddress: netip.MustParsePrefix(sharedWAN + "/24"),
 			SharedPublicIP: netip.MustParseAddr(sharedWAN),
-			ProtectedCIDRs: []netip.Prefix{netip.MustParsePrefix("10.94.1.0/24")},
+			// The sync subnet holds each NAT's own address for its lease calls,
+			// as a VPC-wide protected CIDR holds the NAT's own address on AWS.
+			// Its own traffic must still leave from that address.
+			ProtectedCIDRs: []netip.Prefix{netip.MustParsePrefix("10.94.1.0/24"), netip.MustParsePrefix("10.94.3.0/24")},
 			ProbeURL:       "https://" + receiverAddr + "/nat",
 			PeerIP:         netip.MustParseAddr(fmt.Sprintf("10.94.2.%d", nat.peer)),
 		}

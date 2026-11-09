@@ -135,19 +135,23 @@ func TestClaimShared(t *testing.T) {
 
 func TestDropStale(t *testing.T) {
 	{
-		// Each worker subnet's entries are deleted. A subnet with none isn't an error.
+		// Only entries translated to the shared address are deleted, so the
+		// NAT's own connections survive even when the protected CIDRs are the
+		// whole VPC and hold its own address. None to delete isn't an error.
+		cfg := testConfig(t)
+		cfg.ProtectedCIDRs = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16")}
 		log := &commandLog{fail: map[string]error{
-			"conntrack -D -s 10.0.32.0/20": errors.New("conntrack failed: exit status 1: conntrack v1.4.6 (conntrack-tools): 0 flow entries have been deleted."),
+			"conntrack -D --reply-dst 10.0.1.100": errors.New("conntrack failed: exit status 1: conntrack v1.4.6 (conntrack-tools): 0 flow entries have been deleted."),
 		}}
-		n := network.New(testConfig(t), &mocks.FakeNetworkFence{}, log.runner())
+		n := network.New(cfg, &mocks.FakeNetworkFence{}, log.runner())
 		require.NoError(t, n.DropStale(t.Context()))
-		assert.Equal(t, []string{"conntrack -D -s 10.0.16.0/20", "conntrack -D -s 10.0.32.0/20"}, log.commands)
+		assert.Equal(t, []string{"conntrack -D --reply-dst 10.0.1.100"}, log.commands)
 	}
 	{
 		// Any other failure is reported
-		log := &commandLog{fail: map[string]error{"conntrack -D -s 10.0.16.0/20": errors.New("conntrack failed: exit status 1: operation not permitted")}}
+		log := &commandLog{fail: map[string]error{"conntrack -D --reply-dst 10.0.1.100": errors.New("conntrack failed: exit status 1: operation not permitted")}}
 		n := network.New(testConfig(t), &mocks.FakeNetworkFence{}, log.runner())
-		assert.ErrorContains(t, n.DropStale(t.Context()), "failed to drop out-of-date connections from 10.0.16.0/20")
+		assert.EqualError(t, n.DropStale(t.Context()), "failed to drop out-of-date connections to 10.0.1.100: conntrack failed: exit status 1: operation not permitted")
 	}
 }
 
@@ -156,6 +160,8 @@ func TestPrepareNetwork(t *testing.T) {
 	require.NoError(t, network.New(testConfig(t), &mocks.FakeNetworkFence{}, log.runner()).PrepareNetwork(t.Context()))
 	require.Len(t, log.inputs, 1)
 	assert.Equal(t, "*nat\n:NATPAIR_SNAT - [0:0]\n-F NATPAIR_SNAT\n"+
+		// The NAT's own connections keep their own address.
+		"-A NATPAIR_SNAT -m addrtype --src-type LOCAL -j RETURN\n"+
 		// Workers and the shared canary leave with the shared ENI's IP.
 		"-A NATPAIR_SNAT -s 10.0.16.0/20 -j SNAT --to-source 10.0.1.100\n"+
 		"-A NATPAIR_SNAT -s 10.0.32.0/20 -j SNAT --to-source 10.0.1.100\n"+
@@ -168,6 +174,13 @@ func TestPrepareNetwork(t *testing.T) {
 	assert.NotContains(t, log.commands, "ip rule add from 10.0.16.0/20 lookup 7001 priority 7001")
 	assert.NotContains(t, log.commands, "ip rule add from 198.18.0.6/32 lookup 7001 priority 7001")
 	assert.Contains(t, log.commands, "ip rule add from 10.0.32.0/20 lookup 7001 priority 7001")
+	// The NAT's own traffic from the shared address uses the shared table, and
+	// the rest of its own traffic the main table, both ahead of the shared rules.
+	shared := slices.Index(log.commands, "ip rule add from 10.0.1.100 lookup 7001 priority 6999")
+	local := slices.Index(log.commands, "ip rule add iif lo lookup main priority 7000")
+	require.GreaterOrEqual(t, shared, 0)
+	assert.Less(t, shared, local)
+	assert.Less(t, local, slices.Index(log.commands, "ip rule add from 10.0.32.0/20 lookup 7001 priority 7001"))
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C FORWARD -s 10.0.16.0/20 -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT")
 	// Worker packets from unknown connections are reset, not dropped in silence.
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C FORWARD -s 10.0.32.0/20 -p tcp -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset")

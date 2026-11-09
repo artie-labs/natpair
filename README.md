@@ -141,14 +141,14 @@ You need:
 
 - a VPC with a public subnet whose route table sends `0.0.0.0/0` to an
   internet gateway,
-- private subnets whose route tables have no default route yet, because the
-  module adds one,
+- private subnets whose route tables you can point at the pair,
 - Terraform 1.6 or later with the AWS provider 6.x, and
 - permission to create the [resources the module creates](terraform/README.md#resources),
   including `iam:PassRole` for the NATs' role.
 
 If your private subnets use a NAT Gateway today, follow
-[Move from a NAT Gateway](docs/operations.md#move-from-a-nat-gateway) instead.
+[Move from a NAT Gateway](docs/operations.md#move-from-a-nat-gateway)
+instead.
 
 1. Pick a release on the
    [releases page](https://github.com/artie-labs/natpair/releases) and get the
@@ -158,7 +158,8 @@ If your private subnets use a NAT Gateway today, follow
    curl -sL https://github.com/artie-labs/natpair/releases/download/v0.1.0/checksums.txt | grep linux_arm64
    ```
 
-2. Add the module:
+2. Add the module, and point each private route table's default route at the
+   shared ENI:
 
    ```hcl
    resource "aws_eip" "nat" {
@@ -174,21 +175,28 @@ If your private subnets use a NAT Gateway today, follow
      public_subnet_id         = "subnet-0123456789abcdef0"
      public_route_table_id    = "rtb-0123456789abcdef0"
      shared_eip_allocation_id = aws_eip.nat.allocation_id
-     worker_route_table_ids   = ["rtb-0fedcba9876543210"]
-     worker_cidrs             = ["10.0.16.0/20"]
 
      instance_type = "c7gn.medium"
 
      release        = "v0.1.0"
      release_sha256 = "<64 hex digits from checksums.txt>"
    }
+
+   resource "aws_route" "private_default" {
+     route_table_id         = "rtb-0fedcba9876543210"
+     destination_cidr_block = "0.0.0.0/0"
+     network_interface_id   = module.natpair.shared_eni_id
+   }
    ```
 
    Keep the Elastic IP outside the module, as here, so it outlives the pair.
+   The NATs forward traffic from anywhere in the VPC, so any subnet you route
+   to the shared ENI works. Set `worker_cidrs` to narrow that.
 
 3. Run `terraform apply`. Each NAT installs natpair at first boot and reboots
-   into it. Workers can't reach the internet until one NAT logs
-   `forwarding open`.
+   into it. Workers routed to the pair can't reach the internet until one NAT
+   logs `forwarding open`. To avoid that gap, apply without the routes first,
+   wait for `forwarding open`, then add them.
 
 4. Check the pair, as in [Verify a new pair](docs/operations.md#verify-a-new-pair).
 
@@ -199,8 +207,7 @@ If your private subnets use a NAT Gateway today, follow
 
 - **One availability zone per pair.** An ENI can't move between zones, so both
   NATs live in the public subnet's zone. For a pair in each zone, give each
-  pair its own public route table, because of the DynamoDB endpoint below, and
-  a different `name` and `pair_id`.
+  pair a different `name` and `pair_id`, and see the DynamoDB endpoint below.
 - **Only TCP over IPv4 survives a takeover.** UDP and ICMP are forwarded but
   not copied, so they start over. natpair doesn't forward IPv6.
 - **arm64 only.** The NATs run Graviton instance types. Releases also include
@@ -208,15 +215,15 @@ If your private subnets use a NAT Gateway today, follow
 - **About 64,000 connections per destination.** All worker traffic shares one
   public IP, so it can hold about 64,000 connections at once to the same
   destination address, port and protocol, much like a NAT Gateway.
-- **A DynamoDB gateway endpoint.** The module adds one to the public route
-  table and the worker route tables, so the lease doesn't depend on the path
-  the NATs forward. All other DynamoDB traffic from those subnets uses it too.
-  A route table can use only one DynamoDB gateway endpoint, so the apply fails
-  if yours already has one.
-- **Some changes need new NATs.** Running NATs keep what they got at first
-  boot, including `worker_cidrs`, so a new worker subnet needs new NATs before
-  it gets a route. A new instance type restarts them. Change one NAT per
-  apply, as in [Replace a NAT](docs/operations.md#replace-a-nat).
+- **A DynamoDB gateway endpoint on the public route table.** The module adds
+  one, so the lease doesn't depend on the path the NATs forward. Other
+  DynamoDB traffic from the public subnet uses it too. A route table can use
+  only one DynamoDB gateway endpoint, so if yours already has one, or a second
+  pair shares the table, set `create_dynamodb_endpoint = false`.
+- **Some changes need new NATs.** Running NATs keep the image and
+  configuration they got at first boot, and a new instance type restarts
+  them. Change one NAT per apply, as in
+  [Replace a NAT](docs/operations.md#replace-a-nat).
 
 ## Documentation
 

@@ -28,8 +28,14 @@ const (
 	commandTimeout = 2 * time.Second
 	// sharedTable is the route table, and the priority of the rules that use
 	// it, for traffic leaving through the shared ENI.
-	sharedTable         = "7001"
-	interfaceWaitPeriod = 3 * time.Second
+	sharedTable = "7001"
+	// sharedSourcePriority and localPriority order the rules for traffic this
+	// NAT sends itself. Packets from the shared address use the shared table,
+	// and everything else it sends uses the main table. Both come before the
+	// shared table's rules for forwarded traffic.
+	sharedSourcePriority = 6999
+	localPriority        = 7000
+	interfaceWaitPeriod  = 3 * time.Second
 	// networkdFile tells systemd-networkd to leave the shared ENI alone. Its
 	// low number makes it the first file that matches the interface.
 	networkdFile = "/etc/systemd/network/10-natpair-shared.network"
@@ -228,6 +234,9 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 	cfg := n.cfg
 	shared := cfg.SharedAddress.Addr()
 	rules := "*nat\n:" + snatChain + " - [0:0]\n-F " + snatChain + "\n"
+	// The protected CIDRs may hold this NAT's own addresses, such as when they
+	// are the whole VPC. Its own connections keep their own address.
+	rules += "-A " + snatChain + " -m addrtype --src-type LOCAL -j RETURN\n"
 	for _, source := range n.sharedSources() {
 		rules += fmt.Sprintf("-A %s -s %s -j SNAT --to-source %s\n", snatChain, source, shared)
 	}
@@ -270,11 +279,12 @@ func (n *Network) ensureSharedRules(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var existing []routingRule
-	if output != "" {
-		if err := json.Unmarshal([]byte(output), &existing); err != nil {
-			return fmt.Errorf("failed to parse routing rules: %w", err)
-		}
+	existing, err := parseRules(output)
+	if err != nil {
+		return err
+	}
+	if err := n.ensureLocalRules(ctx, existing); err != nil {
+		return err
 	}
 	for _, source := range n.sharedSources() {
 		present := slices.ContainsFunc(existing, func(rule routingRule) bool {
@@ -288,6 +298,51 @@ func (n *Network) ensureSharedRules(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ensureLocalRules routes traffic this NAT sends itself. The shared table's
+// rules match sources, and the protected CIDRs may hold this NAT's own
+// addresses, such as when they are the whole VPC. Its AWS API calls, lease
+// renewals and conntrackd traffic must not leave through the shared ENI, so
+// `iif lo`, which matches only packets that start on this host, sends them to
+// the main table. Packets from the shared address, such as the resets
+// protectHost sends remote servers after a takeover, must leave through the
+// shared ENI, the only path where AWS maps that address to the shared Elastic
+// IP. On a standby the shared table is empty, so they fall through.
+// sharedRules lists the shared table's rules.
+func (n *Network) ensureLocalRules(ctx context.Context, sharedRules []routingRule) error {
+	shared := n.cfg.SharedAddress.Addr().String()
+	if !slices.ContainsFunc(sharedRules, func(rule routingRule) bool {
+		return rule.Priority == sharedSourcePriority && rule.Src == shared && rule.prefixLength() == 32
+	}) {
+		if _, err := n.run.Run(ctx, commandTimeout, "ip", "rule", "add", "from", shared, "lookup", sharedTable, "priority", strconv.Itoa(sharedSourcePriority)); err != nil {
+			return err
+		}
+	}
+	output, err := n.run.Run(ctx, commandTimeout, "ip", "-j", "rule", "show", "table", "main")
+	if err != nil {
+		return err
+	}
+	mainRules, err := parseRules(output)
+	if err != nil {
+		return err
+	}
+	if slices.ContainsFunc(mainRules, func(rule routingRule) bool { return rule.Priority == localPriority && rule.Iif == "lo" }) {
+		return nil
+	}
+	_, err = n.run.Run(ctx, commandTimeout, "ip", "rule", "add", "iif", "lo", "lookup", "main", "priority", strconv.Itoa(localPriority))
+	return err
+}
+
+func parseRules(output string) ([]routingRule, error) {
+	var rules []routingRule
+	if output == "" {
+		return nil, nil
+	}
+	if err := json.Unmarshal([]byte(output), &rules); err != nil {
+		return nil, fmt.Errorf("failed to parse routing rules: %w", err)
+	}
+	return rules, nil
 }
 
 // EnsureForwarding turns IPv4 forwarding back on if something turned it off,
@@ -327,20 +382,22 @@ func (n *Network) ClaimShared(ctx context.Context, mac string) error {
 	return err
 }
 
-// DropStale deletes this NAT's own entries for worker connections. A takeover
-// runs it when the shared ENI is on the other NAT, which has served since
-// this NAT last did, so these entries are out of date. An entry for a
-// connection that has since ended can hold a shared address and port that
-// the other NAT gave a new connection, and the copy of that connection then
-// fails to install. On AWS, a NAT whose daemon was killed reset such a
-// connection when ownership came back to it.
+// DropStale deletes this NAT's own entries for connections translated to the
+// shared address. A takeover runs it when the shared ENI is on the other NAT,
+// which has served since this NAT last did, so these entries are out of date.
+// An entry for a connection that has since ended can hold a shared address
+// and port that the other NAT gave a new connection, and the copy of that
+// connection then fails to install. On AWS, a NAT whose daemon was killed
+// reset such a connection when ownership came back to it.
+//
+// Matching the translated address, not the protected CIDRs, leaves this
+// NAT's own connections alone when the CIDRs hold its own address.
 func (n *Network) DropStale(ctx context.Context) error {
-	for _, cidr := range n.cfg.ProtectedCIDRs {
-		_, err := n.run.Run(ctx, commandTimeout, "conntrack", "-D", "-s", cidr.String())
-		// conntrack fails when it finds nothing to delete.
-		if err != nil && !strings.Contains(err.Error(), "0 flow entries have been deleted") {
-			return fmt.Errorf("failed to drop out-of-date connections from %s: %w", cidr, err)
-		}
+	shared := n.cfg.SharedAddress.Addr().String()
+	_, err := n.run.Run(ctx, commandTimeout, "conntrack", "-D", "--reply-dst", shared)
+	// conntrack fails when it finds nothing to delete.
+	if err != nil && !strings.Contains(err.Error(), "0 flow entries have been deleted") {
+		return fmt.Errorf("failed to drop out-of-date connections to %s: %w", shared, err)
 	}
 	return nil
 }
@@ -387,8 +444,10 @@ type link struct {
 
 // routingRule is one entry of `ip -j rule show`.
 type routingRule struct {
-	Src    string `json:"src"`
-	SrcLen int    `json:"srclen"`
+	Priority int    `json:"priority"`
+	Iif      string `json:"iif"`
+	Src      string `json:"src"`
+	SrcLen   int    `json:"srclen"`
 }
 
 // prefixLength returns the rule's source prefix length. `ip` leaves out

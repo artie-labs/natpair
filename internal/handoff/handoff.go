@@ -57,8 +57,8 @@ type EC2 interface {
 type Local interface {
 	// PrepareNetwork installs SNAT and routing rules for the shared ENI.
 	PrepareNetwork(ctx context.Context) error
-	// DropStale deletes this NAT's own entries for worker connections, which
-	// are out of date once the other NAT has served.
+	// DropStale deletes this NAT's own entries for connections translated to
+	// the shared address, which are out of date once the other NAT has served.
 	DropStale(ctx context.Context) error
 	// CommitState installs connection state copied from the old NAT. If it
 	// fails, the takeover continues without the copies.

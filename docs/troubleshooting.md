@@ -20,11 +20,12 @@ symptom or a log message.
    in `/var/log/cloud-init-output.log`. The usual causes are a download that
    keeps failing and a SHA-256 that doesn't match the release
    (`release.tar.gz: FAILED`).
-3. **Is the worker's subnet in `worker_cidrs`?** The NATs translate and
-   forward traffic only from those CIDRs. A subnet routed to the pair but
-   missing from `worker_cidrs` gets no internet access.
-4. **Does the worker's route table send `0.0.0.0/0` to the shared ENI?** The
-   module adds this route to each table in `worker_route_table_ids`.
+3. **Does the worker's route table send `0.0.0.0/0` to the shared ENI?** Its
+   target must be the module's `shared_eni_id`.
+4. **Is the worker inside `worker_cidrs`?** The NATs forward traffic only from
+   those CIDRs, which default to the VPC's. If you set them yourself, a subnet
+   routed to the pair but missing from them gets no internet access. So does
+   one in a CIDR added to the VPC after the NATs launched.
 5. **Do the NATs' own uploads work?** If the owner's health rounds show
    `"healthy":true` but workers still fail, the problem is between the
    workers and the NAT, such as a network ACL or the workers' security

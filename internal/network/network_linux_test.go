@@ -56,3 +56,39 @@ func TestSharedRules(t *testing.T) {
 	assert.Contains(t, rules, "from 10.0.16.0/20 lookup 7001")
 	assert.Contains(t, rules, "from 198.18.0.6 lookup 7001")
 }
+
+func TestOwnTrafficStaysOnMain(t *testing.T) {
+	// The protected CIDRs are the whole VPC, so they hold the NAT's own
+	// address, and the shared table sends everything out another interface.
+	cfg := testConfig(t)
+	cfg.ProtectedCIDRs = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16")}
+	for _, link := range []string{"own-test", "shared-test2"} {
+		run(t, "ip", "link", "add", link, "type", "dummy")
+		run(t, "ip", "link", "set", link, "up")
+		t.Cleanup(func() {
+			_, err := command.Run(context.WithoutCancel(t.Context()), 2*time.Second, "ip", "link", "del", link)
+			assert.NoError(t, err)
+		})
+	}
+	run(t, "ip", "addr", "add", "10.0.1.10/24", "dev", "own-test")
+	run(t, "ip", "addr", "add", "10.0.1.100/24", "dev", "own-test")
+	run(t, "ip", "route", "add", "default", "dev", "shared-test2", "table", "7001")
+	t.Cleanup(func() {
+		for _, rule := range [][]string{{"from", "10.0.0.0/16", "lookup", "7001"}, {"from", "10.0.1.100", "lookup", "7001", "priority", "6999"}} {
+			_, err := command.Run(context.WithoutCancel(t.Context()), 2*time.Second, "ip", append([]string{"rule", "del"}, rule...)...)
+			assert.NoError(t, err)
+		}
+	})
+
+	n := network.New(cfg, &mocks.FakeNetworkFence{}, network.SystemRunner{})
+	require.NoError(t, n.PrepareNetwork(t.Context()))
+	assert.NotContains(t, run(t, "ip", "route", "get", "203.0.113.9", "from", "10.0.1.10"), "shared-test2")
+	// Its traffic from the shared address, such as resets to remote servers,
+	// leaves through the shared table.
+	assert.Contains(t, run(t, "ip", "route", "get", "203.0.113.9", "from", "10.0.1.100"), "shared-test2")
+
+	// Without the local rule, the NAT's own traffic would leave through the
+	// shared table.
+	run(t, "ip", "rule", "del", "iif", "lo", "lookup", "main", "priority", "7000")
+	assert.Contains(t, run(t, "ip", "route", "get", "203.0.113.9", "from", "10.0.1.10"), "shared-test2")
+}

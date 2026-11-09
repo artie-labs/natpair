@@ -6,9 +6,9 @@ each with its own ENI and Elastic IP, plus the shared ENI that moves between
 them. It also creates the DynamoDB lease table, the NATs' IAM role and security
 group, a DynamoDB gateway endpoint, and a Lambda function URL that the NATs
 send health probes to. It associates the Elastic IP you pass in with the shared
-ENI and points each worker route table's default route at that ENI. NATs
-install the pinned natpair release at first boot and check it against
-`release_sha256`.
+ENI. You point each private route table's default route at that ENI, the
+`shared_eni_id` output. NATs install the pinned natpair release at first boot
+and check it against `release_sha256`.
 
 ## Usage
 
@@ -26,8 +26,6 @@ module "natpair" {
   public_subnet_id         = "subnet-0123456789abcdef0"
   public_route_table_id    = "rtb-0123456789abcdef0"
   shared_eip_allocation_id = aws_eip.shared.allocation_id
-  worker_route_table_ids   = ["rtb-0fedcba9876543210"]
-  worker_cidrs             = ["10.0.16.0/20"]
 
   instance_type = "c7gn.medium"
 
@@ -35,6 +33,12 @@ module "natpair" {
   # From checksums.txt in the v0.1.0 GitHub release, the line for
   # natpair_linux_arm64.tar.gz.
   release_sha256 = "<64 hex digits>"
+}
+
+resource "aws_route" "private_default" {
+  route_table_id         = "rtb-0fedcba9876543210"
+  destination_cidr_block = "0.0.0.0/0"
+  network_interface_id   = module.natpair.shared_eni_id
 }
 ```
 
@@ -47,9 +51,8 @@ See [`examples/`](../examples) for complete configurations.
 - the shared ENI, `<name>-shared`, and the association of your Elastic IP
   with it
 - a security group, `<name>`
-- a default route to the shared ENI in each worker route table
-- a DynamoDB gateway endpoint on the public route table and the worker route
-  tables
+- a DynamoDB gateway endpoint on the public route table, unless
+  `create_dynamodb_endpoint` is false
 - a DynamoDB table, `<name>`, with on-demand billing, and the item that pins
   the release
 - an IAM role, instance profile and policy for the NATs, `<name>`
@@ -95,12 +98,12 @@ the policy applies. They need no action.
 | `release` | natpair release tag the pair runs, such as v0.1.0. New NATs install it at first boot. Changing it pins a new release, which the NATs roll out to themselves one at a time. | `string` | n/a | yes |
 | `release_sha256` | SHA-256 of the release's natpair_linux_arm64.tar.gz, from its checksums.txt. | `string` | n/a | yes |
 | `shared_eip_allocation_id` | Allocation ID of the Elastic IP for the shared ENI, the address worker traffic leaves from. It must not be associated with anything else. The module associates it but never creates or releases it, so the address outlives the pair. It may come from a resource created in the same apply. | `string` | n/a | yes |
-| `worker_cidrs` | CIDRs of the worker subnets. The NATs forward traffic only from these, so include every subnet whose route table is in worker_route_table_ids. NATs read it at first boot, so changing it needs new NATs. | `list(string)` | n/a | yes |
-| `worker_route_table_ids` | Route tables of the worker subnets, the private subnets whose internet traffic goes through the pair. Each gets a default route to the shared ENI and the DynamoDB gateway endpoint. | `list(string)` | n/a | yes |
+| `create_dynamodb_endpoint` | Whether to add a DynamoDB gateway endpoint to the public route table. A route table can use only one, so set it to false for a second pair whose public route table already has one. | `bool` | `true` | no |
 | `datadog_api_key_secret_arn` | ARN of a Secrets Manager secret whose value is the Datadog API key alone, as plaintext. It may be in another region: NATs read it once, at first boot, so one secret can serve every pair, and changing it needs new NATs. When set, each NAT installs the Datadog agent at first boot. The agent ships natpair's logs and the host's metrics, including the connection table's size, tagged service:natpair. Null leaves the agent out. | `string` | `null` | no |
 | `datadog_site` | Datadog site the agent reports to, such as datadoghq.com or datadoghq.eu. NATs read it at first boot, so changing it needs new NATs. | `string` | `"datadoghq.com"` | no |
 | `max_connections` | Most connections each NAT tracks and copies to its peer, a power of two from 65,536 to 4,194,304. Null uses natpair's default, 262,144. A full table costs about 80 MB per 262,144 connections in the kernel, and as much again in conntrackd. NATs read it at first boot, so changing it needs new NATs. | `number` | `null` | no |
 | `release_url` | Where NATs download releases from: an https:// or s3:// prefix that holds &lt;tag&gt;/natpair_linux_arm64.tar.gz. The default is natpair's GitHub releases. The module grants the NATs' IAM role read access to an s3:// mirror. NATs read it at first boot, so changing it needs new NATs. | `string` | `"https://github.com/artie-labs/natpair/releases/download"` | no |
+| `worker_cidrs` | Source CIDRs the NATs forward and translate to the shared address. Null, the default, means every CIDR of the VPC, so any subnet whose default route points at the shared ENI works. NATs read it at first boot, so changing it needs new NATs. | `list(string)` | `null` | no |
 
 ## Outputs
 
@@ -109,6 +112,6 @@ the policy applies. They need no action.
 | `nat_instance_ids` | Instance IDs of NAT a and NAT b. |
 | `nat_public_ips` | Each NAT's own Elastic IP, which its own-path probes leave from. |
 | `receiver_url` | Probe receiver URL. The NATs sign their uploads to it with their role's credentials. |
-| `shared_eni_id` | The shared ENI that moves between the NATs. |
+| `shared_eni_id` | The shared ENI that moves between the NATs. Point each private route table's 0.0.0.0/0 route at it. |
 | `shared_public_ip` | The shared Elastic IP that worker traffic leaves through. |
 | `table_name` | Lease table name. |

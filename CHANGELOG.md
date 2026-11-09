@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survive a failover.
 - Self-updating releases. Each pair is pinned to a release tag and the SHA-256
   of its tarball, and the NATs roll a new pin out one at a time.
-- A Terraform module that deploys the whole pair into an existing VPC.
+- A Terraform module that deploys the whole pair into an existing VPC. You
+  point your route tables at its `shared_eni_id` output, and the NATs forward
+  traffic from every CIDR of the VPC unless you set `worker_cidrs`.
 - Optional Datadog agent that ships natpair's logs and host metrics.
 
 [0.1.0]: https://github.com/artie-labs/natpair/releases/tag/v0.1.0

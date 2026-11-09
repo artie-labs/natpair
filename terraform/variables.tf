@@ -18,20 +18,27 @@ variable "public_route_table_id" {
   type        = string
 }
 
+variable "create_dynamodb_endpoint" {
+  description = "Whether to add a DynamoDB gateway endpoint to the public route table. A route table can use only one, so set it to false for a second pair whose public route table already has one."
+  type        = bool
+  default     = true
+}
+
 variable "shared_eip_allocation_id" {
   description = "Allocation ID of the Elastic IP for the shared ENI, the address worker traffic leaves from. It must not be associated with anything else. The module associates it but never creates or releases it, so the address outlives the pair. It may come from a resource created in the same apply."
   type        = string
   nullable    = false
 }
 
-variable "worker_route_table_ids" {
-  description = "Route tables of the worker subnets, the private subnets whose internet traffic goes through the pair. Each gets a default route to the shared ENI and the DynamoDB gateway endpoint."
-  type        = list(string)
-}
-
 variable "worker_cidrs" {
-  description = "CIDRs of the worker subnets. The NATs forward traffic only from these, so include every subnet whose route table is in worker_route_table_ids. NATs read it at first boot, so changing it needs new NATs."
+  description = "Source CIDRs the NATs forward and translate to the shared address. Null, the default, means every CIDR of the VPC, so any subnet whose default route points at the shared ENI works. NATs read it at first boot, so changing it needs new NATs."
   type        = list(string)
+  default     = null
+
+  validation {
+    condition     = var.worker_cidrs == null || length(coalesce(var.worker_cidrs, [])) > 0
+    error_message = "worker_cidrs must be null or hold at least one CIDR."
+  }
 }
 
 variable "instance_type" {
