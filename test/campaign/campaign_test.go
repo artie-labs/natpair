@@ -405,7 +405,10 @@ func (l *lab) runCase(name string, fn func() map[string]any) {
 
 func (l *lab) setup() {
 	l.binary = filepath.Join(l.out, "natpair")
-	l.run("go", "build", "-tags", "localfixture", "-o", l.binary, "../../cmd/natpair")
+	// The checkout is mounted into the container, so on a Linux host it belongs
+	// to another user than the container's root, and git refuses to read it.
+	// The test binary needs no version control stamp.
+	l.run("go", "build", "-buildvcs=false", "-tags", "localfixture", "-o", l.binary, "../../cmd/natpair")
 	// Persistent mount namespaces must be pinned on a private mount.
 	require.NoError(l.t, os.MkdirAll(machinesDir, 0o700))
 	require.NoError(l.t, syscall.Mount(machinesDir, machinesDir, "", syscall.MS_BIND, ""))
