@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A serving NAT's ready flag no longer flickers. It now stays ready for three
+  of the standby's 5 s rounds after confirming a copy of the standby's
+  connections, not three of its own 1 s rounds, which ran out between the
+  standby's probes.
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed
