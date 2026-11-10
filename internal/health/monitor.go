@@ -39,7 +39,8 @@ const (
 	// flowRounds is how many rounds a probe connection is advertised to the
 	// peer as evidence for replication.
 	flowRounds = 3
-	// replicationRounds is how many rounds one confirmed copy keeps this NAT ready.
+	// replicationRounds is how many of the peer's rounds one confirmed copy
+	// keeps this NAT ready.
 	replicationRounds = 3
 	// requiredSuccesses is the number of consecutive healthy rounds before
 	// this NAT counts as able to forward.
@@ -368,7 +369,16 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	if verified {
 		m.replicated, m.lastReplication = true, now
 	}
-	recent := m.replicated && now-m.lastReplication <= replicationRounds*roundInterval
+	// The peer's probe connections are the evidence, so the window follows the
+	// peer's rounds. A serving NAT's peer stands by and probes every
+	// StandbyInterval, and each probe's copy lasts about as long as the
+	// upload. A window of the owner's own rounds expired between them, so the
+	// owner's ready flickered.
+	window := replicationRounds * roundInterval
+	if serving {
+		window = replicationRounds * StandbyInterval
+	}
+	recent := m.replicated && now-m.lastReplication <= window
 
 	inhibited := m.deps.Inhibited()
 	// conntrackd isn't required to forward. A NAT without it takes over without

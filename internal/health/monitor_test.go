@@ -205,6 +205,30 @@ func TestRoundReplication(t *testing.T) {
 	assert.False(t, report.PeerCanTakeover)
 }
 
+func TestRoundOwnerReplicationWindow(t *testing.T) {
+	// The standby probes only every StandbyInterval, and each probe's copy
+	// leaves the owner's cache once the upload ends. One confirmed copy keeps
+	// the owner ready until the standby's next probes, not just for three of
+	// the owner's own rounds.
+	flow := probe.Flow{Src: netip.MustParseAddr("172.31.94.10"), Dst: netip.MustParseAddr("192.0.2.1"), SrcPort: 40000, DstPort: 443}
+	cache := "tcp 6 ESTABLISHED src=172.31.94.10 dst=192.0.2.1 sport=40000 dport=443 src=192.0.2.1 dst=192.0.2.200 sport=443 dport=40000\n"
+
+	f := newFixture(t)
+	f.serving = true
+	f.peer = &health.Report{Ready: true, CanTakeover: true, Flows: []probe.Flow{flow}}
+	f.conntrack.StatsReturns(stats(4, 1), nil)
+	f.conntrack.ExternalCacheReturns(cache, nil)
+	assert.True(t, f.rounds(t, 2).Ready)
+
+	// Between the standby's probes, no copy is confirmed.
+	f.conntrack.ExternalCacheReturns("", nil)
+	// Three of the standby's rounds is fifteen of the owner's.
+	for i := range 15 {
+		assert.True(t, f.rounds(t, 1).Ready, "round %d after the last copy", i+1)
+	}
+	assert.False(t, f.rounds(t, 1).Ready)
+}
+
 func TestRoundOldest(t *testing.T) {
 	// A NAT publishes its oldest connections, and reads them from conntrackd
 	// again only every StandbyInterval, because that dumps the whole cache.
