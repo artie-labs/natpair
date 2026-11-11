@@ -111,6 +111,75 @@ compares it with the release it runs.
 A release that never gets ready stays on the standby, so traffic stays on the
 old release. See [operations](operations.md#upgrade) for the steps.
 
+## Pacing forwarded traffic
+
+Pacing is optional and off by default. Turn it on with the module's
+`pacing` input, as in [operations](operations.md#pace-forwarded-traffic).
+
+AWS limits each instance's bandwidth in each direction and its packets per
+second. Above a limit, the hypervisor drops packets at random from every
+flow. That includes the lease renewals and connection copies the pair
+depends on, so one worker sending too much can slow every worker and put the
+lease at risk. With pacing on, the NAT keeps forwarded traffic just under
+the limits itself. A worker that sends too much slows to its fair share, and
+the others barely notice.
+
+**Which packets.** Uploads, from workers to the internet, leave through the
+shared ENI. Downloads, from the internet to workers, leave through the NAT's
+own interface, because only traffic from the worker CIDRs uses the shared
+ENI's route table. AWS counts both against the same limits, so both are
+paced against one budget. A small BPF program on every interface copies each
+arriving packet's source address into its mark. A packet the NAT sends
+itself has no mark, so lease renewals, probes, conntrackd's copies and AWS
+API calls are never paced. The mark also tells which worker sent an upload
+after source NAT has replaced its address.
+
+**How a packet waits.** A second BPF program, on packets leaving, gives each
+forwarded worker packet a departure time, and `sch_fq` holds it until then.
+This is the earliest departure time model that Cilium's bandwidth manager
+uses. Each interface gets one `sch_fq` per transmit queue under `mq`, so CPUs
+don't share a qdisc lock. A packet that would have to wait more than 20 ms
+is dropped instead. That tells the sender to slow down and keeps the queues
+short.
+
+**Fair shares.** Each worker address has its own token bucket, in bytes and
+in packets, and all traffic shares one more. Four times a second the daemon
+looks at which workers had packets wait more than 1 ms. Workers that didn't
+keep what they use, and those that did split the rest of the cap equally.
+Below the cap, no worker waits. A packet that its worker's bucket delayed
+skips the shared bucket, so a heavy worker's queue never holds up the
+others. With the AWS VPC CNI, each pod has its own address, so each pod is
+its own worker.
+
+**Finding the cap.** The daemon reads the ENA driver's allowance counters,
+`bw_in_allowance_exceeded`, `bw_out_allowance_exceeded` and
+`pps_allowance_exceeded`, every second by default. Bandwidth and packet rate
+each have their own cap:
+
+- While the counters stay still and traffic presses the cap, it rises by 1%
+  a second.
+- When a counter moves, the cap drops to 80% of the rate forwarded at the
+  time, and the NAT remembers that rate. If the counters keep moving after
+  the cut, the next cut is to 50%.
+- The cap then climbs back to 95% of the remembered rate and stays there.
+  Every 5 minutes, and only while traffic presses it, it rises again to
+  check whether the limit went up.
+- When burst credits run out and the limit falls to the instance's baseline,
+  the counters move again and the cap follows it down.
+
+A NAT can start from a configured cap, or with no cap until the counters
+first move. A cut never takes a cap below 100 Mbit/s or 10,000 packets a
+second, because counters that move while forwarded traffic is lower than that
+come from other traffic.
+
+**Takeovers.** Pacing runs on its own and nothing waits for it, so it can't
+delay or stop a takeover, and forwarding works if it fails to load. Both
+NATs pace their own interface all the time. A new owner paces the shared ENI
+within a second of the ENI appearing. Each NAT keeps its caps in memory and
+starts again from the configured values when its daemon restarts. If no
+daemon renews the limits for 10 s, the kernel stops pacing, so a NAT whose
+daemon is gone, or runs a release without pacing, forwards unpaced.
+
 ## Network details
 
 - Both NATs and the shared ENI must be in one availability zone, because an

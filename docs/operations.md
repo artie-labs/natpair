@@ -12,6 +12,7 @@ match yours.
 - [Take a NAT out of service](#take-a-nat-out-of-service)
 - [Upgrade](#upgrade)
 - [Replace a NAT](#replace-a-nat)
+- [Pace forwarded traffic](#pace-forwarded-traffic)
 - [Monitoring](#monitoring)
 - [Download releases from your own S3 bucket](#download-releases-from-your-own-s3-bucket)
 - [Remove a pair](#remove-a-pair)
@@ -179,7 +180,7 @@ A NAT you put in maintenance by hand isn't upgraded until you run
 Running NATs keep the image, configuration and boot script they launched
 with. These changes need new NATs:
 
-- `worker_cidrs`, `max_connections`, `release_url`,
+- `worker_cidrs`, `max_connections`, `release_url`, `pacing`,
   `datadog_api_key_secret_arn` and `datadog_site`, and a new CIDR on the VPC
   when `worker_cidrs` is left at its default
 - a newer Amazon Linux image
@@ -221,6 +222,77 @@ Do the standby first, then hand over, then do the other NAT and run
 Changing only tags updates the NATs in place without a restart, so it's safe
 to apply to both at once.
 
+## Pace forwarded traffic
+
+Pacing keeps forwarded traffic just under the instance's network limits, so
+AWS doesn't drop packets at random, and splits the limit fairly between
+workers. [How natpair works](architecture.md#pacing-forwarded-traffic)
+explains it. It is off by default.
+
+To turn it on, set the module's `pacing` input and
+[replace the NATs](#replace-a-nat), the standby first:
+
+```hcl
+module "natpair" {
+  # ...
+  pacing = {
+    enabled    = true
+    start_mbps = 2900
+  }
+}
+```
+
+`start_mbps` is the bandwidth cap a NAT starts from. About 95% of the
+instance type's baseline bandwidth is a good start: 2,900 for a c7gn.medium,
+whose baseline is 3.125 Gbps. The cap rises from there while traffic presses
+it and AWS reports nothing. Leave it unset and a NAT forwards uncapped until
+AWS first reports exceeding the limit, then caps itself just below. Leave
+`start_kpps`, the packet rate cap, unset unless you know the instance's
+packet rate limit. AWS doesn't publish it.
+
+`poll_interval_ms` is how often a NAT reads the allowance counters. Keep the
+default, 1000, unless you know AWS refreshes the counters less often on your
+instance type.
+
+Pacing needs the `iproute-tc` package. NATs that boot with this module
+version install it.
+
+### Turn it off on a running NAT
+
+```sh
+sudo natpair pacing-off
+```
+
+The NAT removes its qdiscs and programs within a second, without a restart or
+a handover, and traffic flows unpaced. The request lasts across restarts and
+reboots until you run `sudo natpair pacing-on`. To turn pacing off for good,
+set `enabled = false` and replace the NATs. A daemon whose configuration
+turns pacing off removes anything an earlier daemon installed during the same
+boot. If no daemon renews the limits, for example after rolling `release`
+back to one without pacing, the kernel stops pacing within 10 s and forwards
+unpaced until the next reboot clears the rest. Removal puts back the kernel's
+default qdisc, not one you had installed yourself.
+
+### What to watch
+
+Each NAT that forwarded traffic logs `pacing status` every minute:
+
+| Field | Meaning |
+| --- | --- |
+| `cap_mbps`, `cap_kpps` | The caps the kernel enforces. 0 means no cap yet. |
+| `ceiling_mbps`, `ceiling_kpps` | The forwarded rate when AWS last reported exceeding the limit. The cap settles at 95% of it. |
+| `upload_mbps`, `download_mbps`, `upload_kpps`, `download_kpps` | Paced worker traffic in each direction, averaged over the minute. |
+| `worker_share_mbps`, `worker_share_kpps` | The most one worker may use right now. It is 97% of the cap while no worker has to wait. |
+| `waited_packets`, `dropped_packets` | Worker packets that waited more than 1 ms, and those dropped because they would have waited more than 20 ms. Drops are how pacing slows a heavy worker. |
+| `active_workers`, `waiting_workers` | Workers that sent in the last quarter second, and those whose packets waited more than 1 ms. |
+
+`the instance exceeded its network allowance` means AWS queued or dropped
+packets. It logs the counters' growth and what each cap did. A few after a
+start or a probe are how pacing finds the limit. If they keep coming at a
+steady cap, traffic pacing doesn't control is over the limit, such as the
+NAT's own traffic or bursts of inbound packets. Consider a larger instance
+type.
+
 ## Monitoring
 
 natpair tests its own uploads, not your workers' traffic. **Run an egress
@@ -237,6 +309,8 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `forced the stuck shared ENI detach. Stop and start the NAT it was attached to before it serves again.` is logged | That NAT needs a stop and start. See [troubleshooting](troubleshooting.md#forced-the-stuck-shared-eni-detach). |
 | `update` lines continue for more than an hour | An upgrade is stuck. The `reason` field says why. |
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |
+| `the instance exceeded its network allowance` is logged more than a few times an hour, with pacing on | Pacing can't keep traffic under the limit. See [What to watch](#what-to-watch). |
+| `failed to load pacing` or `failed to pace an interface` is logged | Forwarded traffic isn't paced. See [troubleshooting](troubleshooting.md#failed-to-load-pacing-so-forwarded-traffic-isnt-paced). |
 
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.
 It ships the logs of `natpair.service`, `natpair-bootstrap.service` and

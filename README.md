@@ -62,7 +62,9 @@ burst that doesn't last. AWS also caps traffic to the internet at 5 Gbps for
 instances with fewer than 32 vCPUs, whatever their bandwidth. Only one NAT
 forwards at a time, so each must carry the whole load on its own. If you're
 replacing a NAT Gateway, its peak `BytesOutToDestination` in CloudWatch tells
-you the load.
+you the load. Above the instance's limits, AWS drops packets from every flow
+at random. Turn on [pacing](docs/operations.md#pace-forwarded-traffic) to
+have the NAT slow down the workers sending the most instead.
 
 | Instance type | Baseline bandwidth | Burst |
 | --- | ---: | ---: |

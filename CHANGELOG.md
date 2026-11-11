@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Traffic pacing, off by default. With the module's `pacing` input on, each
+  NAT paces forwarded worker traffic just under the instance's network
+  allowances, so AWS doesn't drop packets at random, and a worker that sends
+  too much slows to its fair share. Traffic the NAT sends itself, such as
+  lease renewals and connection copies, is never paced. The NAT learns the
+  allowances from the ENA driver's allowance counters. `natpair pacing-off`
+  and `pacing-on` turn it off and on without a restart.
+
+### Changed
+
+- NATs install the `iproute-tc` package, which pacing needs.
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed

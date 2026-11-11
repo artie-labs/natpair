@@ -77,7 +77,9 @@ the NATs one at a time, as in [Replace a NAT](operations.md#replace-a-nat).
   `sudo ethtool -S <interface> | grep allowance`, or in Datadog as
   `system.net.aws.ec2.*_allowance_exceeded`. Move to an instance type with
   more baseline bandwidth, as in
-  [Replace a NAT](operations.md#replace-a-nat).
+  [Replace a NAT](operations.md#replace-a-nat). Until then,
+  [pacing](operations.md#pace-forwarded-traffic) keeps one heavy worker from
+  slowing the others.
 - **Connection table full.** When the table reaches `max_connections`, the
   kernel drops new connections and logs `nf_conntrack: table full, dropping
   packet` in `sudo dmesg`. Raise `max_connections` and replace the NATs. Each
@@ -134,3 +136,22 @@ associated with the shared ENI.
 This NAT took over while it was installing a release, so it runs a binary it
 didn't boot with and doesn't count as ready. Once it's the standby again, the
 updater reinstalls the pinned release and reboots it. No action is needed.
+
+### `failed to load pacing, so forwarded traffic isn't paced`
+
+The kernel refused the pacing programs. Forwarding works without them, and
+the NAT tries again every minute. The `err` field says why. Pacing needs
+Amazon Linux 2023's kernel 6.1 or later, and `sch_fq`, which it loads as a
+module.
+
+### `failed to pace an interface`
+
+`tc` failed to install pacing on the named interface, so traffic leaving
+through it isn't paced. The NAT tries again every minute. Check that the
+`iproute-tc` package is installed: `rpm -q iproute-tc`. NATs launched before
+the module installed it need replacing.
+
+### `pacing is off because of the pacing-off request`
+
+Someone ran `natpair pacing-off` on this NAT. Run `sudo natpair pacing-on` to
+pace traffic again.
