@@ -269,7 +269,11 @@ resource "aws_instance" "nat" {
       probe_url        = aws_lambda_function_url.receiver.function_url
       peer_ip          = aws_network_interface.nat[local.peer[each.key]].private_ip
       release_url      = trimsuffix(var.release_url, "/")
-    }, var.max_connections == null ? {} : { max_connections = var.max_connections }))
+      },
+      var.max_connections == null ? {} : { max_connections = var.max_connections },
+      # Pairs without pacing keep the configuration they had before it existed.
+      var.pacing.enabled ? { pacing = { for key, value in var.pacing : key => value if value != null } } : {},
+    ))
   })
 
   primary_network_interface {
