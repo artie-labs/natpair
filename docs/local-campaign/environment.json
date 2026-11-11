@@ -1,6 +1,6 @@
 {
   "conntrackd": "Connection tracking userspace daemon v1.4.6. Licensed under GPLv2.\n(C) 2006-2009 Pablo Neira Ayuso \u003cpablo@netfilter.org\u003e",
-  "go": "go version go1.26.8 linux/arm64",
-  "kernel": "7.0.14-linuxkit",
+  "go": "go version go1.26.11 linux/arm64",
+  "kernel": "7.0.0-38-generic",
   "scope": "Local Linux namespaces in one privileged container, one network and mount namespace per NAT, no AWS APIs"
 }
