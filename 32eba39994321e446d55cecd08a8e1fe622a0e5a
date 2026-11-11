@@ -1,0 +1,13 @@
+Review of feat/pacing (independent reviewer agent plus own pass), findings and fixes:
+- [P2] Failed pacing-off removal left loaded=true with released programs, so the next step could dereference nil maps and kill the daemon. Fixed: any remove attempt clears loaded, removal ignores interfaces that vanished, retries back off for a minute.
+- [P2] Programs stayed attached with frozen limits when no daemon manages them (rollback to a release without pacing, or a failed removal). Fixed: limits carry an expiry renewed every 250 ms. The pace program passes packets unpaced after 10 s without renewal (privileged test added).
+- [P2, found in campaign] Worker-delayed packets reserved the shared clock at enqueue, so a heavy worker's queue held up light workers and the fair share oscillated (heavy got 83 of 200 Mbit/s). Fixed: only packets their worker's clock didn't delay use the shared clocks (privileged test written first, failed at 9.7 ms, passes at 2.75 ms).
+- [P2, found in campaign] Microsecond burst smoothing counted as waiting and dragged every worker's share to cap/N. Fixed: only waits over 1 ms count (test first).
+- [P3] ethtool buffers could overflow on kernels that ignore the requested count. Fixed with spare room and exact count checks. ifr_data is now unsafe.Pointer.
+- [P3] Fractional Terraform numbers would fail JSON decoding at boot. Added whole-number validation.
+- [P3] fq total limit raised to 100,000 so a full fq can't drop the NAT's own packets.
+- [P4] Doc fixes: share is 97% of cap when nobody waits, active_workers window, floor wording, removal restores the default qdisc, Waited counter semantics.
+- Library bug worked around: cilium/ebpf v0.22 marshals FetchAdd with imm 0 (plain add).
+Dismissed: mark reflection to replies (fwmark_reflect off, no fwmark rules), FairShare NaN (cannot occur), aggregate cache-line contention (performance, measured).
+Checks: go vet, go test -race, golangci-lint (default and privileged,campaign,localfixture tags; only pre-existing errcheck hits from a newer linter), make build, terraform fmt/validate, privileged tests and the 22-case campaign in an Ubuntu 7.0 VM (Docker Desktop lacks sch_fq).
+Safety claim: pacing runs in its own goroutine that never returns an error or blocks the controller, and only packets that arrived marked (forwarded) are touched. Proven by running code: campaign cases for NAT traffic at saturation, takeover while saturated, and pacing off.
