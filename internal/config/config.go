@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/probe"
@@ -20,6 +21,11 @@ const (
 	StateDir = "/var/lib/natpair"
 	// BPFDir is where the fence pins its BPF objects.
 	BPFDir = "/sys/fs/bpf/natpair"
+	// PacingBPFDir is where pacing pins its BPF programs.
+	PacingBPFDir = BPFDir + "/pacing"
+	// PacingOffPath turns pacing off while it exists. `natpair pacing-off`
+	// creates it.
+	PacingOffPath = StateDir + "/pacing-off"
 	// ConntrackdConfigPath is where bootstrap writes conntrackd's configuration.
 	ConntrackdConfigPath = StateDir + "/conntrackd.conf"
 	// BootedReleasePath is where bootstrap records its release. /run is
@@ -32,6 +38,9 @@ const (
 	// DefaultMaxConnections is the connection limit when the configuration
 	// doesn't set max_connections.
 	DefaultMaxConnections = 262144
+	// DefaultPacingPoll is how often pacing reads the instance's allowance
+	// counters when the configuration doesn't set poll_interval_ms.
+	DefaultPacingPoll = time.Second
 )
 
 // maxConnectionsAllowed lists the limits max_connections accepts. The hash
@@ -105,6 +114,10 @@ type NAT struct {
 	// DefaultReleaseURL.
 	ReleaseURL string `json:"release_url,omitempty"`
 
+	// Pacing paces forwarded worker traffic just under the instance's network
+	// allowances. Nil means off.
+	Pacing *Pacing `json:"pacing,omitempty"`
+
 	// Instance holds facts read from the instance metadata service at
 	// startup. It is not part of the file.
 	Instance instance.Facts `json:"-"`
@@ -152,7 +165,55 @@ func (c NAT) Validate() error {
 	if !c.SharedAddress.Addr().Is4() || c.SharedAddress.Bits() < 16 || c.SharedAddress.Bits() > 28 {
 		return fmt.Errorf("shared_address must be an IPv4 address with its subnet prefix length, such as 10.0.1.100/24")
 	}
+	if err := c.Pacing.validate(); err != nil {
+		return err
+	}
 	return checkReceiver("probe_url", c.ProbeURL)
+}
+
+// Pacing configures traffic pacing. The daemon reads it at startup.
+type Pacing struct {
+	// Enabled turns pacing on. Off, natpair installs nothing.
+	Enabled bool `json:"enabled"`
+	// StartMbps is the bandwidth cap, in megabits per second, that a NAT
+	// starts from. Zero starts with no bandwidth cap until the instance first
+	// reports exceeding its bandwidth allowance.
+	StartMbps int `json:"start_mbps,omitempty"`
+	// StartKpps is the packet rate cap, in thousands of packets per second,
+	// that a NAT starts from. Zero starts with no packet rate cap until the
+	// instance first reports exceeding its packet rate allowance.
+	StartKpps int `json:"start_kpps,omitempty"`
+	// PollIntervalMS is how often, in milliseconds, the NAT reads the
+	// instance's allowance counters. Zero means DefaultPacingPoll.
+	PollIntervalMS int `json:"poll_interval_ms,omitempty"`
+}
+
+// On reports whether pacing is configured on. A nil Pacing is off.
+func (p *Pacing) On() bool {
+	return p != nil && p.Enabled
+}
+
+// Poll returns PollIntervalMS as a duration, or DefaultPacingPoll if unset.
+func (p *Pacing) Poll() time.Duration {
+	if p == nil || p.PollIntervalMS == 0 {
+		return DefaultPacingPoll
+	}
+	return time.Duration(p.PollIntervalMS) * time.Millisecond
+}
+
+func (p *Pacing) validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.StartMbps < 0 || p.StartKpps < 0 {
+		return fmt.Errorf("pacing start_mbps and start_kpps must not be negative")
+	}
+	// Faster polls cost CPU for no benefit, since AWS refreshes the counters
+	// less often. Slower polls react too late to a falling allowance.
+	if p.PollIntervalMS != 0 && (p.PollIntervalMS < 100 || p.PollIntervalMS > 60000) {
+		return fmt.Errorf("pacing poll_interval_ms must be from 100 to 60000")
+	}
+	return nil
 }
 
 // Releases returns ReleaseURL without a trailing slash, or DefaultReleaseURL if

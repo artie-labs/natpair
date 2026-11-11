@@ -172,8 +172,14 @@ func (n *Network) sizeConnectionTable(ctx context.Context) error {
 	return err
 }
 
+// CanaryLinks are the NAT's ends of the canary namespaces' links, for the
+// own canary and then the shared one.
+func CanaryLinks() []string {
+	return []string{"nat-can0", "nat-can1"}
+}
+
 func (n *Network) createCanary(ctx context.Context, index int, canary config.Canary) error {
-	host, guest := fmt.Sprintf("nat-can%d", index), fmt.Sprintf("nat-peer%d", index)
+	host, guest := CanaryLinks()[index], fmt.Sprintf("nat-peer%d", index)
 	namespaces, err := n.run.Run(ctx, commandTimeout, "ip", "netns", "list")
 	if err != nil {
 		return err

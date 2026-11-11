@@ -23,6 +23,7 @@ import (
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/network"
+	"github.com/artie-labs/natpair/internal/pacing"
 	"github.com/artie-labs/natpair/internal/probe"
 	"github.com/artie-labs/natpair/internal/update"
 )
@@ -172,6 +173,45 @@ func resume(_ context.Context, args []string) error {
 	return nil
 }
 
+func pacingOff(_ context.Context, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("pacing-off takes no arguments")
+	}
+	if err := pacing.RequestOff(config.PacingOffPath); err != nil {
+		return err
+	}
+	fmt.Println("Pacing off requested. The daemon removes pacing within a second and leaves it off, across restarts, until you run natpair pacing-on.")
+	return nil
+}
+
+func pacingOn(_ context.Context, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("pacing-on takes no arguments")
+	}
+	if err := pacing.RequestOn(config.PacingOffPath); err != nil {
+		return err
+	}
+	fmt.Println("Pacing-off request cleared. The daemon paces forwarded traffic again within a second if its configuration turns pacing on.")
+	return nil
+}
+
+// pacingConfig returns the pacing settings from the NAT's configuration.
+func pacingConfig(cfg config.NAT) pacing.Config {
+	settings := pacing.Config{
+		Enabled:   cfg.Pacing.On(),
+		Protected: cfg.ProtectedCIDRs,
+		BPFDir:    config.PacingBPFDir,
+		OffFile:   config.PacingOffPath,
+		Skip:      network.CanaryLinks(),
+		Poll:      cfg.Pacing.Poll(),
+	}
+	if cfg.Pacing != nil {
+		settings.StartBytes = float64(cfg.Pacing.StartMbps) * 1e6 / 8
+		settings.StartPackets = float64(cfg.Pacing.StartKpps) * 1e3
+	}
+	return settings
+}
+
 func runNAT(ctx context.Context, args []string) error {
 	configPath, err := configFlag("run", args)
 	if err != nil {
@@ -250,6 +290,12 @@ func runNAT(ctx context.Context, args []string) error {
 	})
 	group.Go(func() error {
 		updater.Run(ctx)
+		return nil
+	})
+	// Pacing runs on its own. Nothing waits for it, and it never fails the
+	// daemon, so it can't hold up or stop a takeover.
+	group.Go(func() error {
+		pacing.Run(ctx, pacingConfig(cfg), bootclock.Now)
 		return nil
 	})
 	return group.Wait()

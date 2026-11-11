@@ -36,3 +36,16 @@ func TestReportedRelease(t *testing.T) {
 		assert.Empty(t, reportedRelease(filepath.Join(t.TempDir(), "release")))
 	}
 }
+
+func TestPacingConfig(t *testing.T) {
+	{
+		// Configurations without the setting leave pacing off
+		assert.False(t, pacingConfig(config.NAT{}).Enabled)
+	}
+	{
+		settings := pacingConfig(config.NAT{Pacing: &config.Pacing{Enabled: true, StartMbps: 800, StartKpps: 250}})
+		assert.True(t, settings.Enabled)
+		assert.Equal(t, 100e6, settings.StartBytes)
+		assert.Equal(t, 250e3, settings.StartPackets)
+	}
+}

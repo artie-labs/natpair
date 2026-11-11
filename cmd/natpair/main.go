@@ -8,6 +8,8 @@
 //	natpair fence-close --config /etc/natpair/config.json
 //	natpair maintenance
 //	natpair resume
+//	natpair pacing-off
+//	natpair pacing-on
 package main
 
 import (
@@ -33,6 +35,8 @@ commands:
   fence-close  close worker forwarding (stop natpair.service first)
   maintenance  hand ownership from this NAT to a ready peer
   resume       make this NAT an eligible standby again
+  pacing-off   stop pacing forwarded traffic, until pacing-on
+  pacing-on    pace forwarded traffic again, if the configuration turns it on
 `
 
 func main() {
@@ -52,6 +56,8 @@ func main() {
 		"fence-close": fenceClose,
 		"maintenance": maintenance,
 		"resume":      resume,
+		"pacing-off":  pacingOff,
+		"pacing-on":   pacingOn,
 	}
 	command, ok := commands[os.Args[1]]
 	if !ok {
