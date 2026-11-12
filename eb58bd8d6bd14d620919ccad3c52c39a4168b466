@@ -1,0 +1,1 @@
+Test-only change. The old assertions failed once in a busy VM: 0.567 ms against a 0.5 ms tolerance. They now check exact facts: delayed packets 1 ms apart, the clock exactly 1 ms after the last departure, the drop count matching the worker's counter, and no wait over the 20 ms horizon. Passed 300 runs of the program tests in the VM.
