@@ -1,0 +1,9 @@
+Review:
+- Root cause from the AWS journal: poll runs every 10 ms, but interfaces were re-listed only every 250 ms, and keyed by name. Reads hit 'no such device' about 25 times after a rename (eth0 to ens6) or a detach.
+- Index keys survive renames. The tc qdiscs and filters belong to the device, so a rename needs no new attach.
+- The ENODEV path forgets the cached statistic positions under the old name.
+- An attach broken by a rename retries at the next step, instead of after retryInterval, which would have left a new owner's shared ENI unpaced for a minute.
+- Other read errors are rate-limited to one a minute per interface.
+- A privileged test with a real veth covers attach, rename, poll and attach again: the name is updated, there's no second attach and no warnings. Deleting the link then drops it without warnings. On the old code it would re-attach and log the new name.
+- Checks: go test -race, golangci-lint (darwin, linux, linux with test tags; only pre-existing errcheck hits remain), privileged tests in the VM.
+Safety claim: only pacing's bookkeeping changes. Proven by the privileged test.
