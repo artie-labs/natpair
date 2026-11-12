@@ -250,9 +250,11 @@ AWS first reports exceeding the limit, then caps itself just below. Leave
 `start_kpps`, the packet rate cap, unset unless you know the instance's
 packet rate limit. AWS doesn't publish it.
 
-`poll_interval_ms` is how often a NAT reads the allowance counters. Keep the
-default, 1000, unless you know AWS refreshes the counters less often on your
-instance type.
+`poll_interval_ms` is how often a NAT reads the allowance counters. The
+default, 10, lets the cap follow AWS's first drops within tens of
+milliseconds, for about 1% of one CPU. The NAT also caps forwarded packets a
+second at what its CPUs carry, starting at 400,000 per CPU, as
+[How natpair works](architecture.md#pacing-forwarded-traffic) explains.
 
 Pacing needs the `iproute-tc` package. NATs that boot with this module
 version install it.
@@ -279,19 +281,25 @@ Each NAT that forwarded traffic logs `pacing status` every minute:
 
 | Field | Meaning |
 | --- | --- |
-| `cap_mbps`, `cap_kpps` | The caps the kernel enforces. 0 means no cap yet. |
+| `cap_mbps`, `cap_kpps` | The allowance caps. 0 means no cap yet. |
 | `ceiling_mbps`, `ceiling_kpps` | The forwarded rate when AWS last reported exceeding the limit. The cap settles at 95% of it. |
+| `cpu_cap_kpps`, `cpu_ceiling_kpps` | The CPU cap on forwarded packets, and the rate at which a CPU last passed 80% busy. The kernel enforces the lower of `cap_kpps` and `cpu_cap_kpps`. |
+| `busiest_cpu` | How busy the busiest CPU was in the last quarter second, from 0 to 1. |
+| `bw_in_allowance_exceeded`, `bw_out_allowance_exceeded`, `pps_allowance_exceeded` | Packets AWS queued or dropped during the minute, summed over all interfaces. |
 | `upload_mbps`, `download_mbps`, `upload_kpps`, `download_kpps` | Paced worker traffic in each direction, averaged over the minute. |
 | `worker_share_mbps`, `worker_share_kpps` | The most one worker may use right now. It is 97% of the cap while no worker has to wait. |
 | `waited_packets`, `dropped_packets` | Worker packets that waited more than 1 ms, and those dropped because they would have waited more than 20 ms. Drops are how pacing slows a heavy worker. |
 | `active_workers`, `waiting_workers` | Workers that sent in the last quarter second, and those whose packets waited more than 1 ms. |
 
-`the instance exceeded its network allowance` means AWS queued or dropped
-packets. It logs the counters' growth and what each cap did. A few after a
-start or a probe are how pacing finds the limit. If they keep coming at a
-steady cap, traffic pacing doesn't control is over the limit, such as the
-NAT's own traffic or bursts of inbound packets. Consider a larger instance
-type.
+`the instance exceeded its network allowance, so pacing cut its cap` means
+AWS queued or dropped packets. A few after a start or a probe are how pacing
+finds the limit. If they keep coming at a steady cap, traffic pacing doesn't
+control is over the limit, such as the NAT's own traffic or bursts of
+inbound packets. Consider a larger instance type.
+
+`a forwarding CPU is nearly full, so pacing cut the packet cap` means the NAT
+was close to running out of CPU. If it recurs, consider an instance type with
+more CPUs.
 
 ## Monitoring
 
@@ -309,7 +317,7 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `forced the stuck shared ENI detach. Stop and start the NAT it was attached to before it serves again.` is logged | That NAT needs a stop and start. See [troubleshooting](troubleshooting.md#forced-the-stuck-shared-eni-detach). |
 | `update` lines continue for more than an hour | An upgrade is stuck. The `reason` field says why. |
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |
-| `the instance exceeded its network allowance` is logged more than a few times an hour, with pacing on | Pacing can't keep traffic under the limit. See [What to watch](#what-to-watch). |
+| `the instance exceeded its network allowance` or `a forwarding CPU is nearly full` is logged more than a few times an hour, with pacing on | The pair is near its limits. See [What to watch](#what-to-watch). |
 | `failed to load pacing` or `failed to pace an interface` is logged | Forwarded traffic isn't paced. See [troubleshooting](troubleshooting.md#failed-to-load-pacing-so-forwarded-traffic-isnt-paced). |
 
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.

@@ -58,7 +58,7 @@ variable "max_connections" {
 }
 
 variable "pacing" {
-  description = "Traffic pacing. When enabled, each NAT paces forwarded worker traffic just under the instance's network allowances, so AWS doesn't drop packets at random, and splits the cap fairly between workers. start_mbps and start_kpps are the caps a NAT starts from, in megabits and thousands of packets per second. Unset, a NAT starts uncapped and learns each cap the first time the instance reports exceeding that allowance. poll_interval_ms is how often a NAT reads the allowance counters, 1000 by default. NATs read it at first boot, so changing it needs new NATs. On a running NAT, `natpair pacing-off` and `pacing-on` turn it off and back on."
+  description = "Traffic pacing. When enabled, each NAT paces forwarded worker traffic just under the instance's network allowances, so AWS doesn't drop packets at random, and splits the cap fairly between workers. start_mbps and start_kpps are the caps a NAT starts from, in megabits and thousands of packets per second. Unset, a NAT starts uncapped and learns each cap the first time the instance reports exceeding that allowance. poll_interval_ms is how often a NAT reads the allowance counters, 10 by default. NATs read it at first boot, so changing it needs new NATs. On a running NAT, `natpair pacing-off` and `pacing-on` turn it off and back on."
   type = object({
     enabled          = optional(bool, false)
     start_mbps       = optional(number)
@@ -74,8 +74,8 @@ variable "pacing" {
   }
 
   validation {
-    condition     = var.pacing.poll_interval_ms == null || (coalesce(var.pacing.poll_interval_ms, 1000) >= 100 && coalesce(var.pacing.poll_interval_ms, 1000) <= 60000)
-    error_message = "pacing.poll_interval_ms must be from 100 to 60000."
+    condition     = var.pacing.poll_interval_ms == null || (coalesce(var.pacing.poll_interval_ms, 10) >= 1 && coalesce(var.pacing.poll_interval_ms, 10) <= 60000)
+    error_message = "pacing.poll_interval_ms must be from 1 to 60000."
   }
 }
 

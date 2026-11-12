@@ -39,8 +39,11 @@ const (
 	// doesn't set max_connections.
 	DefaultMaxConnections = 262144
 	// DefaultPacingPoll is how often pacing reads the instance's allowance
-	// counters when the configuration doesn't set poll_interval_ms.
-	DefaultPacingPoll = time.Second
+	// counters when the configuration doesn't set poll_interval_ms. ENA
+	// refreshes them at least every millisecond, and one read takes about
+	// 0.2 ms and 40 µs of CPU, so a cut follows AWS's first drops within tens
+	// of milliseconds.
+	DefaultPacingPoll = 10 * time.Millisecond
 )
 
 // maxConnectionsAllowed lists the limits max_connections accepts. The hash
@@ -208,10 +211,8 @@ func (p *Pacing) validate() error {
 	if p.StartMbps < 0 || p.StartKpps < 0 {
 		return fmt.Errorf("pacing start_mbps and start_kpps must not be negative")
 	}
-	// Faster polls cost CPU for no benefit, since AWS refreshes the counters
-	// less often. Slower polls react too late to a falling allowance.
-	if p.PollIntervalMS != 0 && (p.PollIntervalMS < 100 || p.PollIntervalMS > 60000) {
-		return fmt.Errorf("pacing poll_interval_ms must be from 100 to 60000")
+	if p.PollIntervalMS != 0 && (p.PollIntervalMS < 1 || p.PollIntervalMS > 60000) {
+		return fmt.Errorf("pacing poll_interval_ms must be from 1 to 60000")
 	}
 	return nil
 }

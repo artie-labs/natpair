@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 
 	"github.com/artie-labs/natpair/internal/command"
 )
@@ -30,10 +31,14 @@ type kernel struct {
 	dir       string
 	protected []netip.Prefix
 	progs     *programs
+	// ethtool is a socket for reading the allowance counters, and stats
+	// where each interface keeps them, so a poll is one ioctl per interface.
+	ethtool int
+	stats   map[string]statIndex
 }
 
 func newKernel(dir string, protected []netip.Prefix) *kernel {
-	return &kernel{dir: dir, protected: protected}
+	return &kernel{dir: dir, protected: protected, ethtool: -1, stats: map[string]statIndex{}}
 }
 
 func (k *kernel) markPin() string { return filepath.Join(k.dir, "mark") }
@@ -155,19 +160,24 @@ func (k *kernel) setLimits(l Limits) error {
 	return k.progs.setLimits(l)
 }
 
-// read returns the counters for each direction and each worker since the
-// programs were loaded.
-func (k *kernel) read() (Totals, map[[4]byte]Counters, error) {
+// readTotals returns the counters for each direction since the programs were
+// loaded.
+func (k *kernel) readTotals() (Totals, error) {
 	var totals Totals
 	for direction, target := range map[uint32]*Counters{directionUpload: &totals.Upload, directionDownload: &totals.Download} {
 		var perCPU [][4]uint64
 		if err := k.progs.stats.Lookup(direction, &perCPU); err != nil {
-			return Totals{}, nil, fmt.Errorf("failed to read pacing stats: %w", err)
+			return Totals{}, fmt.Errorf("failed to read pacing stats: %w", err)
 		}
 		for _, cpu := range perCPU {
 			target.add(Counters{Bytes: cpu[0], Packets: cpu[1], Waited: cpu[2], Dropped: cpu[3]})
 		}
 	}
+	return totals, nil
+}
+
+// readWorkers returns each worker's counters since the programs were loaded.
+func (k *kernel) readWorkers() (map[[4]byte]Counters, error) {
 	workers := map[[4]byte]Counters{}
 	keys := make([][4]byte, 1024)
 	values := make([][workerSize / 8]uint64, len(keys))
@@ -179,10 +189,10 @@ func (k *kernel) read() (Totals, map[[4]byte]Counters, error) {
 			workers[keys[i]] = Counters{Bytes: v[2], Packets: v[3], Waited: v[4], Dropped: v[5]}
 		}
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return totals, workers, nil
+			return workers, nil
 		}
 		if err != nil {
-			return Totals{}, nil, fmt.Errorf("failed to read pacing workers: %w", err)
+			return nil, fmt.Errorf("failed to read pacing workers: %w", err)
 		}
 	}
 }
@@ -190,11 +200,35 @@ func (k *kernel) read() (Totals, map[[4]byte]Counters, error) {
 // allowances returns an interface's allowance counters. found is false if it
 // doesn't have them, as on any interface other than an ENA one.
 func (k *kernel) allowances(iface string) (Allowances, bool, error) {
-	values, found, err := readStats(iface, allowanceNames)
-	if err != nil || !found {
-		return Allowances{}, found, err
+	if k.ethtool < 0 {
+		fd, err := ethtoolSocket()
+		if err != nil {
+			return Allowances{}, false, err
+		}
+		k.ethtool = fd
+	}
+	index, ok := k.stats[iface]
+	if !ok {
+		var err error
+		if index, err = findStats(k.ethtool, iface, allowanceNames); err != nil {
+			return Allowances{}, false, err
+		}
+		k.stats[iface] = index
+	}
+	if index.indexes == nil {
+		return Allowances{}, false, nil
+	}
+	values, err := readIndexed(k.ethtool, iface, index)
+	if err != nil {
+		delete(k.stats, iface)
+		return Allowances{}, false, err
 	}
 	return Allowances{BandwidthIn: values[0], BandwidthOut: values[1], PacketRate: values[2]}, true, nil
+}
+
+// forget drops what the kernel knows about an interface that went away.
+func (k *kernel) forget(iface string) {
+	delete(k.stats, iface)
 }
 
 // close releases this process's handles on the programs and maps. Attached
@@ -203,5 +237,9 @@ func (k *kernel) close() {
 	if k.progs != nil {
 		k.progs.close()
 		k.progs = nil
+	}
+	if k.ethtool >= 0 {
+		_ = unix.Close(k.ethtool)
+		k.ethtool = -1
 	}
 }

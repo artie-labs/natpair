@@ -153,8 +153,11 @@ its own worker.
 
 **Finding the cap.** The daemon reads the ENA driver's allowance counters,
 `bw_in_allowance_exceeded`, `bw_out_allowance_exceeded` and
-`pps_allowance_exceeded`, every second by default. Bandwidth and packet rate
-each have their own cap:
+`pps_allowance_exceeded`, every 10 ms by default, on every interface. ENA
+refreshes them at least every millisecond. AWS counts the whole instance, and
+when it drops, it drops on both ENIs: on AWS, after a c7gn.medium's burst ran
+out, its own ENI lost 40% of the acknowledgements going back to workers.
+Bandwidth and packet rate each have their own cap:
 
 - While the counters stay still and traffic presses the cap, it rises by 1%
   a second.
@@ -167,10 +170,26 @@ each have their own cap:
 - When burst credits run out and the limit falls to the instance's baseline,
   the counters move again and the cap follows it down.
 
+After a cut, the cap ignores the counters for 50 ms, while packets already
+queued under the old cap leave.
+
 A NAT can start from a configured cap, or with no cap until the counters
 first move. A cut never takes a cap below 100 Mbit/s or 10,000 packets a
 second, because counters that move while forwarded traffic is lower than that
 come from other traffic.
+
+**The CPUs' limit.** A NAT forwards in the kernel, on the CPUs that take the
+network interrupts, at about 1.1 µs a full-size packet and 1.6 µs a small
+one. One CPU runs out at about 600,000 forwarded packets a second, long
+before AWS's packet rate allowance. A NAT whose CPU is full can't renew its
+lease, resolve DNS or probe its path, so it steps down, and the standby
+inherits the same load. So the daemon also caps forwarded packets a second
+by CPU. Four times a second it reads `/proc/stat`. If the busiest CPU was
+more than 80% busy, the cap is cut the same way as an allowance cap, then
+settles at 95% of the rate that overloaded it and probes again every 5
+minutes. It starts at 400,000 packets a second per CPU. The packet cap in
+force is the lower of the two. Pacing delays and drops packets on the way
+out, so it bounds incoming traffic only as TCP senders slow down.
 
 **Takeovers.** Pacing runs on its own and nothing waits for it, so it can't
 delay or stop a takeover, and forwarding works if it fails to load. Both

@@ -51,7 +51,7 @@ func TestReadStats(t *testing.T) {
 	}
 	{
 		// Only ENA interfaces have the allowance counters
-		_, found, err := (&kernel{}).allowances("pst0")
+		_, found, err := newKernel("", nil).allowances("pst0")
 		require.NoError(t, err)
 		assert.False(t, found)
 	}

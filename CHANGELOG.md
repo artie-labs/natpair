@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowances, so AWS doesn't drop packets at random, and a worker that sends
   too much slows to its fair share. Traffic the NAT sends itself, such as
   lease renewals and connection copies, is never paced. The NAT learns the
-  allowances from the ENA driver's allowance counters. `natpair pacing-off`
-  and `pacing-on` turn it off and on without a restart.
+  allowances from the ENA driver's allowance counters, read every 10 ms on
+  every interface, and also keeps forwarded packets a second below what the
+  CPUs can carry, so a NAT never runs out of CPU and steps down.
+  `natpair pacing-off` and `pacing-on` turn it off and on without a restart.
 
 ### Changed
 

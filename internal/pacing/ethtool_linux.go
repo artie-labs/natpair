@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"runtime"
+	"slices"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -35,26 +36,28 @@ type ethtoolRequest struct {
 // differ.
 const ethtoolSpare = 256
 
-// readStats returns the driver statistics with the given names, in order.
-// found is false if the interface doesn't report all of them, as on any
-// interface other than an ENA one.
-func readStats(iface string, names []string) (values []uint64, found bool, err error) {
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to open a socket for ethtool: %w", err)
-	}
-	defer unix.Close(fd)
+// statIndex says where some named statistics are among an interface's
+// driver statistics.
+type statIndex struct {
+	// count is how many statistics the driver had when they were looked up.
+	count int
+	// indexes are the positions of the names, or nil if the interface
+	// doesn't report all of them, as on any interface other than an ENA one.
+	indexes []int
+}
 
+// findStats finds the driver statistics with the given names.
+func findStats(fd int, iface string, names []string) (statIndex, error) {
 	// struct ethtool_sset_info: cmd, reserved, sset_mask, then one u32 count
 	// per set in the mask.
 	info := make([]byte, 20)
 	binary.NativeEndian.PutUint32(info[0:], ethtoolGetStringSetInfo)
 	binary.NativeEndian.PutUint64(info[8:], 1<<ethtoolStatsSet)
 	if err := ethtool(fd, iface, info); err != nil {
-		return nil, false, fmt.Errorf("failed to count %s's statistics: %w", iface, err)
+		return statIndex{}, fmt.Errorf("failed to count %s's statistics: %w", iface, err)
 	}
 	if binary.NativeEndian.Uint64(info[8:])&(1<<ethtoolStatsSet) == 0 {
-		return nil, false, nil
+		return statIndex{}, nil
 	}
 	count := int(binary.NativeEndian.Uint32(info[16:]))
 
@@ -64,45 +67,71 @@ func readStats(iface string, names []string) (values []uint64, found bool, err e
 	binary.NativeEndian.PutUint32(strs[4:], ethtoolStatsSet)
 	binary.NativeEndian.PutUint32(strs[8:], uint32(count))
 	if err := ethtool(fd, iface, strs); err != nil {
-		return nil, false, fmt.Errorf("failed to read %s's statistic names: %w", iface, err)
+		return statIndex{}, fmt.Errorf("failed to read %s's statistic names: %w", iface, err)
 	}
 	if written := int(binary.NativeEndian.Uint32(strs[8:])); written != count {
-		return nil, false, fmt.Errorf("%s's statistics changed while being read", iface)
+		return statIndex{}, fmt.Errorf("%s's statistics changed while being read", iface)
 	}
-	indexes := make([]int, len(names))
-	for i := range indexes {
-		indexes[i] = -1
+	index := statIndex{count: count, indexes: make([]int, len(names))}
+	for i := range index.indexes {
+		index.indexes[i] = -1
 	}
 	for i := range count {
-		raw := strs[12+i*ethtoolStringLength : 12+(i+1)*ethtoolStringLength]
-		name := unix.ByteSliceToString(raw)
+		name := unix.ByteSliceToString(strs[12+i*ethtoolStringLength : 12+(i+1)*ethtoolStringLength])
 		for j, wanted := range names {
 			if name == wanted {
-				indexes[j] = i
+				index.indexes[j] = i
 			}
 		}
 	}
-	for _, index := range indexes {
-		if index < 0 {
-			return nil, false, nil
-		}
+	if slices.Contains(index.indexes, -1) {
+		index.indexes = nil
 	}
+	return index, nil
+}
 
+// readIndexed reads the statistics index points at. It fails if the driver's
+// statistics changed since findStats, so the caller finds them again.
+func readIndexed(fd int, iface string, index statIndex) ([]uint64, error) {
 	// struct ethtool_stats: cmd, n_stats, then the u64 values.
-	stats := make([]byte, 8+(count+ethtoolSpare)*8)
+	stats := make([]byte, 8+(index.count+ethtoolSpare)*8)
 	binary.NativeEndian.PutUint32(stats[0:], ethtoolGetStats)
-	binary.NativeEndian.PutUint32(stats[4:], uint32(count))
+	binary.NativeEndian.PutUint32(stats[4:], uint32(index.count))
 	if err := ethtool(fd, iface, stats); err != nil {
-		return nil, false, fmt.Errorf("failed to read %s's statistics: %w", iface, err)
+		return nil, fmt.Errorf("failed to read %s's statistics: %w", iface, err)
 	}
-	if written := int(binary.NativeEndian.Uint32(stats[4:])); written != count {
-		return nil, false, fmt.Errorf("%s's statistics changed while being read", iface)
+	if written := int(binary.NativeEndian.Uint32(stats[4:])); written != index.count {
+		return nil, fmt.Errorf("%s's statistics changed while being read", iface)
 	}
-	values = make([]uint64, len(names))
-	for j, index := range indexes {
-		values[j] = binary.NativeEndian.Uint64(stats[8+index*8:])
+	values := make([]uint64, len(index.indexes))
+	for j, i := range index.indexes {
+		values[j] = binary.NativeEndian.Uint64(stats[8+i*8:])
 	}
-	return values, true, nil
+	return values, nil
+}
+
+// readStats returns the driver statistics with the given names, in order.
+// found is false if the interface doesn't report all of them.
+func readStats(iface string, names []string) (values []uint64, found bool, err error) {
+	fd, err := ethtoolSocket()
+	if err != nil {
+		return nil, false, err
+	}
+	defer unix.Close(fd)
+	index, err := findStats(fd, iface, names)
+	if err != nil || index.indexes == nil {
+		return nil, false, err
+	}
+	values, err = readIndexed(fd, iface, index)
+	return values, err == nil, err
+}
+
+func ethtoolSocket() (int, error) {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("failed to open a socket for ethtool: %w", err)
+	}
+	return fd, nil
 }
 
 // ethtool runs one SIOCETHTOOL request, whose command and results are in
