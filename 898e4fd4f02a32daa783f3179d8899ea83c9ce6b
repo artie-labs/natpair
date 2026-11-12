@@ -1,0 +1,14 @@
+Review of the bench revision (own pass):
+- The fast loop at the poll interval reads only the per-CPU totals and the cached allowance counters: one GSTATS ioctl per interface, with positions found again if the driver's count changes. Interfaces, workers, /proc/stat and limit renewal stay on the 250 ms step, so 10 ms polling costs about 1% of a CPU, as the bench measured.
+- The allowance caps compare against the forwarded rate over 100 ms. A single 10 ms poll is too noisy because of GRO-merged packets. The hold after a cut is max(2 polls, 50 ms), to cover packets already queued under the old cap (20 ms horizon).
+- The CPU cap reuses Cap. It counts as exceeded when the busiest CPU was over 80% busy in the last 250 ms. /proc/stat counts in 10 ms ticks, so that is 25 ticks per CPU, enough resolution. Reports below the 10k pps floor are ignored, so a busy standby never cuts. The packet limit is the lower of the allowance cap and the CPU cap.
+- The status log now carries the allowance counters' growth. Cuts log immediately, and logging every held or ignored report would flood the log at 10 ms.
+- Tests:
+  - ParseCPUTimes and BusiestCPU on simulated /proc/stat deltas, with iowait and guest time excluded.
+  - A simulated one-CPU NAT at 1.6 us per packet with 900k pps offered settles between 70% and 80% busy, and follows conntrackd load to 35% within a few steps.
+  - Config defaults and bounds.
+- Checks:
+  - go vet, go test -race.
+  - golangci-lint, default and with test tags. Only pre-existing errcheck hits from a newer linter remain.
+  - Privileged tests and all 5 pacing campaign cases in the Ubuntu 7.0 VM.
+Safety claim: the CPU cap only lowers the packet limit and never blocks the daemon, and the fast loop does no exec or map iteration. Unproven on AWS: how the CPU cap behaves at real saturation.
