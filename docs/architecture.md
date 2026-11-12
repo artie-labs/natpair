@@ -123,6 +123,13 @@ old release. See [operations](operations.md#upgrade) for the steps.
 - So the host firewall on each NAT is what filters traffic to the NAT itself.
   It accepts new connections only from the VPC and the peer, resets other TCP
   and drops everything else. Traffic the NAT forwards doesn't pass through it.
+- The NAT's own connections, from and to its own address, skip the kernel's
+  connection table. So when worker connections fill the table, the NAT's DNS
+  lookups, lease renewals, AWS API calls and connection copies still work.
+  The firewall accepts their replies without state: TCP packets that can't
+  open a connection, traffic from link-local addresses such as the metadata
+  service, and ICMP unreachable messages. The own-path probes still use the
+  table, because they test the forwarding path, which needs it.
 - The module adds a DynamoDB gateway endpoint to the public route table, so
   lease renewals and health reports reach DynamoDB without depending on the
   internet path the NATs forward. Workers' DynamoDB traffic goes through the

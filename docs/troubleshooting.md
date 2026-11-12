@@ -134,3 +134,11 @@ associated with the shared ENI.
 This NAT took over while it was installing a release, so it runs a binary it
 didn't boot with and doesn't count as ready. Once it's the standby again, the
 updater reinstalls the pinned release and reboots it. No action is needed.
+
+### `the connection table is nearly full`
+
+The kernel's connection table is at least 90% full. Once it's full, new
+worker connections and the NAT's probes are dropped, and the owner may step
+down. Closed connections stay in the table for 2 minutes, so a high rate of
+new connections fills it faster than the number of open ones suggests.
+Raise `max_connections` and replace the NATs.

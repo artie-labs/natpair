@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A full connection table cut off the NAT's own traffic: under 3,000 new
+  worker connections a second, the owner's DNS lookups failed and it stepped
+  down. The NAT's own connections now skip the connection table, and the
+  host firewall accepts their replies without state. The own canary's probes
+  now use ports 61000 to 65535, which the NAT's own sockets don't. NATs log
+  `the connection table is nearly full` at 90%. NATs set this up at boot, so
+  pairs pick it up when they roll to a release with this fix.
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed
