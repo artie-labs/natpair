@@ -123,13 +123,11 @@ old release. See [operations](operations.md#upgrade) for the steps.
 - So the host firewall on each NAT is what filters traffic to the NAT itself.
   It accepts new connections only from the VPC and the peer, resets other TCP
   and drops everything else. Traffic the NAT forwards doesn't pass through it.
-- The NAT's own connections, from and to its own address, skip the kernel's
-  connection table. So when worker connections fill the table, the NAT's DNS
-  lookups, lease renewals, AWS API calls and connection copies still work.
-  The firewall accepts their replies without state: TCP packets that can't
-  open a connection, traffic from link-local addresses such as the metadata
-  service, and ICMP unreachable messages. The own-path probes still use the
+- The NAT's own connections skip the kernel's connection table, so when
+  worker connections fill it, the NAT's DNS lookups, lease renewals, AWS API
+  calls and connection copies still work. The own-path probes still use the
   table, because they test the forwarding path, which needs it.
+  [Security](#security) lists exactly what skips it.
 - The module adds a DynamoDB gateway endpoint to the public route table, so
   lease renewals and health reports reach DynamoDB without depending on the
   internet path the NATs forward. Workers' DynamoDB traffic goes through the
@@ -149,6 +147,39 @@ old release. See [operations](operations.md#upgrade) for the steps.
 - **Connection copies.** conntrackd sends connection state to the peer in
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.
+- **Host firewall.** It accepts new connections to the NAT only from the VPC
+  and the peer. It resets other TCP and drops everything else. Forwarded
+  traffic doesn't pass through it.
+- **Untracked connections.** These skip the connection table, both ways:
+  TCP on the NAT's own ephemeral ports (32768 to 60999), UDP between those
+  ports and the VPC, the peer's copies to port 3780, and UDP with Amazon Time
+  Sync (169.254.169.123, port 123) and the Route 53 Resolver
+  (169.254.169.253, port 53). Without state, the firewall accepts only their
+  replies:
+  - TCP without SYN, to the NAT's own address and ephemeral ports. Such a
+    packet can't open a connection, and the kernel resets it unless one of
+    the NAT's sockets owns it. All other TCP gets the reset it always got,
+    so every port answers alike and a scan learns nothing.
+  - UDP from those two link-local services, from their port to the NAT's
+    ephemeral ports. Nothing outside the instance can send from a
+    link-local address.
+  - ICMP fragmentation-needed, host-unreachable, port-unreachable and
+    time-exceeded messages to the NAT's own address, limited to 50 a
+    second. Errors about tracked connections are accepted as before.
+  The NAT's own sockets keep to the ephemeral range, and the own-path probes
+  use ports 61000 to 65535, which stay tracked.
+- **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
+  of its connections. Linux acts on one only if it matches a socket's
+  addresses and ports. For TCP, its sequence number must also fall inside
+  the connection's unacknowledged data, which an attacker who can't see the
+  traffic has to guess. A forged fragmentation-needed message can lower
+  the path MTU no further than 552 bytes, which slows a connection but
+  doesn't break it. On an established TCP connection, Linux records an
+  unreachable message only as a soft error, which ends the connection only
+  if it is already timing out. While a connection is being set up, a forged
+  one that matches can abort it, and the caller tries again. A forged
+  port-unreachable that matches a DNS lookup's random port fails that
+  lookup, which is retried. The rate limit bounds all of it.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs
