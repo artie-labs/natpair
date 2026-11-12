@@ -28,4 +28,9 @@ systemctl enable natpair-bootstrap.service natpair.service conntrackd.service
 # leave port 22 open to the Internet, and the host firewall only closes it once
 # the bootstrap service runs, so sshd is turned off.
 systemctl disable --now sshd.service
+# natpair spreads the network queues' interrupts across the CPUs itself.
+# irqbalance can move them all onto one CPU, which then forwards alone.
+if systemctl cat irqbalance.service >/dev/null 2>&1; then
+  systemctl disable --now irqbalance.service
+fi
 echo "Installed for the next boot. No services were started."
