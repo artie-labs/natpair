@@ -159,7 +159,7 @@ func TestPaceDepartures(t *testing.T) {
 	// before, until a wait would pass the 20 ms horizon.
 	require.NoError(t, p.setLimits(Limits{WorkerPackets: 1000}))
 	upload := skbContext{Mark: mark(worker)}
-	waits := make([]time.Duration, 0, 30)
+	var departures []uint64
 	var dropped int
 	for range 30 {
 		before := monotonic(t)
@@ -168,25 +168,28 @@ func TestPaceDepartures(t *testing.T) {
 			dropped++
 			continue
 		}
-		var wait time.Duration
 		if out.Tstamp != 0 {
-			wait = time.Duration(out.Tstamp - before)
+			// No packet is held past the horizon
+			assert.LessOrEqual(t, time.Duration(out.Tstamp-before), 20*time.Millisecond)
+			departures = append(departures, out.Tstamp)
 		}
-		waits = append(waits, wait)
 	}
-	for i, wait := range waits {
-		expected := max(0, time.Duration(i-2)*time.Millisecond)
-		assert.InDelta(t, expected, wait, float64(500*time.Microsecond), "packet %d", i)
+	// Measured against the packets' own departure times, not the test's
+	// clock, these hold however slowly the test runs: each delayed packet
+	// leaves exactly 1 ms after the one before, and some are dropped.
+	require.NotEmpty(t, departures)
+	for i := 1; i < len(departures); i++ {
+		assert.Equal(t, uint64(time.Millisecond), departures[i]-departures[i-1], "packet %d", i)
 	}
-	assert.Len(t, waits, 23)
-	assert.Equal(t, 7, dropped)
+	assert.Positive(t, dropped)
+	lastDeparture := departures[len(departures)-1]
 	{
 		// Dropped packets give their reservations back. The clock ends 1 ms
-		// after the last accepted packet's departure, not 7 ms later.
+		// after the last accepted packet's departure, not later.
 		var counters [6]uint64
 		require.NoError(t, p.workers.Lookup(worker.As4(), &counters))
-		assert.InDelta(t, 21*time.Millisecond, time.Duration(counters[1]-monotonic(t)), float64(500*time.Microsecond))
-		assert.Equal(t, uint64(7), counters[5], "dropped")
+		assert.Equal(t, lastDeparture+uint64(time.Millisecond), counters[1])
+		assert.Equal(t, uint64(dropped), counters[5], "dropped")
 	}
 	{
 		// Another worker has its own clock, so it doesn't wait
