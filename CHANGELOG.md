@@ -31,11 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A full connection table cut off the NAT's own traffic: under 3,000 new
   worker connections a second, the owner's DNS lookups failed and it stepped
-  down. The NAT's own connections now skip the connection table, and the
-  host firewall accepts their replies without state. The own canary's probes
-  now use ports 61000 to 65535, which the NAT's own sockets don't. NATs log
-  `the connection table is nearly full` at 90%. NATs set this up at boot, so
-  pairs pick it up when they roll to a release with this fix.
+  down. The NAT's own TCP connections, its UDP with the VPC and with Amazon
+  Time Sync and the Route 53 Resolver, and the peer's copies now skip the
+  connection table. The host firewall accepts their replies without state,
+  only on the NAT's own ephemeral ports, with rate-limited ICMP errors. The
+  own canary's probes now use ports 61000 to 65535. NATs log `the connection
+  table is nearly full` at 90%. NATs set this up at boot, so pairs pick it
+  up when they roll to a release with this fix.
 - conntrackd's copies to the peer left through the shared ENI, from the
   shared address, once that ENI was attached. Its MTU is 1500, so each copy
   of about 8.9 KB went out as 7 fragments, which counted against the shared
@@ -43,7 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thousands of packets a second. A host route now sends traffic to the peer
   through each NAT's own interface, from its own address. NATs set it at
   boot, so pairs pick it up when they roll to a release with this fix.
-
 
 ## [0.1.1] - 2026-11-09
 

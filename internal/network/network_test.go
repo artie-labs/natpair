@@ -106,26 +106,36 @@ func TestBootstrap(t *testing.T) {
 		"-A NATPAIR_INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 10.0.0.0/16 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 10.0.1.11/32 -j ACCEPT\n"+
-		// Replies to the NAT's own untracked connections
-		"-A NATPAIR_INPUT -p tcp ! --syn -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
-		"-A NATPAIR_INPUT -s 169.254.0.0/16 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
-		"-A NATPAIR_INPUT -p icmp --icmp-type destination-unreachable -j ACCEPT\n"+
-		"-A NATPAIR_INPUT -p icmp --icmp-type time-exceeded -j ACCEPT\n"+
+		// Replies to the NAT's own untracked connections, as narrowly as
+		// they allow: TCP without SYN to its ephemeral ports, UDP from the two
+		// link-local services it uses, and rate-limited ICMP errors.
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p tcp ! --syn --dport 32768:60999 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -s 169.254.169.123/32 -d 10.0.1.10 -p udp --sport 123 --dport 32768:60999 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -s 169.254.169.253/32 -d 10.0.1.10 -p udp --sport 53 --dport 32768:60999 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type fragmentation-needed -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type host-unreachable -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type port-unreachable -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type time-exceeded -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
 		// TCP gets a reset, so a remote server learns at once that a connection is gone.
 		"-A NATPAIR_INPUT -p tcp -j REJECT --reject-with tcp-reset\n"+
 		"-A NATPAIR_INPUT -j DROP\nCOMMIT\n", log.inputs[0])
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C INPUT -j NATPAIR_INPUT")
 	assert.Less(t, slices.Index(log.commands, "modprobe nf_conntrack"), conntrackSettings)
-	// The NAT's own connections bypass the connection table, except replies
-	// to the ports the own canary's probes are translated to. The firewall
-	// that accepts their replies comes first.
+	// The NAT's own connections bypass the connection table: TCP on its
+	// ephemeral ports, UDP between those ports and the VPC, the peer's copies
+	// and the two link-local services. The firewall that accepts their
+	// replies comes first.
 	assert.Equal(t, "*raw\n:NATPAIR_UNTRACK_OUT - [0:0]\n:NATPAIR_UNTRACK_IN - [0:0]\n"+
 		"-F NATPAIR_UNTRACK_OUT\n-F NATPAIR_UNTRACK_IN\n"+
-		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -j CT --notrack\n"+
-		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p tcp --dport 61000:65535 -j RETURN\n"+
-		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p udp --dport 61000:65535 -j RETURN\n"+
-		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p tcp -j CT --notrack\n"+
-		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p udp -j CT --notrack\nCOMMIT\n", log.inputs[1])
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -p tcp --sport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p tcp --dport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -d 10.0.0.0/16 -p udp --sport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -s 10.0.0.0/16 -p udp --dport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -s 10.0.1.11/32 -p udp --dport 3780 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -d 169.254.169.123/32 -p udp --sport 32768:60999 --dport 123 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -s 169.254.169.123/32 -p udp --sport 123 --dport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -d 169.254.169.253/32 -p udp --sport 32768:60999 --dport 53 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -s 169.254.169.253/32 -p udp --sport 53 --dport 32768:60999 -j CT --notrack\nCOMMIT\n", log.inputs[1])
 	assert.Contains(t, log.commands, "iptables -w 1 -t raw -C OUTPUT -j NATPAIR_UNTRACK_OUT")
 	assert.Contains(t, log.commands, "iptables -w 1 -t raw -C PREROUTING -j NATPAIR_UNTRACK_IN")
 	// The NAT's own sockets never pick the canary's ports.
