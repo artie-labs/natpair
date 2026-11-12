@@ -1,0 +1,1 @@
+Follow-up review: moves readStats, now used only by the privileged test, into that test file. CI's untagged Linux golangci-lint flagged it as unused. Rechecked golangci-lint for darwin, for linux without tags and for linux with privileged,campaign,localfixture (only the pre-existing errcheck hits remain), and GOOS=linux go vet -tags privileged. No production change.
