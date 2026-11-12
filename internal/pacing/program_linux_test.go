@@ -302,3 +302,36 @@ func BenchmarkPace(b *testing.B) {
 		})
 	}
 }
+
+func TestPaceWorkerStateIsBounded(t *testing.T) {
+	p := load(t)
+	require.NoError(t, p.setLimits(Limits{WorkerPackets: 1}))
+	// More distinct workers than the map holds: the least recently seen are
+	// forgotten, so memory stays bounded.
+	for i := range maxWorkers + 5000 {
+		addr := netip.AddrFrom4([4]byte{10, 94, byte(i >> 8), byte(i)})
+		if i >= 65536 {
+			addr = netip.AddrFrom4([4]byte{172, 31, 128 + byte((i-65536)>>8), byte(i - 65536)})
+		}
+		run(t, p.pace, frame(sharedAddress, server), skbContext{Mark: mark(addr)})
+	}
+	var key [4]byte
+	var value [6]uint64
+	count := 0
+	for iter := p.workers.Iterate(); iter.Next(&key, &value); {
+		count++
+	}
+	assert.LessOrEqual(t, count, maxWorkers)
+}
+
+func TestPaceKeysOnlyTheReceivingWorker(t *testing.T) {
+	p := load(t)
+	require.NoError(t, p.setLimits(Limits{WorkerPackets: 1000}))
+	// A download from the internet whose source claims to be another worker
+	// is charged to the worker it goes to. Its source address never picks
+	// whose state it uses.
+	run(t, p.pace, frame(otherWorker, worker), skbContext{Mark: mark(server)})
+	var counters [6]uint64
+	assert.NoError(t, p.workers.Lookup(worker.As4(), &counters))
+	assert.ErrorIs(t, p.workers.Lookup(otherWorker.As4(), &counters), ebpf.ErrKeyNotExist)
+}
