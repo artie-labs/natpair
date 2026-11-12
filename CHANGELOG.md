@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- conntrackd's copies to the peer left through the shared ENI, from the
+  shared address, once that ENI was attached. Its MTU is 1500, so each copy
+  of about 8.9 KB went out as 7 fragments, which counted against the shared
+  ENI's packet allowance. Under connection churn, AWS dropped tens of
+  thousands of packets a second. A host route now sends traffic to the peer
+  through each NAT's own interface, from its own address. NATs set it at
+  boot, so pairs pick it up when they roll to a release with this fix.
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed
