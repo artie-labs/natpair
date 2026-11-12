@@ -173,8 +173,16 @@ Bandwidth and packet rate each have their own cap:
 After a cut, the cap ignores the counters for 50 ms, while packets already
 queued under the old cap leave.
 
+A cap only cuts when forwarded traffic is to blame. It must make up at
+least half of what AWS counts against that allowance: bytes sent, for
+bandwidth, and packets sent and received, for packet rate. And if a cut
+forwards less but AWS keeps dropping at the same rate, the cap goes back to
+where it was and stops cutting until the drops stop. Otherwise traffic the
+NAT can't pace, such as its own, would push the workers' caps down for
+nothing.
+
 A NAT can start from a configured cap, or with no cap until the counters
-first move. A cut never takes a cap below 100 Mbit/s or 10,000 packets a
+first move. A cut never takes a cap below 100 Mbit/s or 100,000 packets a
 second, because counters that move while forwarded traffic is lower than that
 come from other traffic.
 

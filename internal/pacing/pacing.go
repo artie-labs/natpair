@@ -40,11 +40,13 @@ const (
 	// split. Keeping it below the whole cap means the shared clocks rarely
 	// make a light worker wait for a heavy one.
 	workerShareRatio = 0.97
-	// bytesFloor and packetsFloor are the lowest caps. Allowance reports
-	// while forwarded traffic is below them, such as on a standby, come from
-	// traffic pacing doesn't control.
+	// bytesFloor and packetsFloor are the lowest allowance caps. Allowance
+	// reports while forwarded traffic is below them, such as on a standby,
+	// come from traffic pacing doesn't control. Every instance type natpair
+	// runs on forwards far more: on AWS, a c7gn.medium forwarded 420,000
+	// packets a second without exceeding its packet allowance.
 	bytesFloor   = 100e6 / 8 // 100 Mbit/s
-	packetsFloor = 10_000
+	packetsFloor = 100_000
 	// statusInterval is how often a NAT that forwarded traffic logs its
 	// pacing status.
 	statusInterval = time.Minute
@@ -191,7 +193,7 @@ type loop struct {
 
 	// bytes and packets follow the instance's allowances. cpu keeps the
 	// forwarded packet rate below what the CPUs can carry.
-	bytes, packets Cap
+	bytes, packets AllowanceCap
 	cpu            CPUCap
 
 	// window holds recent readings of the kernel's counters, for the
@@ -217,10 +219,12 @@ type loop struct {
 	statusExceeded Allowances
 }
 
-// reading is the kernel's counters at one time.
+// reading is the kernel's counters at one time: the pace program's, and the
+// paced interfaces' totals.
 type reading struct {
 	at     time.Duration
 	totals Totals
+	sent   InterfaceCounters
 }
 
 func (l *loop) step(ctx context.Context) {
@@ -253,8 +257,8 @@ func (l *loop) step(ctx context.Context) {
 		l.loaded = true
 		// Every load starts from the configured caps, so turning pacing off
 		// and on again also forgets what an earlier run learned.
-		l.bytes = NewCap(l.cfg.StartBytes, bytesFloor, max(2*l.cfg.Poll, minAllowanceHold))
-		l.packets = NewCap(l.cfg.StartPackets, packetsFloor, max(2*l.cfg.Poll, minAllowanceHold))
+		l.bytes = NewAllowanceCap(l.cfg.StartBytes, bytesFloor, max(2*l.cfg.Poll, minAllowanceHold))
+		l.packets = NewAllowanceCap(l.cfg.StartPackets, packetsFloor, max(2*l.cfg.Poll, minAllowanceHold))
 		l.cpu = NewCPUCap(runtime.NumCPU(), 2*shareInterval)
 		l.attached, l.allowances, l.workers = map[string]time.Duration{}, map[string]Allowances{}, map[[4]byte]Counters{}
 		l.window, l.cpuTimes, l.byteDemands, l.packetDemands = []reading{{at: now}}, nil, nil, nil
@@ -268,7 +272,7 @@ func (l *loop) step(ctx context.Context) {
 		slog.Warn("failed to read pacing counters", slog.Any("err", err))
 		return
 	}
-	l.window = append(l.window, reading{at: now, totals: totals})
+	l.window = append(l.window, reading{at: now, totals: totals, sent: l.interfaceTotals()})
 	for len(l.window) > 2 && l.window[1].at <= now-rateWindow {
 		l.window = l.window[1:]
 	}
@@ -316,11 +320,19 @@ func (l *loop) poll(now time.Duration) bool {
 	l.statusExceeded.PacketRate += exceeded.PacketRate
 	elapsed := now - l.polledAt
 	l.polledAt = now
-	bytesRate, packetsRate := l.rates()
+	bytesRate, packetsRate, bytesShare, packetsShare := l.rates()
 	before := [2]float64{l.bytes.Limit, l.packets.Limit}
 	var bytesChange, packetsChange Change
-	l.bytes, bytesChange = l.bytes.Step(Observation{Now: now, Elapsed: elapsed, Exceeded: exceeded.BandwidthIn + exceeded.BandwidthOut, Rate: bytesRate})
-	l.packets, packetsChange = l.packets.Step(Observation{Now: now, Elapsed: elapsed, Exceeded: exceeded.PacketRate, Rate: packetsRate})
+	l.bytes, bytesChange = l.bytes.Step(AllowanceObservation{Now: now, Elapsed: elapsed, Exceeded: exceeded.BandwidthIn + exceeded.BandwidthOut, Rate: bytesRate, Share: bytesShare})
+	l.packets, packetsChange = l.packets.Step(AllowanceObservation{Now: now, Elapsed: elapsed, Exceeded: exceeded.PacketRate, Rate: packetsRate, Share: packetsShare})
+	if bytesChange == GaveUp || packetsChange == GaveUp {
+		slog.Warn("AWS kept dropping after pacing forwarded less, so pacing restored its cap and stopped cutting it",
+			slog.Uint64("bw_in_allowance_exceeded", exceeded.BandwidthIn),
+			slog.Uint64("bw_out_allowance_exceeded", exceeded.BandwidthOut),
+			slog.Uint64("pps_allowance_exceeded", exceeded.PacketRate),
+			slog.Float64("cap_mbps", mbps(l.bytes.Limit)),
+			slog.Float64("cap_kpps", l.packets.Limit/1e3))
+	}
 	if bytesChange == CutDown || packetsChange == CutDown {
 		slog.Warn("the instance exceeded its network allowance, so pacing cut its cap",
 			slog.Uint64("bw_in_allowance_exceeded", exceeded.BandwidthIn),
@@ -334,17 +346,53 @@ func (l *loop) poll(now time.Duration) bool {
 	return before != [2]float64{l.bytes.Limit, l.packets.Limit}
 }
 
-// rates returns the forwarded bytes and packets per second over the window.
-// A single poll at a 10 ms interval holds a few GRO-merged packets at most,
-// too few for a steady rate.
-func (l *loop) rates() (bytes, packets float64) {
+// rates returns the forwarded bytes and packets per second over the window,
+// and the part of what AWS counts against each allowance that forwarded
+// traffic makes up. AWS counts bytes sent against the outbound bandwidth
+// allowance, and packets sent and received against the packet allowance. A
+// forwarded packet is received once and sent once. A single poll at a 10 ms
+// interval holds a few GRO-merged packets at most, too few for a steady
+// rate.
+func (l *loop) rates() (bytes, packets, bytesShare, packetsShare float64) {
 	first, last := l.window[0], l.window[len(l.window)-1]
 	seconds := (last.at - first.at).Seconds()
 	if seconds <= 0 {
-		return 0, 0
+		return 0, 0, 1, 1
 	}
 	d := last.totals.since(first.totals).sum()
-	return float64(d.Bytes) / seconds, float64(d.Packets) / seconds
+	bytes, packets = float64(d.Bytes)/seconds, float64(d.Packets)/seconds
+	share := func(forwarded, sent uint64) float64 {
+		if sent == 0 {
+			return 1
+		}
+		return min(1, float64(forwarded)/float64(sent))
+	}
+	var sentBytes, sentPackets uint64
+	if last.sent.TxBytes >= first.sent.TxBytes && last.sent.TxPackets+last.sent.RxPackets >= first.sent.TxPackets+first.sent.RxPackets {
+		sentBytes = last.sent.TxBytes - first.sent.TxBytes
+		sentPackets = last.sent.TxPackets + last.sent.RxPackets - first.sent.TxPackets - first.sent.RxPackets
+	}
+	return bytes, packets, share(d.Bytes, sentBytes), share(2*d.Packets, sentPackets)
+}
+
+// interfaceTotals sums the paced interfaces' totals. A failed read gives
+// zero totals, which count as nothing sent.
+func (l *loop) interfaceTotals() InterfaceCounters {
+	dev, err := os.ReadFile("/proc/net/dev")
+	if err != nil {
+		return InterfaceCounters{}
+	}
+	var sum InterfaceCounters
+	for name, c := range ParseNetDev(string(dev)) {
+		if at, ok := l.attached[name]; !ok || at < 0 {
+			continue
+		}
+		sum.RxBytes += c.RxBytes
+		sum.RxPackets += c.RxPackets
+		sum.TxBytes += c.TxBytes
+		sum.TxPackets += c.TxPackets
+	}
+	return sum
 }
 
 // share paces interfaces that appeared, measures each worker's demand and

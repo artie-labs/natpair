@@ -302,7 +302,9 @@ inbound packets. Consider a larger instance type.
 was close to running out of CPU. If it recurs, consider an instance type with
 more CPUs. `a CPU stayed full after pacing forwarded less` means something
 other than forwarding fills the CPU, such as conntrackd under heavy
-connection churn, so pacing can't relieve it.
+connection churn, so pacing can't relieve it. Likewise, `AWS kept dropping
+after pacing forwarded less` means traffic pacing doesn't control is over
+the allowance.
 
 ## Monitoring
 
