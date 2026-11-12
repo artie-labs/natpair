@@ -1,0 +1,17 @@
+Review of the allowance cap fix (own pass):
+- Root cause from the AWS logs: pps_allowance_exceeded came from conntrackd's fragments (fixed separately in #11), while forwarded traffic was a small share. The old cap cut on any report and fell to its 10k floor.
+- A pure AllowanceCap.Step, mirroring the CPUCap:
+  - No cut when forwarded traffic makes up less than half of what AWS counts. For bandwidth, that's egress bytes against interface tx bytes. For packet rate, it's twice the egress packets against tx plus rx packets, since a forwarded packet is counted once each way.
+  - A failed cut is undone, and cutting stops until a quiet poll. A cut counts as failed when the rate fell but drops stayed at 90% or more of their rate at the cut.
+  - Burst depletion still works: drops fall in proportion to the cut, and a simulated drop from 1000 to 400 converges under 400 with no give-up.
+- The packet floor is now 100k (bench: a medium forwarded 420k pps with no allowance drops).
+- Interface totals come from /proc/net/dev, which follows the reader's netns, so the campaign works too. Only paced interfaces are summed. When a new interface is added, the share is briefly understated, which errs toward not cutting.
+- Tests:
+  - The exact churn trace: 300 polls of large drops at a 0.24 share make no cuts.
+  - A cut that doesn't help gives one cut and then a give-up, and cuts resume after a quiet poll.
+  - Depletion following, the floor, and ParseNetDev.
+- Checks:
+  - go test -race.
+  - golangci-lint for darwin, linux and linux with test tags. Only pre-existing errcheck hits remain.
+  - Privileged tests and the 5 pacing campaign cases in the VM.
+Safety claim: the allowance caps can only cut while forwarded traffic dominates what AWS counts, and never below 100k pps or 100 Mbit/s. Proven in unit tests from the AWS trace, not yet rerun on AWS.
