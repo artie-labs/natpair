@@ -384,7 +384,10 @@ func blastOne(namespace string, source netip.Addr, address string, duration time
 	chunk := make([]byte, 64<<10)
 	started := time.Now()
 	for time.Since(started) < duration {
-		if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		// The cases check that connections survive, not how fast they
+		// recover. Swapping qdiscs drops what they hold, and TCP's backoff
+		// after losing a whole window can pass 5 s.
+		if err := conn.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
 			return transfer{Error: err.Error()}
 		}
 		if _, err := conn.Write(chunk); err != nil {
