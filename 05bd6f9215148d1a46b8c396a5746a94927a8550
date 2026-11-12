@@ -1,0 +1,11 @@
+Review:
+- Root cause from the AWS capture: the conntrackd client socket is unbound (0.0.0.0), and 'ip route get peer' resolved to the shared ENI with the shared source. 8,936-byte datagrams were fragmented at MTU 1500.
+- conntrackd's config already names the own address and interface. conntrackd 1.4.6 doesn't bind the sending socket to them, so routing is the fix.
+- The /32 route via the own interface from the own address beats both /24 connected routes. It is set at every bootstrap, before conntrackd starts. networkd keeps foreign routes (ManageForeignRoutes=no), and replace is idempotent.
+- Sibling paths: the takeover path (PrepareNetwork, ActivateShared) adds the shared subnet route, which the more specific host route still beats, so nothing is needed there. The peer's copies to this NAT arrive at the own address, where conntrackd listens.
+- Tests:
+  - A unit test asserts the command.
+  - A privileged test with two dummy links in one subnet, the shared one preferred, shows route get to the peer resolves to the own link and address. Without the route, the shared link wins by construction.
+  - Campaign baseline, owner killed, and standby restart all pass, so sync still works.
+- Existing pairs pick it up at the next boot on a release with this fix. The updater's roll reboots each NAT, and no new NATs are needed.
+Safety claim: only traffic to the peer's /32 changes route, verified in the privileged test and campaign. Not yet run on AWS.
