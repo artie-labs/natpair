@@ -32,6 +32,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"syscall"
 	"time"
 )
 
@@ -187,9 +188,10 @@ type loop struct {
 	loaded  bool
 	removed bool
 	retryAt time.Duration
-	// attached maps each paced interface to when it was attached, or to
-	// when to retry a failed attach, as a negative time.
-	attached map[string]time.Duration
+	// attached holds the paced interfaces by kernel index. An index outlives
+	// a rename: a new owner's shared ENI first appears as eth0, and udev
+	// renames it moments later, with the qdiscs and programs still on it.
+	attached map[int]*attachment
 
 	// bytes and packets follow the instance's allowances. cpu keeps the
 	// forwarded packet rate below what the CPUs can carry.
@@ -199,7 +201,7 @@ type loop struct {
 	// window holds recent readings of the kernel's counters, for the
 	// forwarded rate over the last rateWindow.
 	window     []reading
-	allowances map[string]Allowances
+	allowances map[int]Allowances
 	polledAt   time.Duration
 
 	// The previous fair share step.
@@ -217,6 +219,16 @@ type loop struct {
 	statusAt       time.Duration
 	status         Totals
 	statusExceeded Allowances
+}
+
+// attachment is one interface pacing knows about.
+type attachment struct {
+	name string
+	// paced is false after a failed attach, which is retried at retryAt.
+	paced   bool
+	retryAt time.Duration
+	// warnedAt is when a failed read of its counters was last logged.
+	warnedAt time.Duration
 }
 
 // reading is the kernel's counters at one time: the pace program's, and the
@@ -260,7 +272,7 @@ func (l *loop) step(ctx context.Context) {
 		l.bytes = NewAllowanceCap(l.cfg.StartBytes, bytesFloor, max(2*l.cfg.Poll, minAllowanceHold))
 		l.packets = NewAllowanceCap(l.cfg.StartPackets, packetsFloor, max(2*l.cfg.Poll, minAllowanceHold))
 		l.cpu = NewCPUCap(runtime.NumCPU(), 2*shareInterval)
-		l.attached, l.allowances, l.workers = map[string]time.Duration{}, map[string]Allowances{}, map[[4]byte]Counters{}
+		l.attached, l.allowances, l.workers = map[int]*attachment{}, map[int]Allowances{}, map[[4]byte]Counters{}
 		l.window, l.cpuTimes, l.byteDemands, l.packetDemands = []reading{{at: now}}, nil, nil, nil
 		l.polledAt, l.statusAt, l.status, l.statusExceeded = now, now, Totals{}, Allowances{}
 		l.sharedAt, l.shared = now-shareInterval, reading{at: now}
@@ -295,25 +307,39 @@ func (l *loop) step(ctx context.Context) {
 // reports whether a cap changed.
 func (l *loop) poll(now time.Duration) bool {
 	var exceeded Allowances
-	for name, at := range l.attached {
-		if at < 0 {
+	for index, a := range l.attached {
+		if !a.paced {
 			continue
 		}
-		current, found, err := l.k.allowances(name)
+		current, found, err := l.k.allowances(a.name)
+		if errors.Is(err, syscall.ENODEV) {
+			// Renamed or gone since the last share step.
+			l.k.forget(a.name)
+			if iface, lookupErr := net.InterfaceByIndex(index); lookupErr == nil {
+				a.name = iface.Name
+			} else {
+				delete(l.attached, index)
+				delete(l.allowances, index)
+			}
+			continue
+		}
 		if err != nil {
-			slog.Warn("failed to read allowance counters", slog.String("interface", name), slog.Any("err", err))
+			if now-a.warnedAt >= statusInterval || a.warnedAt == 0 {
+				a.warnedAt = now
+				slog.Warn("failed to read allowance counters", slog.String("interface", a.name), slog.Any("err", err))
+			}
 			continue
 		}
 		if !found {
 			continue
 		}
-		if previous, ok := l.allowances[name]; ok {
+		if previous, ok := l.allowances[index]; ok {
 			d := current.since(previous)
 			exceeded.BandwidthIn += d.BandwidthIn
 			exceeded.BandwidthOut += d.BandwidthOut
 			exceeded.PacketRate += d.PacketRate
 		}
-		l.allowances[name] = current
+		l.allowances[index] = current
 	}
 	l.statusExceeded.BandwidthIn += exceeded.BandwidthIn
 	l.statusExceeded.BandwidthOut += exceeded.BandwidthOut
@@ -382,9 +408,11 @@ func (l *loop) interfaceTotals() InterfaceCounters {
 	if err != nil {
 		return InterfaceCounters{}
 	}
+	counters := ParseNetDev(string(dev))
 	var sum InterfaceCounters
-	for name, c := range ParseNetDev(string(dev)) {
-		if at, ok := l.attached[name]; !ok || at < 0 {
+	for _, a := range l.attached {
+		c, ok := counters[a.name]
+		if !a.paced || !ok {
 			continue
 		}
 		sum.RxBytes += c.RxBytes
@@ -455,29 +483,43 @@ func (l *loop) attach(ctx context.Context, now time.Duration) {
 		slog.Warn("failed to list interfaces for pacing", slog.Any("err", err))
 		return
 	}
-	present := map[string]bool{}
+	present := map[int]bool{}
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagLoopback != 0 || slices.Contains(l.cfg.Skip, iface.Name) {
 			continue
 		}
-		present[iface.Name] = true
-		at, seen := l.attached[iface.Name]
-		if seen && (at >= 0 || now < -at) {
+		present[iface.Index] = true
+		a, seen := l.attached[iface.Index]
+		if seen && a.name != iface.Name {
+			l.k.forget(a.name)
+			a.name = iface.Name
+		}
+		if seen && (a.paced || now < a.retryAt) {
 			continue
 		}
+		if !seen {
+			a = &attachment{name: iface.Name}
+			l.attached[iface.Index] = a
+		}
 		if err := l.k.attach(ctx, iface.Name); err != nil {
-			l.attached[iface.Name] = -(now + retryInterval)
+			// A rename during the attach fails it. Retry at the next step
+			// under the new name rather than in a minute.
+			if current, lookupErr := net.InterfaceByIndex(iface.Index); lookupErr == nil && current.Name != iface.Name {
+				a.name = current.Name
+				continue
+			}
+			a.retryAt = now + retryInterval
 			slog.Warn("failed to pace an interface", slog.String("interface", iface.Name), slog.Any("err", err))
 			continue
 		}
-		l.attached[iface.Name] = now
+		a.paced = true
 		slog.Info("pacing interface", slog.String("interface", iface.Name))
 	}
-	for name := range l.attached {
-		if !present[name] {
-			delete(l.attached, name)
-			delete(l.allowances, name)
-			l.k.forget(name)
+	for index, a := range l.attached {
+		if !present[index] {
+			delete(l.attached, index)
+			delete(l.allowances, index)
+			l.k.forget(a.name)
 		}
 	}
 }
