@@ -38,6 +38,22 @@ func tc(t *testing.T, args ...string) string {
 	return output
 }
 
+// readStats returns the driver statistics with the given names, in order.
+// found is false if the interface doesn't report all of them.
+func readStats(iface string, names []string) (values []uint64, found bool, err error) {
+	fd, err := ethtoolSocket()
+	if err != nil {
+		return nil, false, err
+	}
+	defer unix.Close(fd)
+	index, err := findStats(fd, iface, names)
+	if err != nil || index.indexes == nil {
+		return nil, false, err
+	}
+	values, err = readIndexed(fd, iface, index)
+	return values, err == nil, err
+}
+
 func TestReadStats(t *testing.T) {
 	veth(t, "pst0", "pst1", 1)
 	peer, err := net.InterfaceByName("pst1")

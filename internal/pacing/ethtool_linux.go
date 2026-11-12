@@ -110,22 +110,6 @@ func readIndexed(fd int, iface string, index statIndex) ([]uint64, error) {
 	return values, nil
 }
 
-// readStats returns the driver statistics with the given names, in order.
-// found is false if the interface doesn't report all of them.
-func readStats(iface string, names []string) (values []uint64, found bool, err error) {
-	fd, err := ethtoolSocket()
-	if err != nil {
-		return nil, false, err
-	}
-	defer unix.Close(fd)
-	index, err := findStats(fd, iface, names)
-	if err != nil || index.indexes == nil {
-		return nil, false, err
-	}
-	values, err = readIndexed(fd, iface, index)
-	return values, err == nil, err
-}
-
 func ethtoolSocket() (int, error) {
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
