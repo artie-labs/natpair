@@ -1,0 +1,6 @@
+Review:
+- In attach, a failure on an interface whose index no longer exists now deletes it silently, rather than warning and waiting retryInterval.
+- The rename test's no-failure assertions are scoped to its own links. Other packages' tests share the container's network namespace and came and went during the run.
+- Campaign blast write deadline: 5 s to 30 s. The qdisc swap in pacing-off/on drops queued packets, and exponential RTO can pass 5 s. The case asserts survival.
+- The pacing campaign cases passed 3 times in fresh containers, and the privileged tests pass.
+- golangci-lint is clean apart from pre-existing hits.
