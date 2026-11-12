@@ -502,9 +502,15 @@ func (l *loop) attach(ctx context.Context, now time.Duration) {
 			l.attached[iface.Index] = a
 		}
 		if err := l.k.attach(ctx, iface.Name); err != nil {
-			// A rename during the attach fails it. Retry at the next step
-			// under the new name rather than in a minute.
-			if current, lookupErr := net.InterfaceByIndex(iface.Index); lookupErr == nil && current.Name != iface.Name {
+			// A rename or a detach during the attach fails it. Retry a
+			// renamed interface at the next step, rather than in a minute,
+			// and forget one that's gone.
+			current, lookupErr := net.InterfaceByIndex(iface.Index)
+			if lookupErr != nil {
+				delete(l.attached, iface.Index)
+				continue
+			}
+			if current.Name != iface.Name {
 				a.name = current.Name
 				continue
 			}

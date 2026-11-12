@@ -58,7 +58,9 @@ func TestLoopFollowsRenamedInterfaces(t *testing.T) {
 	// The programs stayed on the device through the rename, so it needs no
 	// second attach.
 	assert.Contains(t, tc(t, "filter", "show", "dev", "prn9", "egress"), "natpair_pace")
-	assert.NotContains(t, logs.String(), "failed")
+	// Other tests in the same network namespace come and go, so only this
+	// test's links count.
+	assert.NotRegexp(t, `failed[^\n]*"prn`, logs.String())
 	assert.Equal(t, 1, bytes.Count(logs.Bytes(), []byte(`"msg":"pacing interface","interface":"prn0"`)))
 	assert.NotContains(t, logs.String(), `"interface":"prn9"`)
 
@@ -68,5 +70,5 @@ func TestLoopFollowsRenamedInterfaces(t *testing.T) {
 	l.poll(3 * time.Second)
 	l.attach(t.Context(), 3*time.Second)
 	assert.NotContains(t, l.attached, iface.Index)
-	assert.NotContains(t, logs.String(), "failed")
+	assert.NotRegexp(t, `failed[^\n]*"prn`, logs.String())
 }
