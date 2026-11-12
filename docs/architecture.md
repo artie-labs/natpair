@@ -258,6 +258,16 @@ daemon is gone, or runs a release without pacing, forwards unpaced.
 - **Connection copies.** conntrackd sends connection state to the peer in
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.
+- **Pacing.** The pace program keeps state for at most 65,536 workers, and
+  forgets the least recently seen one first. The NAT's own traffic never
+  has state there. A packet gets a worker's state only if it arrived on an
+  interface, so the mark program marked it with its source address, and
+  that mark, or else its destination, is in the worker CIDRs. Traffic from
+  the internet is only forwarded as replies on a worker's own connections,
+  so it can't create or drain another worker's state. A worker that can
+  send from other workers' addresses can use up their fair shares. AWS stops
+  that unless an instance turns off its source and destination check, or
+  several pods share one node's addresses.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs
