@@ -91,8 +91,8 @@ func TestBootstrap(t *testing.T) {
 			restores = append(restores, i)
 		}
 	}
-	require.Len(t, restores, 2)
-	assert.Less(t, forwarding, restores[1])
+	require.Len(t, restores, 3)
+	assert.Less(t, forwarding, restores[2])
 	// The conntrack settings exist only once the module is loaded.
 	conntrackSettings := slices.IndexFunc(log.commands, func(c string) bool { return strings.Contains(c, "nf_conntrack_tcp_loose") })
 	require.Contains(t, log.commands, "modprobe nf_conntrack")
@@ -106,11 +106,30 @@ func TestBootstrap(t *testing.T) {
 		"-A NATPAIR_INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 10.0.0.0/16 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 10.0.1.11/32 -j ACCEPT\n"+
+		// Replies to the NAT's own untracked connections
+		"-A NATPAIR_INPUT -p tcp ! --syn -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -s 169.254.0.0/16 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -p icmp --icmp-type destination-unreachable -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -p icmp --icmp-type time-exceeded -j ACCEPT\n"+
 		// TCP gets a reset, so a remote server learns at once that a connection is gone.
 		"-A NATPAIR_INPUT -p tcp -j REJECT --reject-with tcp-reset\n"+
 		"-A NATPAIR_INPUT -j DROP\nCOMMIT\n", log.inputs[0])
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C INPUT -j NATPAIR_INPUT")
 	assert.Less(t, slices.Index(log.commands, "modprobe nf_conntrack"), conntrackSettings)
+	// The NAT's own connections bypass the connection table, except replies
+	// to the ports the own canary's probes are translated to. The firewall
+	// that accepts their replies comes first.
+	assert.Equal(t, "*raw\n:NATPAIR_UNTRACK_OUT - [0:0]\n:NATPAIR_UNTRACK_IN - [0:0]\n"+
+		"-F NATPAIR_UNTRACK_OUT\n-F NATPAIR_UNTRACK_IN\n"+
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p tcp --dport 61000:65535 -j RETURN\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p udp --dport 61000:65535 -j RETURN\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p tcp -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p udp -j CT --notrack\nCOMMIT\n", log.inputs[1])
+	assert.Contains(t, log.commands, "iptables -w 1 -t raw -C OUTPUT -j NATPAIR_UNTRACK_OUT")
+	assert.Contains(t, log.commands, "iptables -w 1 -t raw -C PREROUTING -j NATPAIR_UNTRACK_IN")
+	// The NAT's own sockets never pick the canary's ports.
+	assert.Less(t, slices.Index(log.commands, "sysctl -qw net.ipv4.ip_local_port_range=32768 60999"), restores[1])
 	// conntrackd's copies to the peer leave through the own interface from
 	// the own address, never through the shared ENI.
 	assert.Contains(t, log.commands, "ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10")
@@ -169,7 +188,10 @@ func TestPrepareNetwork(t *testing.T) {
 		"-A NATPAIR_SNAT -s 10.0.16.0/20 -j SNAT --to-source 10.0.1.100\n"+
 		"-A NATPAIR_SNAT -s 10.0.32.0/20 -j SNAT --to-source 10.0.1.100\n"+
 		"-A NATPAIR_SNAT -s 198.18.0.6/32 -j SNAT --to-source 10.0.1.100\n"+
-		// The own canary leaves through this NAT's own interface and IP.
+		// The own canary leaves through this NAT's own interface and IP, on
+		// ports the NAT's own sockets never use.
+		"-A NATPAIR_SNAT -s 198.18.0.2/32 -o ens5 -p tcp -j SNAT --to-source 10.0.1.10:61000-65535\n"+
+		"-A NATPAIR_SNAT -s 198.18.0.2/32 -o ens5 -p udp -j SNAT --to-source 10.0.1.10:61000-65535\n"+
 		"-A NATPAIR_SNAT -s 198.18.0.2/32 -o ens5 -j SNAT --to-source 10.0.1.10\n"+
 		// The chain is the only POSTROUTING rule.
 		"-F POSTROUTING\n-A POSTROUTING -j NATPAIR_SNAT\nCOMMIT\n", log.inputs[0])

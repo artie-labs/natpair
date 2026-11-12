@@ -5,7 +5,9 @@ package network_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,4 +121,40 @@ func TestPeerRoute(t *testing.T) {
 	require.Len(t, routes, 1)
 	assert.Equal(t, "own-test", routes[0].Dev)
 	assert.Equal(t, "10.94.5.10", routes[0].PrefSrc)
+}
+
+func TestOwnTrafficIsUntracked(t *testing.T) {
+	run(t, "ip", "link", "add", "own-test", "type", "dummy")
+	t.Cleanup(func() {
+		_, err := command.Run(context.WithoutCancel(t.Context()), 2*time.Second, "ip", "link", "del", "own-test")
+		assert.NoError(t, err)
+	})
+	run(t, "ip", "addr", "add", "10.94.6.10/24", "dev", "own-test")
+	run(t, "ip", "link", "set", "own-test", "up")
+	cfg := testConfig(t)
+	cfg.Instance.PrivateIP = netip.MustParseAddr("10.94.6.10")
+	require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, network.SystemRunner{}).UntrackOwnTraffic(t.Context()))
+
+	tracked := func(port string) bool {
+		output, err := command.Run(t.Context(), 2*time.Second, "conntrack", "-L", "-p", "tcp", "--dport", port)
+		return err == nil && strings.Contains(output, "dport="+port)
+	}
+	connect := func(port string) {
+		listener, err := net.Listen("tcp4", "10.94.6.10:"+port)
+		require.NoError(t, err)
+		defer listener.Close()
+		dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("10.94.6.10")}, Timeout: time.Second}
+		conn, err := dialer.Dial("tcp4", "10.94.6.10:"+port)
+		require.NoError(t, err)
+		defer conn.Close()
+		accepted, err := listener.Accept()
+		require.NoError(t, err)
+		_ = accepted.Close()
+	}
+	// A connection of the NAT's own takes no entry in the connection table,
+	// so a full table can't drop it.
+	connect("40123")
+	assert.False(t, tracked("40123"))
+	// Replies to the own canary's ports stay tracked, which only traffic from
+	// outside the host shows. The campaign's own-path probes cover it.
 }

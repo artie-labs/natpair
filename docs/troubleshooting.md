@@ -155,3 +155,11 @@ the module installed it need replacing.
 
 Someone ran `natpair pacing-off` on this NAT. Run `sudo natpair pacing-on` to
 pace traffic again.
+
+### `the connection table is nearly full`
+
+The kernel's connection table is at least 90% full. Once it's full, new
+worker connections and the NAT's probes are dropped, and the owner may step
+down. Closed connections stay in the table for 2 minutes, so a high rate of
+new connections fills it faster than the number of open ones suggests.
+Raise `max_connections` and replace the NATs.

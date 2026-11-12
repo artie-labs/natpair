@@ -23,8 +23,18 @@ import (
 )
 
 const (
-	snatChain      = "NATPAIR_SNAT"
-	inputChain     = "NATPAIR_INPUT"
+	snatChain  = "NATPAIR_SNAT"
+	inputChain = "NATPAIR_INPUT"
+	// untrackOutChain and untrackInChain, in the raw table, exempt the NAT's
+	// own connections from connection tracking.
+	untrackOutChain = "NATPAIR_UNTRACK_OUT"
+	untrackInChain  = "NATPAIR_UNTRACK_IN"
+	// localPorts is the port range this NAT's own sockets use, and
+	// canaryPorts the range the own canary's probes are translated to. They
+	// don't overlap, so a reply to the NAT's address says by its port
+	// whether it needs translating back to the canary or goes to a socket.
+	localPorts     = "32768 60999"
+	canaryPorts    = "61000-65535"
 	commandTimeout = 2 * time.Second
 	// sharedTable is the route table, and the priority of the rules that use
 	// it, for traffic leaving through the shared ENI.
@@ -92,6 +102,9 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	if err := n.routePeer(ctx); err != nil {
 		return err
 	}
+	if err := n.untrackOwnTraffic(ctx); err != nil {
+		return err
+	}
 	// The conntrack settings below exist only once this module is loaded. On
 	// a fresh boot nothing has loaded it yet. A container can't load modules,
 	// but its host may already have, as in natpair's own tests.
@@ -145,6 +158,17 @@ func (n *Network) protectHost(ctx context.Context) error {
 	for _, source := range append(slices.Clone(n.cfg.Instance.VPCCIDRs), netip.PrefixFrom(n.cfg.PeerIP, 32)) {
 		rules += fmt.Sprintf("-A %s -s %s -j ACCEPT\n", inputChain, source)
 	}
+	// The NAT's own connections aren't tracked (see untrackOwnTraffic), so
+	// their replies are accepted by what they are instead of by state. A TCP
+	// packet without SYN can't open a connection, and the kernel resets it
+	// unless it belongs to one of the NAT's sockets, as the reject rule below
+	// would. Link-local sources, such as the instance metadata service and
+	// Amazon Time Sync, can't be reached from outside the instance. ICMP
+	// unreachable and time-exceeded messages carry path MTU discovery.
+	rules += "-A " + inputChain + " -p tcp ! --syn -m conntrack --ctstate UNTRACKED -j ACCEPT\n"
+	rules += "-A " + inputChain + " -s 169.254.0.0/16 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"
+	rules += "-A " + inputChain + " -p icmp --icmp-type destination-unreachable -j ACCEPT\n"
+	rules += "-A " + inputChain + " -p icmp --icmp-type time-exceeded -j ACCEPT\n"
 	// Reset other TCP instead of dropping it. A remote server still sending on
 	// a connection the new owner never copied then closes it at once. Dropped,
 	// it waits for its own timeout. A Postgres server, for example, keeps a dead
@@ -173,6 +197,59 @@ func (n *Network) routePeer(ctx context.Context) error {
 	_, err := n.run.Run(ctx, commandTimeout, "ip", "route", "replace", netip.PrefixFrom(n.cfg.PeerIP, 32).String(),
 		"dev", n.cfg.Instance.Interface, "src", n.cfg.Instance.PrivateIP.String())
 	return err
+}
+
+// untrackOwnTraffic exempts the NAT's own connections, from and to its own
+// address, from connection tracking. A full connection table drops every
+// new tracked connection. On AWS, 3,000 new worker connections a second
+// filled a 262,144-entry table, and the owner's DNS lookups failed with the
+// workers' connections. Untracked, the NAT's DNS lookups, lease renewals, AWS
+// API calls, metadata reads and conntrackd copies don't need an entry.
+//
+// The own canary's probes are translated to the NAT's address, so their
+// replies must stay tracked to be translated back. The canary's probes use
+// canaryPorts, which the NAT's own sockets never pick, so replies to those
+// ports stay tracked. The probes test the forwarding path, which needs the
+// table, so they still fail when it is full, as new worker connections do.
+func (n *Network) untrackOwnTraffic(ctx context.Context) error {
+	if _, err := n.run.Run(ctx, commandTimeout, "sysctl", "-qw", "net.ipv4.ip_local_port_range="+localPorts); err != nil {
+		return err
+	}
+	own := n.cfg.Instance.PrivateIP.String()
+	canary := strings.Replace(canaryPorts, "-", ":", 1)
+	rules := "*raw\n:" + untrackOutChain + " - [0:0]\n:" + untrackInChain + " - [0:0]\n"
+	rules += "-F " + untrackOutChain + "\n-F " + untrackInChain + "\n"
+	rules += fmt.Sprintf("-A %s -s %s -j CT --notrack\n", untrackOutChain, own)
+	for _, protocol := range []string{"tcp", "udp"} {
+		rules += fmt.Sprintf("-A %s -d %s -p %s --dport %s -j RETURN\n", untrackInChain, own, protocol, canary)
+	}
+	rules += fmt.Sprintf("-A %s -d %s -p tcp -j CT --notrack\n", untrackInChain, own)
+	rules += fmt.Sprintf("-A %s -d %s -p udp -j CT --notrack\nCOMMIT\n", untrackInChain, own)
+	if _, err := n.run.RunWithInput(ctx, commandTimeout, rules, "iptables-restore", "--noflush", "-w", "1"); err != nil {
+		return err
+	}
+	if err := n.ensureRule(ctx, "raw", "OUTPUT", "-j", untrackOutChain); err != nil {
+		return err
+	}
+	return n.ensureRule(ctx, "raw", "PREROUTING", "-j", untrackInChain)
+}
+
+// ConnectionTableUse returns how many connections the kernel's table holds,
+// and how many it can.
+func ConnectionTableUse() (count, limit int, err error) {
+	for path, target := range map[string]*int{
+		"/proc/sys/net/netfilter/nf_conntrack_count": &count,
+		"/proc/sys/net/netfilter/nf_conntrack_max":   &limit,
+	} {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to read the connection table's size: %w", err)
+		}
+		if *target, err = strconv.Atoi(strings.TrimSpace(string(contents))); err != nil {
+			return 0, 0, fmt.Errorf("failed to parse the connection table's size: %w", err)
+		}
+	}
+	return count, limit, nil
 }
 
 // sizeConnectionTable matches the kernel's connection table to conntrackd's
@@ -265,6 +342,11 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 	rules += "-A " + snatChain + " -m addrtype --src-type LOCAL -j RETURN\n"
 	for _, source := range n.sharedSources() {
 		rules += fmt.Sprintf("-A %s -s %s -j SNAT --to-source %s\n", snatChain, source, shared)
+	}
+	// The own canary's probes take ports the NAT's own sockets never use, so
+	// their replies stay tracked (see untrackOwnTraffic).
+	for _, protocol := range []string{"tcp", "udp"} {
+		rules += fmt.Sprintf("-A %s -s %s/32 -o %s -p %s -j SNAT --to-source %s:%s\n", snatChain, cfg.OwnCanary().Guest(), cfg.Instance.Interface, protocol, cfg.Instance.PrivateIP, canaryPorts)
 	}
 	rules += fmt.Sprintf("-A %s -s %s/32 -o %s -j SNAT --to-source %s\n", snatChain, cfg.OwnCanary().Guest(), cfg.Instance.Interface, cfg.Instance.PrivateIP)
 	rules += "-F POSTROUTING\n-A POSTROUTING -j " + snatChain + "\nCOMMIT\n"
