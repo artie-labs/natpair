@@ -1,0 +1,18 @@
+Review:
+- Security of the stateless accepts, compared with before:
+  - Non-SYN TCP to the NAT that no tracked connection owns used to be INVALID and got a reset. Now it reaches the stack, which resets it unless a socket owns it, and checks sequence numbers more strictly than conntrack with be_liberal.
+  - Listeners still need a SYN, or a valid SYN cookie.
+  - Link-local sources can't be routed from outside the instance.
+  - The ICMP unreachable and time-exceeded accepts only cover error messages.
+  - UDP from outside the VPC to the NAT is still dropped, unless it's link-local.
+- Breakage risk, checked:
+  - The own canary is SNATed to the own address, so its replies need tracking. It now uses ports 61000 to 65535, which local sockets never pick because Bootstrap pins ip_local_port_range. Replies to those ports RETURN before the notrack.
+  - The shared address and forwarded traffic stay tracked.
+  - Lease traffic, IMDS, DNS and conntrackd are untracked, and their replies are accepted by the VPC, peer, link-local or non-SYN rules.
+- Tradeoff: the probes stay tracked, because they test the forwarding path. A full table also drops new worker connections, so failing probes is a true signal. The new warning names the cause.
+- Tests:
+  - Unit tests for the INPUT rules, the raw rules and their order, the canary SNAT and the port range sysctl.
+  - A privileged test shows a connection on the own address leaves no conntrack entry.
+  - All 17 campaign cases pass, including the own-path probe through the new port range and conntrackd copies.
+- Checks: go vet, go test, golangci-lint (darwin, linux, linux with test tags; only pre-existing errcheck hits remain).
+Safety claim: only traffic to or from the own address changes, and replies to the canary's ports stay tracked. Proven by the privileged test and the campaign. Not yet run on AWS.
