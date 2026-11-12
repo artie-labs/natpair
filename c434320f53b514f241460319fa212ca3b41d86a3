@@ -1,0 +1,18 @@
+Review of the CPU cap fix (own pass):
+- Root cause confirmed from the AWS logs: in the churn and toggle runs the CPU was full at 24k to 37k forwarded pps, about 4% of a CPU. In the TCP run, busy stayed at 1.0 after forwarding fell from 559k to 287k. The old cap cut on any busy CPU.
+- The fix is a pure CPUCap.Step:
+  - It cuts only when the cap is binding (rate at least 0.9 of the cap) and forwarding at 1.6 us per packet per CPU explains at least half of the busiest CPU.
+  - A cut is judged once, before the CPU next calms. On a CPU that was saturated, it counts as working only if the CPU leaves saturation. Otherwise busy must fall by at least half of what the forwarded drop predicts. A failed cut is undone, and cutting stops until the CPU is below 80%.
+  - The floor is 250k per CPU.
+- A stale-cut bug found while testing: a cut from minutes earlier made a later genuine overload look futile. It's fixed by clearing the cut on any calm observation.
+- Pacing-on (any load) recreates all caps, so learned caps don't survive an off/on. The campaign now asserts the reset.
+- Tests:
+  - The exact TCP trace: one cut, then a give-up back to 400k, with no spiral.
+  - The churn trace: 40 steps at busy 1.0 and 24k to 36k pps with no cut.
+  - Not binding means no cut. Two CPUs split the attribution.
+  - A simulated saturation still settles at 70% to 80% busy and follows extra load down, staying at or above the floor.
+- Checks:
+  - go test, go vet with all tags.
+  - golangci-lint for darwin, linux and linux with test tags. Only pre-existing errcheck hits remain.
+  - Privileged tests and the 5 pacing campaign cases in the VM.
+Safety claim: the CPU cap can now only cut while forwarding is the binding cause, and it never goes below 250k pps per CPU. Proven in unit tests from the AWS traces, not yet rerun on AWS.
