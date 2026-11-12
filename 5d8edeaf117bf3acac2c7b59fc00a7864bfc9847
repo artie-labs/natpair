@@ -1,0 +1,15 @@
+Security re-review of #12, rules narrowed as requested:
+- Raw notrack covers only:
+  - TCP on own ephemeral ports (sport out, dport in),
+  - UDP on those ports with the VPC CIDRs,
+  - the peer's UDP to 3780,
+  - UDP with 169.254.169.123:123 and 169.254.169.253:53.
+- The canary range 61000 to 65535 is outside the ephemeral range, so it stays tracked without a special rule.
+- INPUT stateless accepts:
+  - non-SYN TCP to the own address on 32768:60999 only,
+  - UDP from exactly those two link-local services and ports,
+  - four ICMP error types to the own address, at 50/s with a burst of 100.
+- Non-SYN TCP to any other port, including the canary range, still hits the REJECT reset rule, as before #12. A privileged test sends crafted ACKs and a SYN from outside the VPC and checks the rule counters for each path, 200 runs stable.
+- ICMP threat: Linux matches errors to sockets by 4-tuple and checks TCP sequence numbers. Path MTU can't drop below min_pmtu 552. Unreachable messages are soft errors on established TCP. They can abort a matching handshake or DNS lookup, which is retried. The rate limit bounds it.
+- Residual: UDP from VPC hosts to the NAT's ephemeral ports is accepted. VPC traffic already reached every port before.
+- Checks: unit tests on exact rules, the full 17-case campaign, golangci-lint, go test.
