@@ -1,0 +1,10 @@
+Security review of pacing (BPF and tc), for the coordinator's request:
+- The workers map is an LRU hash capped at 65,536. A privileged test sends 70,536 distinct workers and the map stays at the cap. Eviction only resets a worker's bucket, which gives it a fresh burst, so evicting can't block anyone.
+- Keys come only from the mark (a source address copied at ingress; it stays 0 if already set) when it is in the worker CIDRs, or else from a destination in the worker CIDRs. The NAT's own traffic is unmarked and never keyed.
+- A privileged test shows a download whose source claims to be another worker is charged to its destination only.
+- Exposure:
+  - The internet can only reach the pace program through replies on existing worker connections, which unsolicited packets don't have, because they're delivered locally.
+  - A worker able to spoof other workers' addresses can drain their shares. AWS's source and destination check prevents that except for instances that disable it, or pods sharing a node's addresses.
+  - The tc and BPF objects are root-only (pinned under /sys/fs/bpf/natpair, mode 0700).
+- Docs: the architecture security section gains a pacing bullet.
+- Checks: go vet, privileged tests in the VM, golangci-lint.
