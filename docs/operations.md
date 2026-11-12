@@ -267,7 +267,8 @@ sudo natpair pacing-off
 
 The NAT removes its qdiscs and programs within a second, without a restart or
 a handover, and traffic flows unpaced. The request lasts across restarts and
-reboots until you run `sudo natpair pacing-on`. To turn pacing off for good,
+reboots until you run `sudo natpair pacing-on`, which starts again from the
+configured caps. To turn pacing off for good,
 set `enabled = false` and replace the NATs. A daemon whose configuration
 turns pacing off removes anything an earlier daemon installed during the same
 boot. If no daemon renews the limits, for example after rolling `release`
@@ -299,7 +300,9 @@ inbound packets. Consider a larger instance type.
 
 `a forwarding CPU is nearly full, so pacing cut the packet cap` means the NAT
 was close to running out of CPU. If it recurs, consider an instance type with
-more CPUs.
+more CPUs. `a CPU stayed full after pacing forwarded less` means something
+other than forwarding fills the CPU, such as conntrackd under heavy
+connection churn, so pacing can't relieve it.
 
 ## Monitoring
 

@@ -54,6 +54,13 @@ const (
 	// while forwarded traffic stayed below the floor, so forwarded traffic
 	// didn't cause it, and the cap stays.
 	IgnoredBelowFloor Change = "ignored below floor"
+	// GaveUp means a cut lowered the forwarded rate without freeing the
+	// CPU, so the CPU cap went back to where it was and stopped cutting
+	// until the CPU calms down.
+	GaveUp Change = "gave up"
+	// NotForwarding means the CPU was busy but forwarded packets don't
+	// explain it, so the CPU cap stays.
+	NotForwarding Change = "not forwarding"
 )
 
 // Observation is what a NAT saw during one poll of the allowance counters.

@@ -152,13 +152,13 @@ func (l *lab) pacingCases() {
 		time.Sleep(time.Second)
 		l.ns("a", l.binary, "pacing-on")
 		l.wait(func() bool { return l.pacingInstalled("a") }, 3*time.Second, "a paces again")
-		// The NAT remembers its cap across the off and on.
+		// Pacing-on starts again from the configured cap.
 		resumedCap := l.capMbps("a")
 		paced := l.pacedMbps("a", 2*time.Second)
 		result := l.streamResult(upload)
 		heavyResult := <-heavy
 		l.require(raisedCap > startCap, fmt.Sprintf("the cap rises under pressure: %.0f to %.0f Mbit/s", startCap, raisedCap))
-		l.require(resumedCap >= raisedCap, fmt.Sprintf("pacing resumes from the cap it had: %.0f Mbit/s, %.0f before", resumedCap, raisedCap))
+		l.require(resumedCap < raisedCap && resumedCap >= pacingStartMbps, fmt.Sprintf("pacing resumes from the configured cap: %.0f Mbit/s, %.0f before", resumedCap, raisedCap))
 		l.require(paced <= 1.1*resumedCap, fmt.Sprintf("the resumed cap holds: %.0f Mbit/s paced, cap %.0f", paced, resumedCap))
 		l.require(heavyResult.Error == "", "the heavy upload kept its connections: "+heavyResult.Error)
 		return map[string]any{"cap_before_mbps": startCap, "cap_raised_mbps": raisedCap, "cap_resumed_mbps": resumedCap, "paced_after_resume_mbps": paced, "upload": result}

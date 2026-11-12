@@ -63,15 +63,6 @@ const (
 	// already queued under the old cap leave over the next 20 ms horizon,
 	// and AWS may drop those too.
 	minAllowanceHold = 50 * time.Millisecond
-	// cpuBusyThreshold is how busy the busiest CPU may get before the CPU
-	// cap cuts. Past it, the NAT's own work on that CPU, such as lease
-	// renewals, DNS lookups and probes, starts to time out. On AWS, a NAT
-	// whose CPU ran full stepped down 3 to 4 times a minute.
-	cpuBusyThreshold = 0.8
-	// cpuStartPerCPU is the CPU cap a NAT starts from, in forwarded packets
-	// a second per CPU. On AWS, one CPU forwarded about 600,000 small
-	// packets a second at 100%, about 1.6 µs each.
-	cpuStartPerCPU = 400_000
 )
 
 // Config configures [Run].
@@ -169,15 +160,7 @@ func Run(ctx context.Context, cfg Config, now func() time.Duration) {
 		return
 	}
 	defer k.close()
-	cpus := runtime.NumCPU()
-	l := &loop{
-		cfg:     cfg,
-		k:       k,
-		now:     now,
-		bytes:   NewCap(cfg.StartBytes, bytesFloor, max(2*cfg.Poll, minAllowanceHold)),
-		packets: NewCap(cfg.StartPackets, packetsFloor, max(2*cfg.Poll, minAllowanceHold)),
-		cpu:     NewCap(cpuStartPerCPU*float64(cpus), packetsFloor, 2*shareInterval),
-	}
+	l := &loop{cfg: cfg, k: k, now: now}
 	ticker := time.NewTicker(cfg.Poll)
 	defer ticker.Stop()
 	for {
@@ -208,7 +191,8 @@ type loop struct {
 
 	// bytes and packets follow the instance's allowances. cpu keeps the
 	// forwarded packet rate below what the CPUs can carry.
-	bytes, packets, cpu Cap
+	bytes, packets Cap
+	cpu            CPUCap
 
 	// window holds recent readings of the kernel's counters, for the
 	// forwarded rate over the last rateWindow.
@@ -267,6 +251,11 @@ func (l *loop) step(ctx context.Context) {
 			return
 		}
 		l.loaded = true
+		// Every load starts from the configured caps, so turning pacing off
+		// and on again also forgets what an earlier run learned.
+		l.bytes = NewCap(l.cfg.StartBytes, bytesFloor, max(2*l.cfg.Poll, minAllowanceHold))
+		l.packets = NewCap(l.cfg.StartPackets, packetsFloor, max(2*l.cfg.Poll, minAllowanceHold))
+		l.cpu = NewCPUCap(runtime.NumCPU(), 2*shareInterval)
 		l.attached, l.allowances, l.workers = map[string]time.Duration{}, map[string]Allowances{}, map[[4]byte]Counters{}
 		l.window, l.cpuTimes, l.byteDemands, l.packetDemands = []reading{{at: now}}, nil, nil, nil
 		l.polledAt, l.statusAt, l.status, l.statusExceeded = now, now, Totals{}, Allowances{}
@@ -394,14 +383,16 @@ func (l *loop) share(ctx context.Context, now time.Duration, totals Totals) {
 		return
 	}
 	l.busiest = BusiestCPU(previous, cpuTimes)
-	var overloaded uint64
-	if l.busiest > cpuBusyThreshold {
-		overloaded = 1
-	}
 	var change Change
-	l.cpu, change = l.cpu.Step(Observation{Now: now, Elapsed: elapsed, Exceeded: overloaded, Rate: forwarded})
-	if change == CutDown {
+	l.cpu, change = l.cpu.Step(CPUObservation{Now: now, Elapsed: elapsed, Busiest: l.busiest, Rate: forwarded})
+	switch change {
+	case CutDown:
 		slog.Warn("a forwarding CPU is nearly full, so pacing cut the packet cap",
+			slog.Float64("busiest_cpu", l.busiest),
+			slog.Float64("forwarded_kpps", forwarded/1e3),
+			slog.Float64("cpu_cap_kpps", l.cpu.Limit/1e3))
+	case GaveUp:
+		slog.Warn("a CPU stayed full after pacing forwarded less, so pacing restored the packet cap and stopped cutting it",
 			slog.Float64("busiest_cpu", l.busiest),
 			slog.Float64("forwarded_kpps", forwarded/1e3),
 			slog.Float64("cpu_cap_kpps", l.cpu.Limit/1e3))

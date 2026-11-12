@@ -187,7 +187,12 @@ inherits the same load. So the daemon also caps forwarded packets a second
 by CPU. Four times a second it reads `/proc/stat`. If the busiest CPU was
 more than 80% busy, the cap is cut the same way as an allowance cap, then
 settles at 95% of the rate that overloaded it and probes again every 5
-minutes. It starts at 400,000 packets a second per CPU. The packet cap in
+minutes. It cuts only when forwarding is to blame: forwarded traffic is at
+the cap, and at 1.6 µs a packet it explains at least half of the load. If a
+cut forwards less but the CPU stays as busy, as when conntrackd or traffic
+that senders keep offering fills it, the cap goes back to where it was and
+stops cutting until the CPU calms down. It starts at 400,000 packets a second
+per CPU and never goes below 250,000. The packet cap in
 force is the lower of the two. Pacing delays and drops packets on the way
 out, so it bounds incoming traffic only as TCP senders slow down.
 
@@ -195,7 +200,8 @@ out, so it bounds incoming traffic only as TCP senders slow down.
 delay or stop a takeover, and forwarding works if it fails to load. Both
 NATs pace their own interface all the time. A new owner paces the shared ENI
 within a second of the ENI appearing. Each NAT keeps its caps in memory and
-starts again from the configured values when its daemon restarts. If no
+starts again from the configured values when its daemon restarts, or when
+`natpair pacing-on` turns pacing back on. If no
 daemon renews the limits for 10 s, the kernel stops pacing, so a NAT whose
 daemon is gone, or runs a release without pacing, forwards unpaced.
 
