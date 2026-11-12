@@ -60,7 +60,9 @@ going to the wrong place.
 Each NAT runs conntrackd, which copies the owner's connection table to the
 standby as connections open and close. When the standby takes over, it loads
 those copies, so established TCP connections keep their source address and
-port and carry on. Only TCP over IPv4 is copied.
+port and carry on. Only TCP over IPv4 is copied. The copies always travel
+between the NATs' own interfaces and addresses, never through the shared
+ENI.
 
 A connection the new owner doesn't know gets a TCP reset instead of silence,
 so the client reconnects at once rather than waiting for its own timeout.
