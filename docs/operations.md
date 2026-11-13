@@ -76,7 +76,22 @@ The module's `nat_instance_ids` output maps `a` and `b` to instance IDs.
 
    It should print the module's `shared_public_ip` output.
 
-3. Optionally, test a handover. Run `sudo natpair maintenance` on the owner,
+3. On each NAT, check that receive processing runs in threads and the NAT's
+   own work is weighted ahead of forwarding:
+
+   ```sh
+   grep . /sys/class/net/*/threaded
+   ps -eo pid,ni,comm | grep napi/
+   cat /sys/fs/cgroup/natpair.slice/cpu.weight
+   ```
+
+   Each ENI, such as `ens5` and `ens6`, prints `1`. `lo` and the probes'
+   `nat-can` interfaces have no receive queues of their own and print `0`.
+   The primary interface's `napi/` threads show nice `-10` and the shared
+   ENI's show `0`. The slice's weight is `1000`. See
+   [How natpair works](architecture.md#staying-responsive-at-full-load).
+
+4. Optionally, test a handover. Run `sudo natpair maintenance` on the owner,
    wait for the standby to log `forwarding open`, and check step 2 again. Then
    run `sudo natpair resume` on the old owner so it becomes the standby.
 

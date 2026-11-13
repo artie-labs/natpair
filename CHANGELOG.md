@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A NAT whose forwarding fills its CPU keeps renewing its lease and resolving
+  the probe receiver, instead of stepping down and passing the overload to
+  the peer. Received packets are now processed in kernel threads (threaded
+  NAPI). The daemon and conntrackd run in `natpair.slice`, and the primary
+  interface's threads, which receive the NAT's own traffic, at nice -10. Both
+  have about ten times the CPU weight of the shared ENI's threads. New NATs
+  get it at first boot, and running NATs when they upgrade.
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed
