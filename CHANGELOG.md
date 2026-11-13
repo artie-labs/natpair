@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table at least 90% full, no longer counts as a path failure. NATs log `the
   connection table is full` and `the health probe failed because this NAT's
   connection table is full`.
+- A closed TCP connection now leaves the connection table after 30 s instead
+  of 120 s, so the same table holds 4 times as many new connections a
+  second. NATs set this at boot.
 
 ## [0.1.1] - 2026-11-09
 
