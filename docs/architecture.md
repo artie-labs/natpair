@@ -159,16 +159,26 @@ when it drops, it drops on both ENIs: on AWS, after a c7gn.medium's burst ran
 out, its own ENI lost 40% of the acknowledgements going back to workers.
 Bandwidth and packet rate each have their own cap:
 
-- While the counters stay still and traffic presses the cap, it rises by 1%
-  a second.
+- Until a counter first moves, there is no cap, unless you set a start.
+  While the counters stay still and traffic presses a cap, it rises by 5% a
+  second.
 - When a counter moves, the cap drops to 80% of the rate forwarded at the
   time, and the NAT remembers that rate. If the counters keep moving after
   the cut, the next cut is to 50%.
-- The cap then climbs back to 95% of the remembered rate and stays there.
-  Every 5 minutes, and only while traffic presses it, it rises again to
-  check whether the limit went up.
+- The cap then climbs back to 95% of the remembered rate in 3 s. 10 s after
+  the cut, and only while traffic presses it, it rises again by 5% a second
+  to check whether the limit went up, as it does when burst credits refill.
+  The counters show a drop within one poll, so a probe that finds the same
+  limit goes about 0.05% over it and costs one cut.
 - When burst credits run out and the limit falls to the instance's baseline,
-  the counters move again and the cap follows it down.
+  the counters move again and the cap follows it down. On a c7gn.medium the
+  limit fell from 8.35 to 3.1 Gbps. Replayed in a test, the cap is under
+  3.1 Gbps within 100 ms.
+
+AWS doesn't always count. Once, when a c7gn.medium's burst ran out, its
+traffic fell from 6.25 to 3.1 Gbps with no counter moving on any host.
+Pacing can't see that, so the caps stay where they were and AWS's own limit
+applies.
 
 After a cut, the cap ignores the counters for 50 ms, while packets already
 queued under the old cap leave.
@@ -188,21 +198,32 @@ come from other traffic.
 
 **The CPUs' limit.** A NAT forwards in the kernel, on the CPUs that take the
 network interrupts, at about 1.1 µs a full-size packet and 1.6 µs a small
-one. One CPU runs out at about 600,000 forwarded packets a second, long
-before AWS's packet rate allowance. A NAT whose CPU is full can't renew its
-lease, resolve DNS or probe its path, so it steps down, and the standby
-inherits the same load. So the daemon also caps forwarded packets a second
-by CPU. Four times a second it reads `/proc/stat`. If the busiest CPU was
-more than 80% busy, the cap is cut the same way as an allowance cap, then
-settles at 95% of the rate that overloaded it and probes again every 5
-minutes. It cuts only when forwarding is to blame: forwarded traffic is at
-the cap, and at 1.6 µs a packet it explains at least half of the load. If a
-cut forwards less but the CPU stays as busy, as when conntrackd or traffic
-that senders keep offering fills it, the cap goes back to where it was and
-stops cutting until the CPU calms down. It starts at 400,000 packets a second
-per CPU and never goes below 250,000. The packet cap in
-force is the lower of the two. Pacing delays and drops packets on the way
-out, so it bounds incoming traffic only as TCP senders slow down.
+one. One CPU runs out at about 600,000 small packets a second, long before
+AWS's packet rate allowance. A NAT whose CPU is full can't renew its lease,
+resolve DNS or probe its path, so it steps down, and the standby inherits
+the same load. So the daemon also caps forwarded packets a second by CPU,
+starting with no cap.
+
+- Every 100 ms it reads `/proc/stat`, and judges the average of the last
+  three readings. `/proc/stat` counts in hundredths of a second, so one
+  reading can be off by a tenth.
+- When the busiest CPU averages more than 80% busy, or one reading shows it
+  full, the cap drops to 80% of the rate forwarded at the time. A flood of
+  small packets is cut at the end of the first 100 ms it fills a CPU. A cut
+  that wasn't enough is followed by another 300 ms later.
+- While the busiest CPU averages under 70% and traffic presses the cap, it
+  rises by 10% a second. From 70% to 80% it stays. So the cap settles where
+  the CPU has a little room, whatever the packet size, and climbs back as
+  soon as the load that caused a cut is gone.
+
+It cuts only when forwarding is to blame: forwarded traffic is at the cap,
+and at 1.6 µs a packet it explains at least half of the load. If a cut
+forwards less but the CPU stays as busy, as when conntrackd or traffic that
+senders keep offering fills it, the cap goes back to where it was and stops
+cutting until the CPU calms down. It never goes below 250,000 packets a
+second per CPU. The packet cap in force is the lower of the two. Pacing
+delays and drops packets on the way out, so it bounds incoming traffic only
+as TCP senders slow down.
 
 **Takeovers.** Pacing runs on its own and nothing waits for it, so it can't
 delay or stop a takeover, and forwarding works if it fails to load. Both

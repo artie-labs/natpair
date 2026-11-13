@@ -253,8 +253,9 @@ packet rate limit. AWS doesn't publish it.
 `poll_interval_ms` is how often a NAT reads the allowance counters. The
 default, 10, lets the cap follow AWS's first drops within tens of
 milliseconds, for about 1% of one CPU. The NAT also caps forwarded packets a
-second at what its CPUs carry, starting at 400,000 per CPU, as
-[How natpair works](architecture.md#pacing-forwarded-traffic) explains.
+second at what its CPUs carry. That cap starts once a CPU first passes 80%
+busy, as [How natpair works](architecture.md#pacing-forwarded-traffic)
+explains.
 
 Pacing needs the `iproute-tc` package. NATs that boot with this module
 version install it.
@@ -283,9 +284,10 @@ Each NAT that forwarded traffic logs `pacing status` every minute:
 | Field | Meaning |
 | --- | --- |
 | `cap_mbps`, `cap_kpps` | The allowance caps. 0 means no cap yet. |
-| `ceiling_mbps`, `ceiling_kpps` | The forwarded rate when AWS last reported exceeding the limit. The cap settles at 95% of it. |
-| `cpu_cap_kpps`, `cpu_ceiling_kpps` | The CPU cap on forwarded packets, and the rate at which a CPU last passed 80% busy. The kernel enforces the lower of `cap_kpps` and `cpu_cap_kpps`. |
-| `busiest_cpu` | How busy the busiest CPU was in the last quarter second, from 0 to 1. |
+| `ceiling_mbps`, `ceiling_kpps` | The forwarded rate when AWS last reported exceeding the limit. The cap settles at 95% of it, and 10 s after each cut rises again while traffic presses it. |
+| `cap_cuts` | How many times AWS's reports cut the allowance caps during the minute. While traffic presses a limit, each probe ends in a cut, about 5 a minute. |
+| `cpu_cap_kpps`, `cpu_ceiling_kpps` | The CPU cap on forwarded packets, 0 until a CPU first passes 80% busy, and the rate at which a CPU last passed 80% busy. The cap rises while the busiest CPU is under 70% busy. The kernel enforces the lower of `cap_kpps` and `cpu_cap_kpps`. |
+| `busiest_cpu` | How busy the busiest CPU was in the last 100 ms, from 0 to 1. |
 | `bw_in_allowance_exceeded`, `bw_out_allowance_exceeded`, `pps_allowance_exceeded` | Packets AWS queued or dropped during the minute, summed over all interfaces. |
 | `upload_mbps`, `download_mbps`, `upload_kpps`, `download_kpps` | Paced worker traffic in each direction, averaged over the minute. |
 | `worker_share_mbps`, `worker_share_kpps` | The most one worker may use right now. It is 97% of the cap while no worker has to wait. |
@@ -293,10 +295,12 @@ Each NAT that forwarded traffic logs `pacing status` every minute:
 | `active_workers`, `waiting_workers` | Workers that sent in the last quarter second, and those whose packets waited more than 1 ms. |
 
 `the instance exceeded its network allowance, so pacing cut its cap` means
-AWS queued or dropped packets. A few after a start or a probe are how pacing
-finds the limit. If they keep coming at a steady cap, traffic pacing doesn't
-control is over the limit, such as the NAT's own traffic or bursts of
-inbound packets. Consider a larger instance type.
+AWS queued or dropped packets. It is logged at most once a minute, and
+`cap_cuts` counts every cut. Cuts after a start or a probe are how pacing
+finds the limit, so a few a minute mean traffic is at the limit. If the cap
+keeps falling instead of settling, traffic pacing doesn't control is over
+the limit, such as the NAT's own traffic or bursts of inbound packets.
+Consider a larger instance type.
 
 `a forwarding CPU is nearly full, so pacing cut the packet cap` means the NAT
 was close to running out of CPU. If it recurs, consider an instance type with

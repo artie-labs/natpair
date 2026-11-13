@@ -125,7 +125,7 @@
     "failed_after_takeover_s": 0.335501287,
     "passed": true,
     "unknown_connection_reset": true,
-    "upload_error": "read tcp4 10.94.1.10:53132-\u003e10.94.2.10:8444: read: connection reset by peer"
+    "upload_error": "read tcp4 10.94.1.10:53132->10.94.2.10:8444: read: connection reset by peer"
   },
   {
     "case": "restarted-standby-keeps-idle-connections",
@@ -225,122 +225,122 @@
   },
   {
     "case": "pacing-off-installs-nothing",
-    "elapsed_s": 62.997705407,
+    "elapsed_s": 61.732917495,
     "installed_when_off": false,
     "passed": true,
     "removed_when_turned_off": true
   },
   {
-    "cap_mbps": 225.35676214710634,
+    "cap_mbps": 522.0348973828955,
     "case": "pacing-heavy-and-light-workers",
-    "elapsed_s": 49.535877616,
-    "heavy_mbps": 159.47877176875244,
+    "elapsed_s": 49.28274753,
+    "heavy_mbps": 278.4501454532384,
     "light_alone": [
       {
-        "bytes": 3514368,
-        "seconds": 10.017251076,
-        "p50_rtt_ms": 1.251,
-        "p99_rtt_ms": 2.083
+        "bytes": 3801088,
+        "seconds": 10.015440039,
+        "p50_rtt_ms": 0.88,
+        "p99_rtt_ms": 1.834
       },
       {
-        "bytes": 3514368,
-        "seconds": 10.017501428,
-        "p50_rtt_ms": 1.251,
-        "p99_rtt_ms": 2.198
+        "bytes": 3817472,
+        "seconds": 10.020140359,
+        "p50_rtt_ms": 0.74,
+        "p99_rtt_ms": 1.757
       },
       {
-        "bytes": 3522560,
-        "seconds": 10.016823126,
-        "p50_rtt_ms": 1.248,
-        "p99_rtt_ms": 2.015
+        "bytes": 3817472,
+        "seconds": 10.012775142,
+        "p50_rtt_ms": 0.803,
+        "p99_rtt_ms": 1.671
       },
       {
-        "bytes": 3514368,
-        "seconds": 10.018130587,
-        "p50_rtt_ms": 1.245,
-        "p99_rtt_ms": 2.091
+        "bytes": 3817472,
+        "seconds": 10.012731932,
+        "p50_rtt_ms": 0.729,
+        "p99_rtt_ms": 1.731
       }
     ],
     "light_with_heavy": [
       {
-        "bytes": 5808128,
-        "seconds": 15.013788237,
-        "p50_rtt_ms": 0.508,
-        "p99_rtt_ms": 3.014
+        "bytes": 5898240,
+        "seconds": 15.007654197,
+        "p50_rtt_ms": 0.258,
+        "p99_rtt_ms": 1.428
       },
       {
-        "bytes": 5808128,
-        "seconds": 15.011744052,
-        "p50_rtt_ms": 0.505,
-        "p99_rtt_ms": 2.907
+        "bytes": 5898240,
+        "seconds": 15.010343669,
+        "p50_rtt_ms": 0.252,
+        "p99_rtt_ms": 1.501
       },
       {
-        "bytes": 5783552,
-        "seconds": 15.013531658,
-        "p50_rtt_ms": 0.611,
-        "p99_rtt_ms": 2.805
+        "bytes": 5881856,
+        "seconds": 15.010388739,
+        "p50_rtt_ms": 0.302,
+        "p99_rtt_ms": 1.45
       },
       {
-        "bytes": 5775360,
-        "seconds": 15.008735069,
-        "p50_rtt_ms": 0.624,
-        "p99_rtt_ms": 2.873
+        "bytes": 5881856,
+        "seconds": 15.010120272,
+        "p50_rtt_ms": 0.313,
+        "p99_rtt_ms": 1.668
       }
     ],
-    "pace_program_ns_per_packet": 393.07406783231517,
-    "pace_program_runs": 47470,
+    "pace_program_ns_per_packet": 437.03026277229657,
+    "pace_program_runs": 51185,
     "passed": true
   },
   {
-    "cap_mbps": 241.59234333347925,
+    "cap_mbps": 530.8836990773368,
     "case": "pacing-leaves-nat-traffic-alone",
-    "download_mbps": 102.39098654884435,
-    "elapsed_s": 46.650991348,
+    "download_mbps": 156.58037105393927,
+    "elapsed_s": 39.372380144,
     "own_rtt_idle": {
-      "bytes": 1835008,
-      "seconds": 5.003366418,
-      "p50_rtt_ms": 0.115,
-      "p99_rtt_ms": 0.398
+      "bytes": 1966080,
+      "seconds": 5.012244715,
+      "p50_rtt_ms": 0.28,
+      "p99_rtt_ms": 0.674
     },
     "own_rtt_saturated": {
-      "bytes": 3981312,
-      "seconds": 10.004364445,
-      "p50_rtt_ms": 0.071,
-      "p99_rtt_ms": 0.303
+      "bytes": 4038656,
+      "seconds": 10.012559087,
+      "p50_rtt_ms": 0.043,
+      "p99_rtt_ms": 0.11
     },
     "paced_workers": [
-      "10.94.1.10",
-      "10.94.1.11"
+      "10.94.1.11",
+      "10.94.1.10"
     ],
     "passed": true,
-    "upload_mbps": 102.55570369803776
+    "upload_mbps": 156.74441624049146
   },
   {
-    "cap_before_mbps": 205.030739672264,
-    "cap_raised_mbps": 213.88501673220438,
-    "cap_resumed_mbps": 213.88501673220438,
+    "cap_before_mbps": 235.68187478141726,
+    "cap_raised_mbps": 286.69796009431775,
+    "cap_resumed_mbps": 200,
     "case": "pacing-changes-keep-connections",
-    "elapsed_s": 33.157328195,
-    "paced_after_resume_mbps": 208.392448,
+    "elapsed_s": 33.183424936,
+    "paced_after_resume_mbps": 203.797332,
     "passed": true,
     "upload": {
       "ok": true,
-      "bytes": 2867200,
-      "max_progress_gap_s": 0.330533333,
+      "bytes": 3219456,
+      "max_progress_gap_s": 0.393255292,
       "same_connection": true,
       "receiver": {
-        "bytes": 2867200,
-        "sha256": "ca84a17e945770ec943d7ab3becf2c73d2c947a89e5efda783ec62abcb9ae69d",
+        "bytes": 3219456,
+        "sha256": "007bf35857db70e3b208f4fccf2fd99d04b351a14fd92f3513f147a05b0967b8",
         "source_ip": "10.94.2.100"
       },
-      "local_port": 52680,
-      "duration_s": 18.016467907
+      "local_port": 53714,
+      "duration_s": 18.01764708
     }
   },
   {
     "case": "pacing-takeover",
-    "elapsed_s": 26.474258995,
-    "local_takeover_s": 6.294320191,
+    "elapsed_s": 26.565308142,
+    "local_takeover_s": 6.25076209,
     "new_owner_paces": true,
     "passed": true
   }
