@@ -69,10 +69,19 @@ const (
 	// renewals, DNS lookups and probes, starts to time out. On AWS, a NAT
 	// whose CPU ran full stepped down 3 to 4 times a minute.
 	cpuBusyThreshold = 0.8
-	// cpuStartPerCPU is the CPU cap a NAT starts from, in forwarded packets
-	// a second per CPU. On AWS, one CPU forwarded about 600,000 small
-	// packets a second at 100%.
-	cpuStartPerCPU = 400_000
+	// cpuLowWater is how busy the busiest CPU must stay below for the CPU
+	// cap to rise. Between it and cpuBusyThreshold the cap holds. At 1.1 µs
+	// a full-size packet, that band spans 14% of the forwarded rate, and one
+	// raise step adds 1%, so a rising cap stops in the band instead of
+	// overshooting the threshold.
+	cpuLowWater = 0.7
+	// cpuRaisePerSecond is how fast the CPU cap rises, as a fraction of the
+	// cap, while the busiest CPU is below cpuLowWater and forwarded traffic
+	// presses the cap. The cost of forwarding grows with the packet rate, so
+	// a fractional step is the same distance from the threshold on any
+	// instance. A cut to cutFactor takes about 2.3 s to win back, and the
+	// floor to 700,000 packets a second about 11 s.
+	cpuRaisePerSecond = 0.1
 	// cpuFloorPerCPU is the lowest the CPU cap goes, per CPU. Forwarding
 	// that many packets takes 40% of a CPU, half the threshold, so below it
 	// forwarding can't be what fills the CPU.
@@ -88,6 +97,11 @@ const (
 	// how much more work it was offered, so a cut from there only shows
 	// once the CPU drops below it.
 	cpuSaturated = 0.98
+	// cpuReadings is how many readings the CPU cap averages. /proc/stat
+	// counts each CPU state in hundredths of a second, so one reading over a
+	// tenth of a second can be off by a tenth: a CPU 81% busy read from 78%
+	// to 90%. Three readings are off by a few percent.
+	cpuReadings = 3
 )
 
 // CPUObservation is what a NAT saw of its CPUs over one interval.
@@ -99,20 +113,39 @@ type CPUObservation struct {
 	Rate float64
 }
 
-// CPUCap keeps forwarded packets a second below what the CPUs carry. It is
-// a [Cap] that cuts when the busiest CPU passes cpuBusyThreshold, but only
-// when forwarding is to blame: the forwarded rate presses the cap, and at
-// packetCPUTime a packet it explains at least forwardingShare of the load. If a
-// cut lowered the forwarded rate but the CPU's load fell by less than half
-// of what that predicts, or a full CPU stayed full, something else fills
-// it. The cap then goes back to where it was and stops cutting until the
-// CPU calms down. Without these checks, a CPU kept busy by conntrackd or
-// by traffic that senders keep offering drove the cap down to its floor.
+// CPUCap keeps forwarded packets a second below what the CPUs carry. It
+// starts with no cap, and cuts like a [Cap] when the busiest CPU passes
+// cpuBusyThreshold, but only when forwarding is to blame: the forwarded rate
+// presses the cap, and at packetCPUTime a packet it explains at least
+// forwardingShare of the load. If a cut lowered the forwarded rate but the
+// CPU's load fell by less than half of what that predicts, or a full CPU
+// stayed full, something else fills it. The cap then goes back to where it
+// was and stops cutting until the CPU calms down. Without these checks, a
+// CPU kept busy by conntrackd or by traffic that senders keep offering drove
+// the cap down to its floor.
+//
+// Unlike an allowance, the CPU shows how much room is left, so the cap
+// doesn't remember the rate it cut at. While the busiest CPU is below
+// cpuLowWater and forwarded traffic presses the cap, it rises by
+// cpuRaisePerSecond, and between cpuLowWater and cpuBusyThreshold it holds.
+// On AWS, a cap that settled at 95% of the rate it cut at held a
+// c7gn.medium at 280,000 packets a second with its CPU 55% busy, a third of
+// what the CPU forwarded unpaced.
+//
+// The cap judges the average of the last cpuReadings readings, except that
+// one reading of a full CPU counts at once, so a flood is cut at the end of
+// the first interval it fills a CPU. Each cut is to cutFactor of the
+// forwarded rate. One that wasn't enough is followed by another once the
+// average covers only readings since, cpuReadings intervals later.
 //
 // Step is a pure function of the cap and one observation.
 type CPUCap struct {
 	Cap
 	cpus int
+	// earlier holds the readings before the latest, oldest first, and seen
+	// counts the readings so far.
+	earlier [cpuReadings - 1]float64
+	seen    int
 	// Set at each cut, to judge whether it worked.
 	cut           bool
 	busyAtCut     float64
@@ -121,53 +154,76 @@ type CPUCap struct {
 	gaveUpCutting bool
 }
 
-// NewCPUCap returns the CPU cap for a NAT with cpus CPUs, ignoring the CPUs
-// for hold after a cut.
-func NewCPUCap(cpus int, hold time.Duration) CPUCap {
+// NewCPUCap returns the CPU cap for a NAT with cpus CPUs that reads them
+// every interval, with no cap until the busiest CPU first passes
+// cpuBusyThreshold. After a cut it ignores the CPUs until the average
+// covers only readings since.
+func NewCPUCap(cpus int, interval time.Duration) CPUCap {
 	cpus = max(cpus, 1)
-	return CPUCap{Cap: NewCap(cpuStartPerCPU*float64(cpus), cpuFloorPerCPU*float64(cpus), hold), cpus: cpus}
+	return CPUCap{Cap: NewCap(0, cpuFloorPerCPU*float64(cpus), cpuReadings*interval), cpus: cpus}
 }
 
 // Step returns the cap after observation o, and what changed.
 func (c CPUCap) Step(o CPUObservation) (CPUCap, Change) {
-	if o.Busiest <= cpuBusyThreshold {
+	busy := c.record(o.Busiest)
+	held := c.Ceiling > 0 && o.Now-c.cutAt < c.hold
+	if busy <= cpuBusyThreshold {
 		// The last cut worked, or the load went away.
 		c.cut, c.gaveUpCutting = false, false
-		var change Change
-		c.Cap, change = c.Cap.Step(Observation{Now: o.Now, Elapsed: o.Elapsed, Rate: o.Rate})
-		return c, change
+		if c.Limit == 0 || held {
+			return c, Unchanged
+		}
+		if busy >= cpuLowWater || o.Rate < pressureRatio*c.Limit {
+			return c, Unchanged
+		}
+		c.Limit += cpuRaisePerSecond * c.Limit * o.Elapsed.Seconds()
+		return c, Raised
 	}
-	if o.Now-c.cutAt < c.hold && c.cut {
+	switch {
+	case held && c.cut:
 		return c, HeldAfterCut
-	}
-	if c.gaveUpCutting {
+	case c.gaveUpCutting:
 		return c, NotForwarding
 	}
 	binding := o.Rate >= pressureRatio*c.Limit
-	explained := o.Rate*packetCPUTime/float64(c.cpus) >= forwardingShare*o.Busiest
+	explained := o.Rate*packetCPUTime/float64(c.cpus) >= forwardingShare*busy
 	if !binding || !explained {
 		return c, NotForwarding
 	}
-	if c.cut && o.Rate < c.rateAtCut && !c.helped(o) {
+	if c.cut && o.Rate < c.rateAtCut && !c.helped(busy, o.Rate) {
 		// The last cut forwarded less without freeing the CPU.
 		c.Limit, c.cut, c.gaveUpCutting = c.limitBefore, false, true
 		return c, GaveUp
 	}
-	before := c.Limit
-	var change Change
-	c.Cap, change = c.Cap.Step(Observation{Now: o.Now, Elapsed: o.Elapsed, Exceeded: 1, Rate: o.Rate})
-	if change == CutDown {
-		c.cut, c.busyAtCut, c.rateAtCut, c.limitBefore = true, o.Busiest, o.Rate, before
+	c.cut, c.busyAtCut, c.rateAtCut, c.limitBefore = true, busy, o.Rate, c.Limit
+	c.Cap = c.Cap.cut(o.Now, o.Rate, cutFactor)
+	return c, CutDown
+}
+
+// record adds a reading of the busiest CPU and returns how busy to judge it:
+// the reading if it shows a full CPU, or else the average of the last
+// cpuReadings readings.
+func (c *CPUCap) record(reading float64) float64 {
+	n := min(c.seen, len(c.earlier))
+	sum := reading
+	for _, r := range c.earlier[len(c.earlier)-n:] {
+		sum += r
 	}
-	return c, change
+	copy(c.earlier[:], c.earlier[1:])
+	c.earlier[len(c.earlier)-1] = reading
+	c.seen++
+	if reading >= cpuSaturated {
+		return reading
+	}
+	return sum / float64(n+1)
 }
 
 // helped reports whether the CPU's load since the last cut fell as much as
-// the drop in forwarded packets predicts, by at least half.
-func (c CPUCap) helped(o CPUObservation) bool {
+// the drop in forwarded packets, now rate, predicts, by at least half.
+func (c CPUCap) helped(busy, rate float64) bool {
 	if c.busyAtCut >= cpuSaturated {
-		return o.Busiest < cpuSaturated
+		return busy < cpuSaturated
 	}
-	predicted := (c.rateAtCut - o.Rate) * packetCPUTime / float64(c.cpus)
-	return c.busyAtCut-o.Busiest >= predicted/2
+	predicted := (c.rateAtCut - rate) * packetCPUTime / float64(c.cpus)
+	return c.busyAtCut-busy >= predicted/2
 }

@@ -32,7 +32,7 @@ const (
 	sinkAddr   = "10.94.2.10:8445"
 	sourceAddr = "10.94.2.10:8446"
 	// pacingStartMbps is the bandwidth cap the NATs start from. There are no
-	// AWS allowance counters here, so the cap only rises, by 1% a second
+	// AWS allowance counters here, so the cap only rises, by 5% a second
 	// while traffic presses it.
 	pacingStartMbps = 200
 )
@@ -87,7 +87,7 @@ func (l *lab) pacingCases() {
 		capMbps := l.capMbps("a")
 
 		l.require(heavyResult.Error == "", "the heavy upload finished: "+heavyResult.Error)
-		// The cap rose under pressure, from 200 Mbit/s to at most 1.01^30 of that.
+		// The cap rose under pressure, from 200 Mbit/s to at most 1.05^30 of that.
 		l.require(heavyResult.Mbps() <= capMbps*1.05, fmt.Sprintf("the heavy worker stays under the cap: %.0f Mbit/s, cap %.0f", heavyResult.Mbps(), capMbps))
 		l.require(heavyResult.Mbps() >= 0.5*pacingStartMbps, fmt.Sprintf("the heavy worker gets most of the cap: %.0f Mbit/s", heavyResult.Mbps()))
 		for i, light := range loaded {

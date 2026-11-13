@@ -54,11 +54,16 @@ const (
 	// retryInterval is how long a NAT waits before retrying a failed load
 	// or attach, so a kernel that lacks a feature doesn't flood the log.
 	retryInterval = time.Minute
-	// shareInterval is how often a NAT recomputes the workers' fair shares,
-	// measures its CPUs and renews the limits. Until it recomputes the
-	// shares, a worker that starts sending heavily can take up to the whole
-	// cap on top of what the others send.
+	// shareInterval is how often a NAT recomputes the workers' fair shares
+	// and renews the limits. Until it recomputes the shares, a worker that
+	// starts sending heavily can take up to the whole cap on top of what the
+	// others send.
 	shareInterval = 250 * time.Millisecond
+	// cpuInterval is how often a NAT measures its CPUs and moves the CPU
+	// cap. /proc/stat counts in hundredths of a second, so a shorter interval
+	// would measure too few counts to tell 70% from 80%. A flood that fills
+	// a CPU is cut at the end of the first interval it fills.
+	cpuInterval = 100 * time.Millisecond
 	// rateWindow is how far back the forwarded rate that the allowance caps
 	// compare with reaches.
 	rateWindow = 100 * time.Millisecond
@@ -177,9 +182,9 @@ func Run(ctx context.Context, cfg Config, now func() time.Duration) {
 }
 
 // loop is Run's state between ticks. Every tick it reads the allowance
-// counters and moves the allowance caps. Every shareInterval it also paces
-// new interfaces, recomputes the workers' fair shares, moves the CPU cap and
-// renews the limits.
+// counters and moves the allowance caps. Every cpuInterval it also moves the
+// CPU cap, and every shareInterval it paces new interfaces, recomputes the
+// workers' fair shares and renews the limits.
 type loop struct {
 	cfg Config
 	k   *kernel
@@ -204,21 +209,29 @@ type loop struct {
 	allowances map[int]Allowances
 	polledAt   time.Duration
 
+	// The previous CPU measurement.
+	cpuAt     time.Duration
+	cpuTotals Totals
+	cpuTimes  []CPUTimes
+	busiest   float64
+
 	// The previous fair share step.
 	sharedAt      time.Duration
-	shared        reading
 	workers       map[[4]byte]Counters
-	cpuTimes      []CPUTimes
-	busiest       float64
 	byteDemands   []Demand
 	packetDemands []Demand
 	limits        Limits
 
 	// The counters at the previous status log, and the allowance counters'
-	// growth since.
+	// growth and the allowance caps' cuts since.
 	statusAt       time.Duration
 	status         Totals
 	statusExceeded Allowances
+	statusCuts     int
+	// cutLoggedAt is when an allowance cut was last logged. While traffic
+	// presses an allowance, a probe ends in a cut every 10 s or so, so cuts
+	// are logged at most once per statusInterval and counted in the status.
+	cutLoggedAt time.Duration
 }
 
 // attachment is one interface pacing knows about.
@@ -271,11 +284,13 @@ func (l *loop) step(ctx context.Context) {
 		// and on again also forgets what an earlier run learned.
 		l.bytes = NewAllowanceCap(l.cfg.StartBytes, bytesFloor, max(2*l.cfg.Poll, minAllowanceHold))
 		l.packets = NewAllowanceCap(l.cfg.StartPackets, packetsFloor, max(2*l.cfg.Poll, minAllowanceHold))
-		l.cpu = NewCPUCap(runtime.NumCPU(), 2*shareInterval)
+		l.cpu = NewCPUCap(runtime.NumCPU(), cpuInterval)
 		l.attached, l.allowances, l.workers = map[int]*attachment{}, map[int]Allowances{}, map[[4]byte]Counters{}
 		l.window, l.cpuTimes, l.byteDemands, l.packetDemands = []reading{{at: now}}, nil, nil, nil
-		l.polledAt, l.statusAt, l.status, l.statusExceeded = now, now, Totals{}, Allowances{}
-		l.sharedAt, l.shared = now-shareInterval, reading{at: now}
+		l.cpuAt = now
+		l.polledAt, l.statusAt, l.status, l.statusExceeded, l.statusCuts = now, now, Totals{}, Allowances{}, 0
+		l.cutLoggedAt = now - statusInterval
+		l.sharedAt = now - shareInterval
 		slog.Info("pacing on", slog.Float64("cap_mbps", mbps(l.bytes.Limit)), slog.Float64("cap_kpps", l.packets.Limit/1e3), slog.Float64("cpu_cap_kpps", l.cpu.Limit/1e3))
 	}
 
@@ -289,8 +304,11 @@ func (l *loop) step(ctx context.Context) {
 		l.window = l.window[1:]
 	}
 	changed := l.poll(now)
+	if now-l.cpuAt >= cpuInterval && l.measureCPU(now, totals) {
+		changed = true
+	}
 	if now-l.sharedAt >= shareInterval {
-		l.share(ctx, now, totals)
+		l.share(ctx, now)
 		changed = true
 	}
 	if changed {
@@ -360,6 +378,10 @@ func (l *loop) poll(now time.Duration) bool {
 			slog.Float64("cap_kpps", l.packets.Limit/1e3))
 	}
 	if bytesChange == CutDown || packetsChange == CutDown {
+		l.statusCuts++
+	}
+	if (bytesChange == CutDown || packetsChange == CutDown) && now-l.cutLoggedAt >= statusInterval {
+		l.cutLoggedAt = now
 		slog.Warn("the instance exceeded its network allowance, so pacing cut its cap",
 			slog.Uint64("bw_in_allowance_exceeded", exceeded.BandwidthIn),
 			slog.Uint64("bw_out_allowance_exceeded", exceeded.BandwidthOut),
@@ -423,56 +445,66 @@ func (l *loop) interfaceTotals() InterfaceCounters {
 	return sum
 }
 
-// share paces interfaces that appeared, measures each worker's demand and
-// the busiest CPU since the previous share step, and moves the CPU cap.
-func (l *loop) share(ctx context.Context, now time.Duration, totals Totals) {
+// share paces interfaces that appeared and measures each worker's demand
+// since the previous share step.
+func (l *loop) share(ctx context.Context, now time.Duration) {
 	l.attach(ctx, now)
-	elapsed := now - l.sharedAt
-	seconds := elapsed.Seconds()
-	forwarded := float64(totals.since(l.shared.totals).sum().Packets) / seconds
-	l.sharedAt, l.shared = now, reading{at: now, totals: totals}
+	seconds := (now - l.sharedAt).Seconds()
+	l.sharedAt = now
 
-	if workers, err := l.k.readWorkers(); err != nil {
+	workers, err := l.k.readWorkers()
+	if err != nil {
 		slog.Warn("failed to read pacing workers", slog.Any("err", err))
-	} else {
-		l.byteDemands, l.packetDemands = l.byteDemands[:0], l.packetDemands[:0]
-		for key, counters := range workers {
-			d := counters.since(l.workers[key])
-			if d.Packets == 0 && d.Waited == 0 {
-				continue
-			}
-			l.byteDemands = append(l.byteDemands, Demand{Rate: float64(d.Bytes) / seconds, Waited: d.Waited > 0})
-			l.packetDemands = append(l.packetDemands, Demand{Rate: float64(d.Packets) / seconds, Waited: d.Waited > 0})
-		}
-		l.workers = workers
+		return
 	}
+	l.byteDemands, l.packetDemands = l.byteDemands[:0], l.packetDemands[:0]
+	for key, counters := range workers {
+		d := counters.since(l.workers[key])
+		if d.Packets == 0 && d.Waited == 0 {
+			continue
+		}
+		l.byteDemands = append(l.byteDemands, Demand{Rate: float64(d.Bytes) / seconds, Waited: d.Waited > 0})
+		l.packetDemands = append(l.packetDemands, Demand{Rate: float64(d.Packets) / seconds, Waited: d.Waited > 0})
+	}
+	l.workers = workers
+}
 
+// measureCPU measures the busiest CPU and the forwarded packets a second
+// since the previous measurement, and moves the CPU cap. It reports whether
+// the cap changed.
+func (l *loop) measureCPU(now time.Duration, totals Totals) bool {
 	stat, err := os.ReadFile("/proc/stat")
 	if err != nil {
-		slog.Warn("failed to read CPU times", slog.Any("err", err))
-		return
+		if l.cpuTimes != nil {
+			slog.Warn("failed to read CPU times", slog.Any("err", err))
+		}
+		l.cpuTimes, l.cpuAt = nil, now
+		return false
 	}
 	cpuTimes := ParseCPUTimes(string(stat))
-	previous := l.cpuTimes
-	l.cpuTimes = cpuTimes
+	previous, elapsed, forwarded := l.cpuTimes, now-l.cpuAt, totals.since(l.cpuTotals).sum().Packets
+	l.cpuTimes, l.cpuAt, l.cpuTotals = cpuTimes, now, totals
 	if previous == nil {
-		return
+		return false
 	}
 	l.busiest = BusiestCPU(previous, cpuTimes)
+	rate := float64(forwarded) / elapsed.Seconds()
+	before := l.cpu.Limit
 	var change Change
-	l.cpu, change = l.cpu.Step(CPUObservation{Now: now, Elapsed: elapsed, Busiest: l.busiest, Rate: forwarded})
+	l.cpu, change = l.cpu.Step(CPUObservation{Now: now, Elapsed: elapsed, Busiest: l.busiest, Rate: rate})
 	switch change {
 	case CutDown:
 		slog.Warn("a forwarding CPU is nearly full, so pacing cut the packet cap",
 			slog.Float64("busiest_cpu", l.busiest),
-			slog.Float64("forwarded_kpps", forwarded/1e3),
+			slog.Float64("forwarded_kpps", rate/1e3),
 			slog.Float64("cpu_cap_kpps", l.cpu.Limit/1e3))
 	case GaveUp:
 		slog.Warn("a CPU stayed full after pacing forwarded less, so pacing restored the packet cap and stopped cutting it",
 			slog.Float64("busiest_cpu", l.busiest),
-			slog.Float64("forwarded_kpps", forwarded/1e3),
+			slog.Float64("forwarded_kpps", rate/1e3),
 			slog.Float64("cpu_cap_kpps", l.cpu.Limit/1e3))
 	}
+	return l.cpu.Limit != before
 }
 
 // attach paces interfaces that appeared, such as the shared ENI after a
@@ -558,11 +590,12 @@ func (l *loop) packetCap() float64 {
 }
 
 // logStatus logs the caps, and the traffic since the previous status. The
-// worker counts and the busiest CPU are from the latest share step.
+// worker counts are from the latest share step, and the busiest CPU from the
+// latest CPU measurement.
 func (l *loop) logStatus(now time.Duration, totals Totals) {
 	seconds := (now - l.statusAt).Seconds()
-	status, exceeded := totals.since(l.status), l.statusExceeded
-	l.statusAt, l.status, l.statusExceeded = now, totals, Allowances{}
+	status, exceeded, cuts := totals.since(l.status), l.statusExceeded, l.statusCuts
+	l.statusAt, l.status, l.statusExceeded, l.statusCuts = now, totals, Allowances{}, 0
 	sum := status.sum()
 	if sum.Packets == 0 && sum.Dropped == 0 && exceeded == (Allowances{}) {
 		return
@@ -593,7 +626,8 @@ func (l *loop) logStatus(now time.Duration, totals Totals) {
 		slog.Int("waiting_workers", waiting),
 		slog.Uint64("bw_in_allowance_exceeded", exceeded.BandwidthIn),
 		slog.Uint64("bw_out_allowance_exceeded", exceeded.BandwidthOut),
-		slog.Uint64("pps_allowance_exceeded", exceeded.PacketRate))
+		slog.Uint64("pps_allowance_exceeded", exceeded.PacketRate),
+		slog.Int("cap_cuts", cuts))
 }
 
 // mbps converts bytes per second to megabits per second, for logs.
