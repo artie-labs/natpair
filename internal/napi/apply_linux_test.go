@@ -41,18 +41,22 @@ func TestThreadedReceive(t *testing.T) {
 
 	path := "/sys/class/net/napi-test0/threaded"
 	{
-		enabled, err := enable(path)
+		// Already off.
+		switched, err := setThreaded(path, false)
 		require.NoError(t, err)
-		assert.True(t, enabled)
-		contents, err := os.ReadFile(path)
+		assert.False(t, switched)
+	}
+	{
+		switched, err := setThreaded(path, true)
 		require.NoError(t, err)
-		assert.Equal(t, "1\n", string(contents))
+		assert.True(t, switched)
+		assertFile(t, path, "1\n")
 	}
 	{
 		// Already on.
-		enabled, err := enable(path)
+		switched, err := setThreaded(path, true)
 		require.NoError(t, err)
-		assert.False(t, enabled)
+		assert.False(t, switched)
 	}
 
 	threads := receiveThreads(t, "napi-test0")
@@ -76,6 +80,19 @@ func TestThreadedReceive(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 0, raised)
 	}
+	{
+		// The switch for benchmarks turns it back off.
+		switched, err := setThreaded(path, false)
+		require.NoError(t, err)
+		assert.True(t, switched)
+		assertFile(t, path, "0\n")
+	}
+}
+
+func assertFile(t *testing.T, path, want string) {
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, want, string(contents))
 }
 
 // receiveThreads returns the kernel threads named for the interface.

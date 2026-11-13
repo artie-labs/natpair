@@ -10,40 +10,49 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Apply turns on threaded NAPI for every interface backed by a device, which
-// on EC2 is every attached ENI, and sets primary's receive threads to
-// OwnNice. It returns how many settings it changed, and is safe to run
-// repeatedly.
-func Apply(primary string) (int, error) {
+// Apply turns threaded NAPI on or off for every interface backed by a
+// device, which on EC2 is every attached ENI. When on, it also sets primary's
+// receive threads to OwnNice. It returns how many settings it changed, and is
+// safe to run repeatedly.
+func Apply(primary string, on bool) (int, error) {
 	changed := 0
 	var errs []error
 	// Glob fails only on a malformed pattern.
 	devices, _ := filepath.Glob("/sys/class/net/*/device")
 	for _, device := range devices {
-		enabled, err := enable(filepath.Join(filepath.Dir(device), "threaded"))
+		switched, err := setThreaded(filepath.Join(filepath.Dir(device), "threaded"), on)
 		if err != nil {
 			errs = append(errs, err)
-		} else if enabled {
+		} else if switched {
 			changed++
 		}
+	}
+	if !on {
+		// Without threads, receive work runs in softirq context and their
+		// nice value doesn't matter.
+		return changed, errors.Join(errs...)
 	}
 	raised, err := raise(primary)
 	return changed + raised, errors.Join(append(errs, err)...)
 }
 
-// enable writes 1 to an interface's threaded file if it holds 0. Other values,
-// such as 2 for busy polling on newer kernels, were set by someone else and
-// stay.
-func enable(path string) (bool, error) {
+// setThreaded writes 1 or 0 to an interface's threaded file if it holds the
+// other. Other values, such as 2 for busy polling on newer kernels, were set
+// by someone else and stay.
+func setThreaded(path string, on bool) (bool, error) {
 	current, err := os.ReadFile(path)
 	if err != nil {
 		return false, fmt.Errorf("failed to read %s: %w", path, err)
 	}
-	if strings.TrimSpace(string(current)) != "0" {
+	from, to := "0", "1"
+	if !on {
+		from, to = "1", "0"
+	}
+	if strings.TrimSpace(string(current)) != from {
 		return false, nil
 	}
-	if err := os.WriteFile(path, []byte("1"), 0o644); err != nil {
-		return false, fmt.Errorf("failed to turn on threaded NAPI in %s: %w", path, err)
+	if err := os.WriteFile(path, []byte(to), 0o644); err != nil {
+		return false, fmt.Errorf("failed to write %s to %s: %w", to, path, err)
 	}
 	return true, nil
 }

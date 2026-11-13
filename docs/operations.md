@@ -91,6 +91,16 @@ The module's `nat_instance_ids` output maps `a` and `b` to instance IDs.
    ENI's show `0`. The slice's weight is `1000`. See
    [How natpair works](architecture.md#staying-responsive-at-full-load).
 
+   To compare a NAT with threaded NAPI off, such as in a benchmark, create
+   the switch file. Within 5 s the daemon turns threaded NAPI off on every
+   ENI, and receive work runs in softirq context again. Remove the file to
+   turn it back on. Nothing restarts.
+
+   ```sh
+   sudo touch /var/lib/natpair/receive-threads-off
+   sudo rm /var/lib/natpair/receive-threads-off
+   ```
+
 4. Optionally, test a handover. Run `sudo natpair maintenance` on the owner,
    wait for the standby to log `forwarding open`, and check step 2 again. Then
    run `sudo natpair resume` on the old owner so it becomes the standby.

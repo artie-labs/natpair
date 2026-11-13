@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -299,15 +301,18 @@ func keepReceiveThreaded(ctx context.Context, primary string) {
 }
 
 // threadReceive moves receive processing into kernel threads and raises the
-// primary interface's, with [napi.Apply]. A failure leaves that processing
-// where the kernel put it, so it is logged.
+// primary interface's, with [napi.Apply], unless config.ReceiveThreadsOffPath
+// exists. A failure leaves that processing where the kernel put it, so it is
+// logged.
 func threadReceive(primary string) {
-	changed, err := napi.Apply(primary)
+	_, err := os.Stat(config.ReceiveThreadsOffPath)
+	on := errors.Is(err, fs.ErrNotExist)
+	changed, err := napi.Apply(primary, on)
 	if err != nil {
-		slog.Warn("failed to move receive processing into prioritized kernel threads", slog.Any("err", err))
+		slog.Warn("failed to set up receive processing threads", slog.Bool("on", on), slog.Any("err", err))
 	}
 	if changed > 0 {
-		slog.Info("moved receive processing into prioritized kernel threads", slog.Int("changed", changed))
+		slog.Info("set up receive processing threads", slog.Bool("on", on), slog.Int("changed", changed))
 	}
 }
 

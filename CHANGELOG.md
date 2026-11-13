@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   NAPI). The daemon and conntrackd run in `natpair.slice`, and the primary
   interface's threads, which receive the NAT's own traffic, at nice -10. Both
   have about ten times the CPU weight of the shared ENI's threads. New NATs
-  get it at first boot, and running NATs when they upgrade.
+  get it at first boot, and running NATs when they upgrade. Creating
+  `/var/lib/natpair/receive-threads-off` turns threaded NAPI off within 5 s.
 
 ## [0.1.1] - 2026-11-09
 

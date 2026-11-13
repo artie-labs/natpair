@@ -131,7 +131,9 @@ and ranks the NAT's own work above forwarding:
 
 - The daemon turns on threaded NAPI (`/sys/class/net/<interface>/threaded`)
   for every ENI when it starts, when the shared ENI attaches, and every 5 s.
-  Each receive queue then has a thread named `napi/<interface>-<id>`.
+  Each receive queue then has a thread named `napi/<interface>-<id>`. While
+  `/var/lib/natpair/receive-threads-off` exists, it turns threaded NAPI off
+  instead, so a benchmark can compare both on one NAT.
 - The daemon and conntrackd run in `natpair.slice`, a systemd slice with a CPU
   weight of 1000. The primary interface's threads run at nice -10, which has
   about the same weight. The shared ENI's threads keep the kernel's default,

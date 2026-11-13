@@ -18,6 +18,9 @@ import (
 const (
 	// StateDir holds the maintenance request file and conntrackd's files.
 	StateDir = "/var/lib/natpair"
+	// ReceiveThreadsOffPath turns threaded NAPI off while it exists, so a
+	// benchmark can compare both on one NAT. See docs/operations.md.
+	ReceiveThreadsOffPath = StateDir + "/receive-threads-off"
 	// BPFDir is where the fence pins its BPF objects.
 	BPFDir = "/sys/fs/bpf/natpair"
 	// ConntrackdConfigPath is where bootstrap writes conntrackd's configuration.
