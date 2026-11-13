@@ -174,14 +174,21 @@ standby can't move itself back, so replace it.
 A NAT you put in maintenance by hand isn't upgraded until you run
 `natpair resume`.
 
+An upgrade doesn't change the NATs' Amazon Linux image or kernel. New NATs
+boot the newest image on the module's `kernel` line, 6.18 by default. To
+move a running pair to another line, or to a newer image on the same line,
+[replace the NATs](#replace-a-nat). AWS adds a new long-term support kernel
+line to Amazon Linux 2023 each year and supports each for four years, so
+plan to move `kernel` forward about once a year.
+
 ## Replace a NAT
 
 Running NATs keep the image, configuration and boot script they launched
 with. These changes need new NATs:
 
 - `worker_cidrs`, `max_connections`, `release_url`,
-  `datadog_api_key_secret_arn` and `datadog_site`, and a new CIDR on the VPC
-  when `worker_cidrs` is left at its default
+  `datadog_api_key_secret_arn`, `datadog_site` and `kernel`, and a new CIDR
+  on the VPC when `worker_cidrs` is left at its default
 - a newer Amazon Linux image
 - a module upgrade whose changelog says so
 
