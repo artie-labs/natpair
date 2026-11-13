@@ -120,6 +120,48 @@ compares it with the release it runs.
 A release that never gets ready stays on the standby, so traffic stays on the
 old release. See [operations](operations.md#upgrade) for the steps.
 
+## Staying responsive at full load
+
+Worker traffic in both directions arrives on the shared ENI: uploads from the
+workers, and replies from the internet to the shared Elastic IP. The NAT's
+primary interface receives only its own traffic, such as lease and AWS API
+replies, DNS answers and the peer's connection copies. Downloads to the
+workers leave through the primary interface, but sending costs far less than
+receiving and forwarding.
+
+By default Linux processes received packets in softirq context, which runs
+ahead of every process. A NAT whose forwarding fills the CPU then has no time
+left for its own work. On AWS, a one-CPU NAT spent 84 to 95% of its CPU there.
+Its DNS lookups, lease renewals and probes timed out, so it stepped down, and
+the standby filled up in turn and handed back, several times a minute.
+
+So natpair moves receive processing into kernel threads, called threaded NAPI,
+and ranks the NAT's own work above forwarding:
+
+- The daemon turns on threaded NAPI (`/sys/class/net/<interface>/threaded`)
+  for every ENI when it starts, when the shared ENI attaches, and every 5 s.
+  Each receive queue then has a thread named `napi/<interface>-<id>`.
+- The daemon and conntrackd run in `natpair.slice`, a systemd slice with a CPU
+  weight of 1000. The primary interface's threads run at nice -10, which has
+  about the same weight. The shared ENI's threads keep the kernel's default,
+  nice 0, which is the same weight, 100, as every other slice.
+
+These are weights, not strict priorities. A busy task gets a share of the CPU
+in proportion to its weight, so when the CPU is full, the NAT's own work gets
+about ten times the share of each forwarding thread. It needs only a few
+percent, and forwarding gets every CPU cycle it leaves.
+
+The owner's upload probe still travels through the shared ENI, like worker
+traffic, so that it tests the real path. At full load the interface drops
+some of its packets, as it does worker packets, and TCP sends them again.
+
+A real-time policy (`SCHED_FIFO`) would rank the daemon strictly first, but
+everything it starts, such as `iptables`, `conntrack` and the updater's
+download, would inherit that rank. The only way to stop that, resetting the
+policy on fork, also resets the Go runtime's own threads. A real-time task
+that loops would also take 95% of the CPU, and a worker that opens
+connections quickly would drive conntrackd ahead of all forwarding.
+
 ## Network details
 
 - Both NATs and the shared ENI must be in one availability zone, because an
@@ -159,6 +201,16 @@ old release. See [operations](operations.md#upgrade) for the steps.
   records and move only its own pair's shared ENI.
   [The module reference](../terraform/README.md#what-the-nats-may-do) lists
   every permission.
+- **CPU priority.** natpair raises the CPU weight of its own daemon,
+  conntrackd and the primary interface's receive threads, not their
+  real-time priority. A flood of worker traffic can't starve the lease
+  renewals, and a fault in the NAT's own work takes at most about 90% of a
+  full CPU from forwarding, not all of it. Traffic to a NAT's own address,
+  which the security group lets in from anywhere, is received at the raised
+  weight, so a flood aimed there now outweighs forwarding instead of sharing
+  softirq time with it. The host firewall still drops it. The daemon raises
+  only kernel threads named for the primary interface, never a process that
+  names itself that way.
 - **Connection copies.** conntrackd sends connection state to the peer in
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.

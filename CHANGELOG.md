@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
   second. NATs set this at boot.
+- A NAT whose forwarding fills its CPU keeps renewing its lease and resolving
+  the probe receiver, instead of stepping down and passing the overload to
+  the peer. Received packets are now processed in kernel threads (threaded
+  NAPI). The daemon and conntrackd run in `natpair.slice`, and the primary
+  interface's threads, which receive the NAT's own traffic, at nice -10. Both
+  have about ten times the CPU weight of the shared ENI's threads. New NATs
+  get it at first boot, and running NATs when they upgrade.
 
 ### Security
 

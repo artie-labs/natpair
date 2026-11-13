@@ -18,7 +18,7 @@ chmod 0600 /etc/natpair/config.json
 
 install -d -m 0700 /var/lib/natpair
 install -d -m 0755 /etc/systemd/system/conntrackd.service.d /etc/systemd/networkd.conf.d
-install -m 0644 "$deploy_dir/natpair-bootstrap.service" "$deploy_dir/natpair.service" /etc/systemd/system/
+install -m 0644 "$deploy_dir/natpair-bootstrap.service" "$deploy_dir/natpair.service" "$deploy_dir/natpair.slice" /etc/systemd/system/
 install -m 0644 "$deploy_dir/conntrackd-override.conf" /etc/systemd/system/conntrackd.service.d/natpair.conf
 install -m 0644 "$deploy_dir/90-natpair.conf" /etc/sysctl.d/
 install -m 0644 "$deploy_dir/networkd-natpair.conf" /etc/systemd/networkd.conf.d/natpair.conf

@@ -78,6 +78,11 @@ the NATs one at a time, as in [Replace a NAT](operations.md#replace-a-nat).
   `system.net.aws.ec2.*_allowance_exceeded`. Move to an instance type with
   more baseline bandwidth, as in
   [Replace a NAT](operations.md#replace-a-nat).
+- **CPU full.** At full load the NAT forwards as much as its CPU allows and
+  drops the rest at the network interface. Its own work, such as lease
+  renewals, runs ahead of forwarding, so it keeps the lease. `top` shows the
+  `napi/` threads using all the CPU the NAT's own work leaves. Move to an
+  instance type with more CPUs.
 - **Connection table full.** When the table reaches `max_connections`, the
   kernel drops new connections and logs `nf_conntrack: table full, dropping
   packet` in `sudo dmesg`, and natpair logs

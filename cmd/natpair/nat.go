@@ -23,6 +23,7 @@ import (
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/irq"
+	"github.com/artie-labs/natpair/internal/napi"
 	"github.com/artie-labs/natpair/internal/network"
 	"github.com/artie-labs/natpair/internal/probe"
 	"github.com/artie-labs/natpair/internal/update"
@@ -200,7 +201,7 @@ func runNAT(ctx context.Context, args []string) error {
 	// The instance role signs uploads to a receiver that requires IAM
 	// authentication.
 	prober := &probe.Client{Credentials: awsConfig.Credentials}
-	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe()}
+	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe(), primary: cfg.Instance.Interface}
 
 	var ctrl *controller.Controller
 	monitor := health.New(health.Config{
@@ -253,6 +254,10 @@ func runNAT(ctx context.Context, args []string) error {
 	})
 	group.Go(func() error {
 		keepInterruptsSpread(ctx)
+		return nil
+	})
+	group.Go(func() error {
+		keepReceiveThreaded(ctx, cfg.Instance.Interface)
 		return nil
 	})
 	group.Go(func() error {
@@ -312,12 +317,43 @@ func spreadInterrupts() {
 	}
 }
 
+// keepReceiveThreaded runs [threadReceive] now and every 5 s. That catches
+// the receive threads the kernel starts when a driver resets an interface,
+// and undoes anything else that turned threaded NAPI off.
+func keepReceiveThreaded(ctx context.Context, primary string) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		threadReceive(primary)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// threadReceive moves receive processing into kernel threads and raises the
+// primary interface's, with [napi.Apply]. A failure leaves that processing
+// where the kernel put it, so it is logged.
+func threadReceive(primary string) {
+	changed, err := napi.Apply(primary)
+	if err != nil {
+		slog.Warn("failed to move receive processing into prioritized kernel threads", slog.Any("err", err))
+	}
+	if changed > 0 {
+		slog.Info("moved receive processing into prioritized kernel threads", slog.Int("changed", changed))
+	}
+}
+
 // localSteps performs the takeover steps on this host.
 type localSteps struct {
 	network   *network.Network
 	conntrack conntrackd.Client
 	prober    *probe.Client
 	target    probe.Target
+	// primary is this NAT's own interface.
+	primary string
 }
 
 func (s localSteps) PrepareNetwork(ctx context.Context) error {
@@ -336,8 +372,15 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 	return s.network.ClaimShared(ctx, mac)
 }
 
+// ActivateShared configures the shared ENI, then moves its receive processing
+// into threads before forwarding opens. Until then the softirq work of a busy
+// shared ENI can starve this NAT's own lease renewals.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
-	return s.network.ActivateShared(ctx, mac)
+	if err := s.network.ActivateShared(ctx, mac); err != nil {
+		return err
+	}
+	threadReceive(s.primary)
+	return nil
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {
