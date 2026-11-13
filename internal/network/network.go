@@ -23,8 +23,27 @@ import (
 )
 
 const (
-	snatChain      = "NATPAIR_SNAT"
-	inputChain     = "NATPAIR_INPUT"
+	snatChain  = "NATPAIR_SNAT"
+	inputChain = "NATPAIR_INPUT"
+	// untrackOutChain and untrackInChain, in the raw table, exempt the NAT's
+	// own connections from connection tracking.
+	untrackOutChain = "NATPAIR_UNTRACK_OUT"
+	untrackInChain  = "NATPAIR_UNTRACK_IN"
+	// localPorts is the ephemeral port range this NAT's own sockets use, in
+	// iptables' form, and canaryPorts the range the own canary's probes are
+	// translated to. They don't overlap, so a reply to the NAT's address says
+	// by its port whether it goes to a socket or back to the canary.
+	localPorts  = "32768:60999"
+	canaryPorts = "61000-65535"
+	// syncPort is where conntrackd receives the peer's copies, as its
+	// configuration sets.
+	syncPort = "3780"
+	// timeSync and resolver are the link-local AWS services the NAT itself
+	// uses over UDP: Amazon Time Sync, which chrony uses on Amazon Linux,
+	// and the Route 53 Resolver's link-local address. The instance metadata
+	// service is TCP, so the rules for the NAT's TCP connections cover it.
+	timeSync       = "169.254.169.123"
+	resolver       = "169.254.169.253"
 	commandTimeout = 2 * time.Second
 	// sharedTable is the route table, and the priority of the rules that use
 	// it, for traffic leaving through the shared ENI.
@@ -92,6 +111,9 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	if err := n.routePeer(ctx); err != nil {
 		return err
 	}
+	if err := n.untrackOwnTraffic(ctx); err != nil {
+		return err
+	}
 	// The conntrack settings below exist only once this module is loaded. On
 	// a fresh boot nothing has loaded it yet. A container can't load modules,
 	// but its host may already have, as in natpair's own tests.
@@ -116,7 +138,17 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 		// connection that should survive.
 		"net.netfilter.nf_conntrack_tcp_be_liberal=1",
 		// conntrackd replicates entries from conntrack events.
-		"net.netfilter.nf_conntrack_events=1"); err != nil {
+		"net.netfilter.nf_conntrack_events=1",
+		// A cleanly closed connection keeps its entry this long, in
+		// TIME_WAIT, so the table fills at the rate of new connections times
+		// this period. Linux's 120 s is twice the longest a segment may live
+		// in the network, which both ends already wait out themselves. The
+		// NAT's entry only has to outlast late retransmits of the final FIN
+		// and ACK, and each one restarts the 30 s. A packet that comes even
+		// later gets the reset for unknown connections, which only closes a
+		// connection that is already closed. At 30 s, the same table holds
+		// 4 times as many new connections a second.
+		"net.netfilter.nf_conntrack_tcp_timeout_time_wait=30"); err != nil {
 		return err
 	}
 	if err := n.sizeConnectionTable(ctx); err != nil {
@@ -134,10 +166,11 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 }
 
 // protectHost blocks new connections to the NAT's own services, such as SSH
-// and conntrackd, from outside the VPC. The security group can't do it: it
-// must allow all TCP and UDP, or AWS tracks connections through the NAT and,
-// after a takeover, drops replies to the ones it tracked on the old owner.
-// Traffic the NAT forwards doesn't pass through this chain.
+// and conntrackd, from outside the VPC, and drops other traffic from outside
+// the VPC without an answer, except the resets below. The security group
+// can't do it: it must allow all TCP and UDP, or AWS tracks connections
+// through the NAT and, after a takeover, drops replies to the ones it tracked
+// on the old owner. Traffic the NAT forwards doesn't pass through this chain.
 func (n *Network) protectHost(ctx context.Context) error {
 	rules := "*filter\n:" + inputChain + " - [0:0]\n-F " + inputChain + "\n"
 	rules += "-A " + inputChain + " -i lo -j ACCEPT\n"
@@ -145,12 +178,43 @@ func (n *Network) protectHost(ctx context.Context) error {
 	for _, source := range append(slices.Clone(n.cfg.Instance.VPCCIDRs), netip.PrefixFrom(n.cfg.PeerIP, 32)) {
 		rules += fmt.Sprintf("-A %s -s %s -j ACCEPT\n", inputChain, source)
 	}
-	// Reset other TCP instead of dropping it. A remote server still sending on
-	// a connection the new owner never copied then closes it at once. Dropped,
-	// it waits for its own timeout. A Postgres server, for example, keeps a dead
-	// replication connection, so its slot stays in use and the client can't
-	// reconnect.
-	rules += "-A " + inputChain + " -p tcp -j REJECT --reject-with tcp-reset\n"
+	// The NAT's own connections aren't tracked (see untrackOwnTraffic), so
+	// their replies are accepted by what they are instead of by state, as
+	// narrowly as they allow. UDP replies from the VPC and the peer are
+	// accepted above.
+	own := n.cfg.Instance.PrivateIP.String()
+	// TCP replies, from anywhere, to the NAT's own connections: packets
+	// without SYN, which can't open a connection, to its ephemeral ports, that
+	// belong to one of its sockets. The socket match finds the socket by the
+	// packet's addresses and ports, which needs no connection tracking. It
+	// ignores sockets listening on any address, so only a connected socket,
+	// one in TIME_WAIT, or a listener on the NAT's own address matches.
+	// Other packets, such as an ACK to a port with no connection, are
+	// dropped below without an answer.
+	rules += fmt.Sprintf("-A %s -d %s -p tcp ! --syn --dport %s -m conntrack --ctstate UNTRACKED -m socket -j ACCEPT\n", inputChain, own, localPorts)
+	// UDP replies from the link-local services. Nothing outside the
+	// instance can send from a link-local address.
+	for _, service := range []struct{ address, port string }{{timeSync, "123"}, {resolver, "53"}} {
+		rules += fmt.Sprintf("-A %s -s %s/32 -d %s -p udp --sport %s --dport %s -m conntrack --ctstate UNTRACKED -j ACCEPT\n", inputChain, service.address, own, service.port, localPorts)
+	}
+	// ICMP errors about the NAT's untracked connections: path MTU discovery
+	// and unreachable or expired destinations. Errors about tracked
+	// connections are RELATED and accepted above. The limit bounds what
+	// forged errors can cost.
+	for _, kind := range []string{"fragmentation-needed", "host-unreachable", "port-unreachable", "time-exceeded"} {
+		rules += fmt.Sprintf("-A %s -d %s -p icmp --icmp-type %s -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n", inputChain, own, kind)
+	}
+	// Reset TCP to the shared address that belongs to no connection this NAT
+	// knows, instead of dropping it. A remote server still sending on a
+	// connection the new owner never copied then closes it at once. Dropped,
+	// it waits for its own timeout. A Postgres server, for example, keeps a
+	// dead replication connection, so its slot stays in use and the client
+	// can't reconnect. Such a packet never has SYN, and without
+	// nf_conntrack_tcp_loose the connection table marks it INVALID.
+	rules += fmt.Sprintf("-A %s -d %s/32 -p tcp ! --syn -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset\n", inputChain, n.cfg.SharedAddress.Addr())
+	// Everything else from outside the VPC is dropped without an answer. VPC
+	// sources and the peer were accepted above, so they still get the
+	// kernel's reset from a closed port and fail fast.
 	rules += "-A " + inputChain + " -j DROP\nCOMMIT\n"
 	if _, err := n.run.RunWithInput(ctx, commandTimeout, rules, "iptables-restore", "--noflush", "-w", "1"); err != nil {
 		return err
@@ -175,11 +239,116 @@ func (n *Network) routePeer(ctx context.Context) error {
 	return err
 }
 
+// untrackOwnTraffic exempts the NAT's own connections from connection
+// tracking. A full connection table drops every new tracked connection. On
+// AWS, 3,000 new worker connections a second filled a 262,144-entry table,
+// and the owner's DNS lookups failed with the workers' connections.
+//
+// It exempts, both ways, only what protectHost can accept without state:
+// TCP on the NAT's own ephemeral ports, which covers lease renewals, AWS API
+// calls and the metadata service; UDP between those ports and the VPC, for
+// DNS and conntrackd's copies; conntrackd's copies arriving from the peer;
+// and UDP with the link-local services. Anything else the NAT sends, such as
+// UDP to the internet, stays tracked, as before.
+//
+// The own canary's probes are translated to the NAT's address on
+// canaryPorts, outside the ephemeral range, so their replies stay tracked
+// and are translated back. The probes test the forwarding path, which needs
+// the table, so they still fail when it is full, as new worker connections
+// do.
+func (n *Network) untrackOwnTraffic(ctx context.Context) error {
+	if _, err := n.run.Run(ctx, commandTimeout, "sysctl", "-qw", "net.ipv4.ip_local_port_range="+strings.Replace(localPorts, ":", " ", 1)); err != nil {
+		return err
+	}
+	own := n.cfg.Instance.PrivateIP.String()
+	rules := "*raw\n:" + untrackOutChain + " - [0:0]\n:" + untrackInChain + " - [0:0]\n"
+	rules += "-F " + untrackOutChain + "\n-F " + untrackInChain + "\n"
+	out := func(match string) {
+		rules += fmt.Sprintf("-A %s -s %s %s -j CT --notrack\n", untrackOutChain, own, match)
+	}
+	in := func(match string) {
+		rules += fmt.Sprintf("-A %s -d %s %s -j CT --notrack\n", untrackInChain, own, match)
+	}
+	out("-p tcp --sport " + localPorts)
+	in("-p tcp --dport " + localPorts)
+	for _, cidr := range n.cfg.Instance.VPCCIDRs {
+		out(fmt.Sprintf("-d %s -p udp --sport %s", cidr, localPorts))
+		in(fmt.Sprintf("-s %s -p udp --dport %s", cidr, localPorts))
+	}
+	in(fmt.Sprintf("-s %s/32 -p udp --dport %s", n.cfg.PeerIP, syncPort))
+	for _, service := range []struct{ address, port string }{{timeSync, "123"}, {resolver, "53"}} {
+		out(fmt.Sprintf("-d %s/32 -p udp --sport %s --dport %s", service.address, localPorts, service.port))
+		in(fmt.Sprintf("-s %s/32 -p udp --sport %s --dport %s", service.address, service.port, localPorts))
+	}
+	rules += "COMMIT\n"
+	if _, err := n.run.RunWithInput(ctx, commandTimeout, rules, "iptables-restore", "--noflush", "-w", "1"); err != nil {
+		return err
+	}
+	if err := n.ensureRule(ctx, "raw", "OUTPUT", "-j", untrackOutChain); err != nil {
+		return err
+	}
+	return n.ensureRule(ctx, "raw", "PREROUTING", "-j", untrackInChain)
+}
+
+// ConnectionTable is one reading of the kernel's connection table.
+type ConnectionTable struct {
+	// Connections is how many entries the table holds, and Max how many it
+	// may hold.
+	Connections, Max int
+	// Drops counts the packets the kernel dropped since boot because it
+	// couldn't track them, summed over CPUs. Almost always the table was
+	// full, so a new connection had no room for its entry.
+	Drops uint64
+}
+
+// ReadConnectionTable reads the kernel's connection table. The drop counter
+// comes from `conntrack -S`, which asks the kernel over netlink, because
+// /proc/net/stat/nf_conntrack exists only in kernels built with
+// CONFIG_NF_CONNTRACK_PROCFS.
+func (n *Network) ReadConnectionTable(ctx context.Context) (ConnectionTable, error) {
+	output, err := n.run.Run(ctx, commandTimeout, "sysctl", "-n", "net.netfilter.nf_conntrack_count", "net.netfilter.nf_conntrack_max")
+	if err != nil {
+		return ConnectionTable{}, err
+	}
+	var table ConnectionTable
+	sizes := strings.Fields(output)
+	if len(sizes) != 2 {
+		return ConnectionTable{}, fmt.Errorf("failed to parse the connection table's size from %q", output)
+	}
+	for i, target := range []*int{&table.Connections, &table.Max} {
+		if *target, err = strconv.Atoi(sizes[i]); err != nil {
+			return ConnectionTable{}, fmt.Errorf("failed to parse the connection table's size: %w", err)
+		}
+	}
+	stats, err := n.run.Run(ctx, commandTimeout, "conntrack", "-S")
+	if err != nil {
+		return ConnectionTable{}, err
+	}
+	// One line per CPU, such as "cpu=0 found=0 invalid=3 insert=0
+	// insert_failed=0 drop=12 early_drop=0 error=0 search_restart=0".
+	var found bool
+	for _, field := range strings.Fields(stats) {
+		value, ok := strings.CutPrefix(field, "drop=")
+		if !ok {
+			continue
+		}
+		drops, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return ConnectionTable{}, fmt.Errorf("failed to parse the connection table's drop counter: %w", err)
+		}
+		table.Drops, found = table.Drops+drops, true
+	}
+	if !found {
+		return ConnectionTable{}, fmt.Errorf("no drop counter in the connection table's statistics %q", stats)
+	}
+	return table, nil
+}
+
 // sizeConnectionTable matches the kernel's connection table to conntrackd's
 // limit. The kernel sizes the table and its hash buckets from memory, 7,680 on
-// a t4g.micro. Closed connections stay in the table for 120 s, so about 1,000
-// new connections a second fill it, and then the NAT's own DNS lookups fail.
-// A quarter as many buckets as entries keeps lookups short.
+// a t4g.micro. Closed connections stay in the table for 30 s, so about 250
+// new connections a second would fill that, and then new worker connections
+// fail. A quarter as many buckets as entries keeps lookups short.
 func (n *Network) sizeConnectionTable(ctx context.Context) error {
 	_, err := n.run.Run(ctx, commandTimeout, "sysctl", "-qw",
 		fmt.Sprintf("net.netfilter.nf_conntrack_max=%d", n.cfg.ConnectionLimit()),
@@ -259,6 +428,11 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 	rules += "-A " + snatChain + " -m addrtype --src-type LOCAL -j RETURN\n"
 	for _, source := range n.sharedSources() {
 		rules += fmt.Sprintf("-A %s -s %s -j SNAT --to-source %s\n", snatChain, source, shared)
+	}
+	// The own canary's probes take ports the NAT's own sockets never use, so
+	// their replies stay tracked (see untrackOwnTraffic).
+	for _, protocol := range []string{"tcp", "udp"} {
+		rules += fmt.Sprintf("-A %s -s %s/32 -o %s -p %s -j SNAT --to-source %s:%s\n", snatChain, cfg.OwnCanary().Guest(), cfg.Instance.Interface, protocol, cfg.Instance.PrivateIP, canaryPorts)
 	}
 	rules += fmt.Sprintf("-A %s -s %s/32 -o %s -j SNAT --to-source %s\n", snatChain, cfg.OwnCanary().Guest(), cfg.Instance.Interface, cfg.Instance.PrivateIP)
 	rules += "-F POSTROUTING\n-A POSTROUTING -j " + snatChain + "\nCOMMIT\n"

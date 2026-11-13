@@ -91,11 +91,13 @@ func TestBootstrap(t *testing.T) {
 			restores = append(restores, i)
 		}
 	}
-	require.Len(t, restores, 2)
-	assert.Less(t, forwarding, restores[1])
+	require.Len(t, restores, 3)
+	assert.Less(t, forwarding, restores[2])
 	// The conntrack settings exist only once the module is loaded.
 	conntrackSettings := slices.IndexFunc(log.commands, func(c string) bool { return strings.Contains(c, "nf_conntrack_tcp_loose") })
 	require.Contains(t, log.commands, "modprobe nf_conntrack")
+	// Closed connections leave the table after 30 s instead of 120 s.
+	assert.Contains(t, log.commands[conntrackSettings], " net.netfilter.nf_conntrack_tcp_timeout_time_wait=30")
 	// The connection table matches conntrackd's limit, not the kernel's default from memory.
 	assert.Contains(t, log.commands, "sysctl -qw net.netfilter.nf_conntrack_max=262144 net.netfilter.nf_conntrack_buckets=65536")
 	// New inbound connections to the NAT itself come only from the VPC or the
@@ -106,14 +108,77 @@ func TestBootstrap(t *testing.T) {
 		"-A NATPAIR_INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 10.0.0.0/16 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 10.0.1.11/32 -j ACCEPT\n"+
-		// TCP gets a reset, so a remote server learns at once that a connection is gone.
-		"-A NATPAIR_INPUT -p tcp -j REJECT --reject-with tcp-reset\n"+
+		// Replies to the NAT's own untracked connections, as narrowly as
+		// they allow: TCP without SYN to its ephemeral ports that one of its
+		// sockets owns, UDP from the two link-local services it uses, and
+		// rate-limited ICMP errors.
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p tcp ! --syn --dport 32768:60999 -m conntrack --ctstate UNTRACKED -m socket -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -s 169.254.169.123/32 -d 10.0.1.10 -p udp --sport 123 --dport 32768:60999 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -s 169.254.169.253/32 -d 10.0.1.10 -p udp --sport 53 --dport 32768:60999 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type fragmentation-needed -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type host-unreachable -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type port-unreachable -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type time-exceeded -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
+		// TCP to the shared address for a connection the NAT doesn't know gets
+		// a reset, so a remote server learns at once that a connection is
+		// gone. Everything else from outside the VPC gets no answer.
+		"-A NATPAIR_INPUT -d 10.0.1.100/32 -p tcp ! --syn -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset\n"+
 		"-A NATPAIR_INPUT -j DROP\nCOMMIT\n", log.inputs[0])
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C INPUT -j NATPAIR_INPUT")
 	assert.Less(t, slices.Index(log.commands, "modprobe nf_conntrack"), conntrackSettings)
+	// The NAT's own connections bypass the connection table: TCP on its
+	// ephemeral ports, UDP between those ports and the VPC, the peer's copies
+	// and the two link-local services. The firewall that accepts their
+	// replies comes first.
+	assert.Equal(t, "*raw\n:NATPAIR_UNTRACK_OUT - [0:0]\n:NATPAIR_UNTRACK_IN - [0:0]\n"+
+		"-F NATPAIR_UNTRACK_OUT\n-F NATPAIR_UNTRACK_IN\n"+
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -p tcp --sport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p tcp --dport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -d 10.0.0.0/16 -p udp --sport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -s 10.0.0.0/16 -p udp --dport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -s 10.0.1.11/32 -p udp --dport 3780 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -d 169.254.169.123/32 -p udp --sport 32768:60999 --dport 123 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -s 169.254.169.123/32 -p udp --sport 123 --dport 32768:60999 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -d 169.254.169.253/32 -p udp --sport 32768:60999 --dport 53 -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -s 169.254.169.253/32 -p udp --sport 53 --dport 32768:60999 -j CT --notrack\nCOMMIT\n", log.inputs[1])
+	assert.Contains(t, log.commands, "iptables -w 1 -t raw -C OUTPUT -j NATPAIR_UNTRACK_OUT")
+	assert.Contains(t, log.commands, "iptables -w 1 -t raw -C PREROUTING -j NATPAIR_UNTRACK_IN")
+	// The NAT's own sockets never pick the canary's ports.
+	assert.Less(t, slices.Index(log.commands, "sysctl -qw net.ipv4.ip_local_port_range=32768 60999"), restores[1])
 	// conntrackd's copies to the peer leave through the own interface from
 	// the own address, never through the shared ENI.
 	assert.Contains(t, log.commands, "ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10")
+}
+
+func TestReadConnectionTable(t *testing.T) {
+	newNetwork := func(responses map[string]string, fail map[string]error) *network.Network {
+		log := &commandLog{responses: responses, fail: fail}
+		return network.New(testConfig(t), &mocks.FakeNetworkFence{}, log.runner())
+	}
+	sizes := "sysctl -n net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max"
+	{
+		// The drop counter is summed over CPUs, without early drops, which
+		// made room.
+		n := newNetwork(map[string]string{
+			sizes: "262133\n262144",
+			"conntrack -S": "cpu=0   \tfound=0 invalid=3 insert=0 insert_failed=1 drop=12 early_drop=40 error=0 search_restart=0 \n" +
+				"cpu=1   \tfound=0 invalid=0 insert=0 insert_failed=0 drop=5 early_drop=7 error=0 search_restart=2 clash_resolve=0 chaintoolong=0",
+		}, nil)
+		table, err := n.ReadConnectionTable(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, network.ConnectionTable{Connections: 262133, Max: 262144, Drops: 17}, table)
+	}
+	{
+		// Output without a drop counter is an error, not zero drops.
+		n := newNetwork(map[string]string{sizes: "10\n262144", "conntrack -S": "cpu=0 found=0 invalid=0"}, nil)
+		_, err := n.ReadConnectionTable(t.Context())
+		assert.EqualError(t, err, `no drop counter in the connection table's statistics "cpu=0 found=0 invalid=0"`)
+	}
+	{
+		n := newNetwork(map[string]string{sizes: "10\n262144"}, map[string]error{"conntrack -S": errors.New("conntrack failed: exit status 1")})
+		_, err := n.ReadConnectionTable(t.Context())
+		assert.EqualError(t, err, "conntrack failed: exit status 1")
+	}
 }
 
 func TestClaimShared(t *testing.T) {
@@ -169,7 +234,10 @@ func TestPrepareNetwork(t *testing.T) {
 		"-A NATPAIR_SNAT -s 10.0.16.0/20 -j SNAT --to-source 10.0.1.100\n"+
 		"-A NATPAIR_SNAT -s 10.0.32.0/20 -j SNAT --to-source 10.0.1.100\n"+
 		"-A NATPAIR_SNAT -s 198.18.0.6/32 -j SNAT --to-source 10.0.1.100\n"+
-		// The own canary leaves through this NAT's own interface and IP.
+		// The own canary leaves through this NAT's own interface and IP, on
+		// ports the NAT's own sockets never use.
+		"-A NATPAIR_SNAT -s 198.18.0.2/32 -o ens5 -p tcp -j SNAT --to-source 10.0.1.10:61000-65535\n"+
+		"-A NATPAIR_SNAT -s 198.18.0.2/32 -o ens5 -p udp -j SNAT --to-source 10.0.1.10:61000-65535\n"+
 		"-A NATPAIR_SNAT -s 198.18.0.2/32 -o ens5 -j SNAT --to-source 10.0.1.10\n"+
 		// The chain is the only POSTROUTING rule.
 		"-F POSTROUTING\n-A POSTROUTING -j NATPAIR_SNAT\nCOMMIT\n", log.inputs[0])

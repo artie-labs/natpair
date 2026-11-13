@@ -7,6 +7,7 @@ package mocks
 //counterfeiter:generate -fake-name=FakeProber -o=prober.mock.go ../health Prober
 //counterfeiter:generate -fake-name=FakeConntrack -o=conntrack.mock.go ../health Conntrack
 //counterfeiter:generate -fake-name=FakeReports -o=reports.mock.go ../health Reports
+//counterfeiter:generate -fake-name=FakeConnectionTable -o=connection_table.mock.go ../health ConnectionTable
 //counterfeiter:generate -fake-name=FakeBoard -o=board.mock.go ../health Board
 //counterfeiter:generate -fake-name=FakeEC2 -o=ec2.mock.go ../handoff EC2
 //counterfeiter:generate -fake-name=FakeHandoffLocal -o=handoff_local.mock.go ../handoff Local
