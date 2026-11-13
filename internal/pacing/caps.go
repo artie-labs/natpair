@@ -22,14 +22,18 @@ const (
 	recoverPerSecond = 0.05
 	// raisePerSecond is how fast a cap rises while traffic presses it and the
 	// instance reports nothing, as a fraction of the cap. Doubling takes about
-	// 70 s.
-	raisePerSecond = 0.01
+	// 14 s. The counters show a drop within one 10 ms poll, so a cap that
+	// rises past the allowance overshoots it by about 0.05% before it cuts.
+	raisePerSecond = 0.05
 	// pressureRatio is how close to the cap traffic must be for the cap to
 	// rise. A cap that traffic doesn't reach says nothing about the allowance.
 	pressureRatio = 0.9
-	// probeInterval is how long a settled cap waits before rising above the
-	// settle point again, to find out whether the allowance went back up.
-	probeInterval = 5 * time.Minute
+	// probeInterval is how long after a cut a settled cap waits before rising
+	// above the settle point again, to find out whether the allowance went
+	// back up, as it does when burst credits refill. A probe that finds the
+	// same allowance costs one cut, and the cap is back at its settle point
+	// 3 s later.
+	probeInterval = 10 * time.Second
 )
 
 // Change says what a [Cap.Step] did, for logs.
@@ -83,12 +87,13 @@ type Observation struct {
 // reported exceeding its allowance.
 //
 // While the instance reports nothing and traffic presses the cap, the cap
-// rises slowly. At the first report, the cap drops to cutFactor of the rate
-// that caused it, then climbs back to settleRatio of that rate and stays. If
-// the reports go on after the cut, the next cut is deeper.
-// Every probeInterval, while traffic presses it, the cap rises again to learn
-// whether the allowance grew. A falling allowance, such as when burst credits
-// run out, causes new reports, and each one cuts again from the lower rate.
+// rises by raisePerSecond. At the first report, the cap drops to cutFactor of
+// the rate that caused it, then climbs back to settleRatio of that rate and
+// stays. If the reports go on after the cut, the next cut is deeper.
+// probeInterval after a cut, while traffic presses it, the cap rises again to
+// learn whether the allowance grew. A falling allowance, such as when burst
+// credits run out, causes new reports, and each one cuts again from the lower
+// rate.
 //
 // Step is a pure function of the cap and one observation, so a NAT's history
 // is all in the value.
@@ -130,18 +135,11 @@ func (c Cap) Step(o Observation) (Cap, Change) {
 		case held:
 			return c, HeldAfterCut
 		}
-		rate := o.Rate
-		if c.Limit > 0 && c.Limit < rate {
-			rate = c.Limit
-		}
 		factor := cutFactor
 		if c.Ceiling > 0 && !c.quiet {
 			factor = repeatCutFactor
 		}
-		c.Ceiling = rate
-		c.Limit = max(c.floor, factor*rate)
-		c.cutAt, c.settledAt, c.probing, c.quiet = o.Now, o.Now, false, false
-		return c, CutDown
+		return c.cut(o.Now, o.Rate, factor), CutDown
 	}
 	if c.Limit == 0 || held {
 		return c, Unchanged
@@ -168,4 +166,16 @@ func (c Cap) Step(o Observation) (Cap, Change) {
 	}
 	c.Limit += raisePerSecond * c.Limit * seconds
 	return c, Raised
+}
+
+// cut lowers the cap to factor of rate, or of the cap if traffic was
+// measured above it, and remembers that rate as the ceiling.
+func (c Cap) cut(now time.Duration, rate, factor float64) Cap {
+	if c.Limit > 0 && c.Limit < rate {
+		rate = c.Limit
+	}
+	c.Ceiling = rate
+	c.Limit = max(c.floor, factor*rate)
+	c.cutAt, c.settledAt, c.probing, c.quiet = now, now, false, false
+	return c
 }

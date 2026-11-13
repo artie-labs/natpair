@@ -60,25 +60,103 @@ func TestAllowanceCapStopsWhenCutsDontHelp(t *testing.T) {
 	}
 }
 
+// gbps converts gigabits a second to bytes a second.
+func gbps(g float64) float64 {
+	return g * 1e9 / 8
+}
+
 func TestAllowanceCapFollowsBurstCreditsDown(t *testing.T) {
-	// The bandwidth allowance falls from 1,000 to 400 when burst credits run
-	// out. AWS drops the excess, so a cut lowers the drops in proportion.
+	// On AWS, a c7gn.medium forwarded 8.35 Gbps for 855 s, then its burst
+	// credits ran out and AWS dropped everything over 3.1 Gbps, counting
+	// each 1,500-byte packet in bw_out_allowance_exceeded. Without a cut, a
+	// sender offering 8.35 Gbps loses 63% of its packets.
 	const poll = 10 * time.Millisecond
-	c := NewAllowanceCap(950, 10, 50*time.Millisecond)
+	const cliff = 855 * time.Second
+	const refill = cliff + 3*time.Minute
+	allowance := func(now time.Duration) float64 {
+		if now >= cliff && now < refill {
+			return gbps(3.1)
+		}
+		return gbps(25)
+	}
+	c := NewAllowanceCap(0, bytesFloor, minAllowanceHold)
+	var firstCut, underBaseline, refound time.Duration
 	var gaveUp bool
-	for now := poll; now <= 30*time.Second; now += poll {
-		rate := min(5000, c.Limit)
+	var exceededPolls int
+	var sum float64
+	for now := poll; now <= refill+time.Minute; now += poll {
+		rate := gbps(8.35)
+		if c.Limit > 0 {
+			rate = min(rate, c.Limit)
+		}
 		var exceeded uint64
-		if rate > 400 {
-			exceeded = uint64((rate - 400) * 10)
+		if over := rate - allowance(now); over > 0 {
+			exceeded = uint64(over * poll.Seconds() / 1500)
 		}
 		var change Change
 		c, change = c.Step(AllowanceObservation{Now: now, Elapsed: poll, Exceeded: exceeded, Rate: rate, Share: 1})
 		gaveUp = gaveUp || change == GaveUp
+		switch {
+		case now < cliff:
+			assert.Zero(t, c.Limit, "no cap while AWS drops nothing")
+		case change == CutDown && firstCut == 0:
+			firstCut = now
+		case c.Limit > 0 && c.Limit < gbps(3.1) && underBaseline == 0:
+			underBaseline = now
+		}
+		if now > cliff+time.Minute && now <= cliff+3*time.Minute {
+			sum += rate
+			if exceeded > 0 {
+				exceededPolls++
+			}
+		}
+		if now >= refill && rate == gbps(8.35) && refound == 0 {
+			refound = now
+		}
 	}
 	assert.False(t, gaveUp)
-	assert.Less(t, c.Limit, 400.0)
-	assert.Greater(t, c.Limit, 0.9*400)
+	// It cuts at the first poll that counts drops, and is under the
+	// baseline after two more cuts, each after a 50 ms hold
+	assert.Equal(t, cliff, firstCut)
+	assert.LessOrEqual(t, underBaseline-cliff, 100*time.Millisecond)
+	// From the second to the third minute after the cliff, it forwards at
+	// least 90% of the baseline, and each probe, every 10 s or so, goes
+	// over for one poll
+	assert.GreaterOrEqual(t, sum/float64(2*time.Minute/poll), 0.9*gbps(3.1))
+	assert.LessOrEqual(t, exceededPolls, int(2*time.Minute/probeInterval))
+	// When the burst credits come back, the next probe finds them, in
+	// seconds rather than minutes
+	assert.NotZero(t, refound)
+	assert.Less(t, refound-refill, 35*time.Second)
+}
+
+func TestAllowanceCapLeavesSilentShapingAlone(t *testing.T) {
+	// On AWS, a c7gn.medium's uploads fell from 6.25 to 3.1 Gbps when its
+	// burst credits ran out, with no allowance counter moving on any host.
+	// Pacing can't see that, so its caps stay where they were.
+	polls := make([][3]float64, 0, 7000)
+	for range 1000 {
+		polls = append(polls, [3]float64{0, gbps(6.25), 1})
+	}
+	for range 6000 {
+		polls = append(polls, [3]float64{0, gbps(3.1), 1})
+	}
+	{
+		// With no cap yet, it stays without one
+		c, changes := allowanceTrace(NewAllowanceCap(0, bytesFloor, minAllowanceHold), 0, polls...)
+		assert.Zero(t, c.Limit)
+		for _, change := range changes {
+			assert.Equal(t, Unchanged, change)
+		}
+	}
+	{
+		// A cap above the traffic stays put
+		c, changes := allowanceTrace(NewAllowanceCap(gbps(7), bytesFloor, minAllowanceHold), 0, polls...)
+		assert.Equal(t, gbps(7), c.Limit)
+		for _, change := range changes {
+			assert.Equal(t, Unchanged, change)
+		}
+	}
 }
 
 func TestAllowanceCapFloor(t *testing.T) {

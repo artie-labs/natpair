@@ -16,9 +16,11 @@ type instance struct {
 }
 
 // run polls the cap every poll from start until end and returns it, with the
-// seconds during which traffic exceeded the allowance.
-func (s instance) run(c Cap, start, end, poll time.Duration) (Cap, float64) {
-	var exceeded float64
+// seconds during which traffic exceeded the allowance and the mean
+// forwarded rate.
+func (s instance) run(c Cap, start, end, poll time.Duration) (Cap, float64, float64) {
+	var exceeded, sum float64
+	var polls int
 	for now := start + poll; now <= end; now += poll {
 		rate := s.demand
 		if c.Limit > 0 {
@@ -29,9 +31,11 @@ func (s instance) run(c Cap, start, end, poll time.Duration) (Cap, float64) {
 			drops = 100
 			exceeded += poll.Seconds()
 		}
+		sum += rate
+		polls++
 		c, _ = c.Step(Observation{Now: now, Elapsed: poll, Exceeded: drops, Rate: rate})
 	}
-	return c, exceeded
+	return c, exceeded, sum / float64(polls)
 }
 
 func TestCapLearnsTheAllowance(t *testing.T) {
@@ -117,7 +121,8 @@ func TestCapAfterCut(t *testing.T) {
 
 func TestCapProbes(t *testing.T) {
 	cut, _ := NewCap(0, 10, 2*time.Second).Step(Observation{Now: 0, Elapsed: time.Second, Exceeded: 1, Rate: 1000})
-	settled, _ := instance{allowance: func(time.Duration) float64 { return 1000 }, demand: 2000}.run(cut, 0, time.Minute, time.Second)
+	// From the cut to 800, the cap climbs back to 950 in 3 s.
+	settled, _, _ := instance{allowance: func(time.Duration) float64 { return 1000 }, demand: 2000}.run(cut, 0, probeInterval-time.Second, time.Second)
 	assert.InDelta(t, 950, settled.Limit, 1e-9)
 	pressing := Observation{Elapsed: time.Second, Rate: 950}
 	{
@@ -138,14 +143,14 @@ func TestCapProbes(t *testing.T) {
 		pressing.Now = probeInterval
 		c, change = settled.Step(pressing)
 		assert.Equal(t, Raised, change)
-		assert.InDelta(t, 959.5, c.Limit, 1e-9)
+		assert.InDelta(t, 997.5, c.Limit, 1e-9)
 
 		// When the pressure stops, the probe ends where it got to, and the
 		// next one waits a full interval
 		idle.Now = probeInterval + time.Second
 		c, change = c.Step(idle)
 		assert.Equal(t, Unchanged, change)
-		assert.InDelta(t, 959.5, c.Limit, 1e-9)
+		assert.InDelta(t, 997.5, c.Limit, 1e-9)
 		pressing.Now = 2*probeInterval - time.Second
 		c, change = c.Step(pressing)
 		assert.Equal(t, Unchanged, change)
@@ -163,11 +168,11 @@ func TestCapRaisesUnderPressureOnly(t *testing.T) {
 		assert.Equal(t, 1000.0, c.Limit)
 	}
 	{
-		// A cap that never saw a report rises 1% a second under pressure,
+		// A cap that never saw a report rises 5% a second under pressure,
 		// scaled by the poll interval
 		c, change := c.Step(Observation{Now: 2 * time.Second, Elapsed: 2 * time.Second, Rate: 900})
 		assert.Equal(t, Raised, change)
-		assert.InDelta(t, 1020, c.Limit, 1e-9)
+		assert.InDelta(t, 1100, c.Limit, 1e-9)
 	}
 }
 
@@ -180,30 +185,36 @@ func TestCapFollowsAllowance(t *testing.T) {
 		}
 		return 400
 	}
-	for _, poll := range []time.Duration{500 * time.Millisecond, time.Second, 5 * time.Second} {
+	for _, poll := range []time.Duration{10 * time.Millisecond, 100 * time.Millisecond, time.Second} {
 		sim := instance{allowance: allowance, demand: 5000}
-		c := NewCap(600, 10, 2*poll)
+		c := NewCap(600, 10, max(2*poll, 50*time.Millisecond))
+		// A probe that finds the same allowance goes over it for one poll,
+		// so 9 minutes hold at most one first report and 54 probes.
+		maxExceeded := (9*time.Minute/probeInterval + 1) * poll
+		step := raisePerSecond * poll.Seconds()
 		{
-			// It rises from the start until the first report, then settles
-			// at 95% of the burst allowance, give or take one raise step
-			var exceeded float64
-			c, exceeded = sim.run(c, 0, 9*time.Minute, poll)
-			assert.InDelta(t, 1000, c.Ceiling, 1000*raisePerSecond*poll.Seconds()+1e-9, "poll %s", poll)
-			assert.InDelta(t, 950, c.Limit, 950*raisePerSecond*poll.Seconds()*2, "poll %s", poll)
-			// Two probes in 9 minutes, each over the allowance for at most
-			// one poll, plus the first report
-			assert.LessOrEqual(t, exceeded, 3*poll.Seconds(), "poll %s", poll)
+			// It rises from the start until the first report, then
+			// forwards at least 90% of the allowance, probing every 10 s
+			var exceeded, mean float64
+			c, exceeded, mean = sim.run(c, 0, 9*time.Minute, poll)
+			assert.GreaterOrEqual(t, c.Ceiling, 1000.0, "poll %s", poll)
+			assert.LessOrEqual(t, c.Ceiling, 1000*(1+step), "poll %s", poll)
+			assert.GreaterOrEqual(t, mean, 0.9*1000, "poll %s", poll)
+			assert.LessOrEqual(t, exceeded, maxExceeded.Seconds(), "poll %s", poll)
 		}
 		{
 			// When the burst credits run out, it follows the allowance down
-			// and settles under the baseline. Traffic exceeds the allowance
-			// for at most 10 polls: 5 s at a 1 s poll. A slow poll recovers
-			// in coarser steps, so it overshoots more often.
-			var exceeded float64
-			c, exceeded = sim.run(c, 9*time.Minute, 20*time.Minute, poll)
-			assert.Less(t, c.Limit, 400.0, "poll %s", poll)
-			assert.Greater(t, c.Limit, 0.9*400, "poll %s", poll)
-			assert.LessOrEqual(t, exceeded, 10*poll.Seconds(), "poll %s", poll)
+			c, _, _ = sim.run(c, 9*time.Minute, 11*time.Minute, poll)
+			assert.GreaterOrEqual(t, c.Ceiling, 400.0, "poll %s", poll)
+			assert.LessOrEqual(t, c.Ceiling, 400*(1+step), "poll %s", poll)
+		}
+		{
+			// and then probes the baseline as it did the burst allowance
+			var exceeded, mean float64
+			c, exceeded, mean = sim.run(c, 11*time.Minute, 20*time.Minute, poll)
+			assert.LessOrEqual(t, c.Ceiling, 400*(1+step), "poll %s", poll)
+			assert.GreaterOrEqual(t, mean, 0.9*400, "poll %s", poll)
+			assert.LessOrEqual(t, exceeded, maxExceeded.Seconds(), "poll %s", poll)
 		}
 	}
 }
