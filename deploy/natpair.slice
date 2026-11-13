@@ -1,0 +1,11 @@
+# natpair's daemon and conntrackd run in this slice. Its CPU weight is ten
+# times the default of 100, which every other slice has and which the kernel
+# gives the shared ENI's receive threads, nice 0. When forwarding fills the
+# CPU, the daemon's lease renewals, DNS lookups and probes, and conntrackd's
+# copies, still run within milliseconds. Forwarding keeps all the CPU they
+# don't use.
+[Unit]
+Description=natpair's daemon and conntrackd, weighted ahead of forwarding
+
+[Slice]
+CPUWeight=1000

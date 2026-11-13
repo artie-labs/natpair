@@ -7,6 +7,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# See natpair.slice.
+Slice=natpair.slice
 ExecStart=/usr/local/bin/natpair run --config /etc/natpair/config.json
 # Close forwarding however the daemon stopped. The kernel deadline also
 # closes it on its own within 4 seconds.
