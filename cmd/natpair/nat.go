@@ -250,6 +250,7 @@ func runNAT(ctx context.Context, args []string) error {
 	}, health.Dependencies{
 		Prober:    prober,
 		Conntrack: conntrack,
+		Table:     net,
 		Reports:   reports,
 		Serving:   func() bool { return ctrl.Serving() },
 		Inhibited: func() bool { return ctrl.Inhibited() },
@@ -292,10 +293,6 @@ func runNAT(ctx context.Context, args []string) error {
 	})
 	group.Go(func() error {
 		keepInterruptsSpread(ctx)
-		return nil
-	})
-	group.Go(func() error {
-		watchConnectionTable(ctx)
 		return nil
 	})
 	group.Go(func() error {
@@ -358,30 +355,6 @@ func spreadInterrupts() {
 	}
 	if moved > 0 {
 		slog.Info("spread network queue interrupts across the CPUs", slog.Int("moved", moved))
-	}
-}
-
-// watchConnectionTable warns, at most once a minute, while the kernel's
-// connection table is at least 90% full. Once it's full, the kernel drops
-// new forwarded connections and the NAT's own probes, so the NAT may step
-// down. The NAT's other own traffic isn't tracked, so it keeps working.
-func watchConnectionTable(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	var warned time.Time
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		count, limit, err := network.ConnectionTableUse()
-		if err != nil || limit == 0 || count*10 < limit*9 || time.Since(warned) < time.Minute {
-			continue
-		}
-		warned = time.Now()
-		slog.Warn("the connection table is nearly full, so new connections may be dropped. Raise max_connections and replace the NATs.",
-			slog.Int("connections", count), slog.Int("max_connections", limit))
 	}
 }
 

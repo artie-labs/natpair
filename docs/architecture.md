@@ -88,6 +88,13 @@ being down, never makes a healthy owner step down. If the owner also crashes
 during such a failure, the standby still takes over, about 2 s later than
 usual.
 
+A round whose upload failed while the NAT's connection table was full
+doesn't count as failed. The kernel dropped the upload's new connection, as
+it drops new worker connections, and the standby would load the same copied
+table on taking over and fail the same way. Full means the kernel dropped
+packets it couldn't track since the last round while the table was at least
+90% full.
+
 ## Taking over
 
 When the standby takes the lease, it:

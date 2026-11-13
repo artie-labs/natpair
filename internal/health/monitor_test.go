@@ -15,8 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/artie-labs/natpair/internal/conntrackd"
+	"github.com/artie-labs/natpair/internal/controller"
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/mocks"
+	"github.com/artie-labs/natpair/internal/network"
 	"github.com/artie-labs/natpair/internal/probe"
 )
 
@@ -32,6 +34,7 @@ type fixture struct {
 	monitor   *health.Monitor
 	prober    *mocks.FakeProber
 	conntrack *mocks.FakeConntrack
+	table     *mocks.FakeConnectionTable
 	reports   *mocks.FakeReports
 	clock     *fakeClock
 	serving   bool
@@ -44,10 +47,12 @@ func newFixture(t *testing.T) *fixture {
 	f := &fixture{
 		prober:    &mocks.FakeProber{},
 		conntrack: &mocks.FakeConntrack{},
+		table:     &mocks.FakeConnectionTable{},
 		reports:   &mocks.FakeReports{},
 		clock:     &fakeClock{now: 100 * time.Second},
 	}
 	f.prober.UploadReturns(probe.Flow{}, nil)
+	f.table.ReadConnectionTableReturns(network.ConnectionTable{Connections: 1200, Max: 262144}, nil)
 	f.reports.ReadCalls(func(context.Context) (*health.Report, error) {
 		return f.peer, nil
 	})
@@ -58,6 +63,7 @@ func newFixture(t *testing.T) *fixture {
 	}, health.Dependencies{
 		Prober:    f.prober,
 		Conntrack: f.conntrack,
+		Table:     f.table,
 		Reports:   f.reports,
 		Serving:   func() bool { return f.serving },
 		Inhibited: func() bool { return f.inhibited },
@@ -124,6 +130,89 @@ func TestRoundForwarding(t *testing.T) {
 		f.prober.UploadReturns(probe.Flow{}, errors.New("timeout"))
 		f.conntrack.StatsReturns("", errors.New("no control socket"))
 		assert.True(t, f.rounds(t, 2).CanForwardUnverified)
+	}
+}
+
+// tableReadings makes each reading of the connection table show it holding
+// connections of max, with dropped more packets dropped than the last.
+func (f *fixture) tableReadings(connections, max int, dropped uint64) {
+	var drops uint64
+	f.table.ReadConnectionTableCalls(func(context.Context) (network.ConnectionTable, error) {
+		drops += dropped
+		return network.ConnectionTable{Connections: connections, Max: max, Drops: drops}, nil
+	})
+}
+
+func TestRoundFullConnectionTable(t *testing.T) {
+	// newOwner returns an owner that has run a healthy round, whose uploads
+	// now fail, and whose standby proved its own path meanwhile.
+	newOwner := func(t *testing.T) *fixture {
+		f := newFixture(t)
+		f.serving = true
+		f.rounds(t, 1)
+		f.peer = &health.Report{CanTakeover: true, ProvenWhilePeerFailing: true}
+		f.prober.UploadReturns(probe.Flow{}, errors.New("dial tcp 192.0.2.1:443: i/o timeout"))
+		return f
+	}
+	{
+		// The kernel drops new connections because the table is full, as on
+		// AWS at 262,133 of 262,144. The peer would take over the same copied
+		// table, so the owner doesn't step down.
+		f := newOwner(t)
+		f.tableReadings(262133, 262144, 40)
+		report := f.rounds(t, 5)
+		assert.False(t, report.PathHealthy)
+		assert.Zero(t, report.ConsecutiveFailures)
+		assert.False(t, controller.ShouldDemote(report))
+		// Once the table has room again, failures count again, and full
+		// rounds didn't reset the count.
+		f.tableReadings(1200, 262144, 0)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+		f.tableReadings(262133, 262144, 40)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+		f.tableReadings(1200, 262144, 0)
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 1)))
+	}
+	{
+		// Exactly 90% full counts as full
+		f := newOwner(t)
+		f.tableReadings(900, 1000, 1)
+		assert.Zero(t, f.rounds(t, 3).ConsecutiveFailures)
+	}
+	{
+		// Drops below 90% have another cause, so the failure is the path's
+		f := newOwner(t)
+		f.tableReadings(899, 1000, 1)
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 2)))
+	}
+	{
+		// A table at its limit that still finds room drops nothing, so the
+		// failure is the path's
+		f := newOwner(t)
+		f.tableReadings(262144, 262144, 0)
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 2)))
+	}
+	{
+		// The first reading has nothing to compare its drops with
+		f := newFixture(t)
+		f.prober.UploadReturns(probe.Flow{}, errors.New("timeout"))
+		f.tableReadings(262133, 262144, 40)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+	}
+	{
+		// Without a reading, a failure counts as before
+		f := newOwner(t)
+		f.table.ReadConnectionTableReturns(network.ConnectionTable{}, errors.New("conntrack failed"))
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 2)))
+	}
+	{
+		// A healthy round with a full table is still healthy
+		f := newFixture(t)
+		f.serving = true
+		f.tableReadings(262133, 262144, 40)
+		report := f.rounds(t, 2)
+		assert.True(t, report.PathHealthy)
+		assert.True(t, report.CanForward)
 	}
 }
 
@@ -372,5 +461,41 @@ func TestRoundLogging(t *testing.T) {
 		f.rounds(t, 3)
 		assert.Equal(t, 3, strings.Count(logs.String(), `"probe_error":"upload timed out"`))
 		assert.Equal(t, 3, loggedRounds())
+	}
+}
+
+func TestConnectionTableWarnings(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	// logged returns how many times msg was logged since the last call.
+	logged := func(msg string) int {
+		count := strings.Count(logs.String(), `"msg":"`+msg)
+		logs.Reset()
+		return count
+	}
+
+	f := newFixture(t)
+	f.serving = true
+	{
+		// A nearly full table is warned about once a minute
+		f.tableReadings(236000, 262144, 0)
+		f.rounds(t, 60)
+		assert.Equal(t, 1, logged("the connection table is nearly full"))
+		f.rounds(t, 1)
+		assert.Equal(t, 1, logged("the connection table is nearly full"))
+	}
+	{
+		// So is a full one, and a probe that failed because of it
+		f.tableReadings(262133, 262144, 40)
+		f.prober.UploadReturns(probe.Flow{}, errors.New("i/o timeout"))
+		f.rounds(t, 60)
+		output := logs.String()
+		assert.Equal(t, 1, strings.Count(output, `"msg":"the connection table is full, so the kernel drops new connections.`))
+		assert.Equal(t, 1, strings.Count(output, `"msg":"the health probe failed because this NAT's connection table is full, so it doesn't count as a path failure"`))
+		assert.Contains(t, output, `"connections":262133,"max_connections":262144,"dropped":40`)
+		assert.Equal(t, 60, strings.Count(output, `"table_full":true`))
+		assert.Zero(t, logged("the connection table is nearly full"))
 	}
 }

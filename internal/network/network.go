@@ -270,22 +270,58 @@ func (n *Network) untrackOwnTraffic(ctx context.Context) error {
 	return n.ensureRule(ctx, "raw", "PREROUTING", "-j", untrackInChain)
 }
 
-// ConnectionTableUse returns how many connections the kernel's table holds,
-// and how many it can.
-func ConnectionTableUse() (count, limit int, err error) {
-	for path, target := range map[string]*int{
-		"/proc/sys/net/netfilter/nf_conntrack_count": &count,
-		"/proc/sys/net/netfilter/nf_conntrack_max":   &limit,
-	} {
-		contents, err := os.ReadFile(path)
-		if err != nil {
-			return 0, 0, fmt.Errorf("failed to read the connection table's size: %w", err)
-		}
-		if *target, err = strconv.Atoi(strings.TrimSpace(string(contents))); err != nil {
-			return 0, 0, fmt.Errorf("failed to parse the connection table's size: %w", err)
+// ConnectionTable is one reading of the kernel's connection table.
+type ConnectionTable struct {
+	// Connections is how many entries the table holds, and Max how many it
+	// may hold.
+	Connections, Max int
+	// Drops counts the packets the kernel dropped since boot because it
+	// couldn't track them, summed over CPUs. Almost always the table was
+	// full, so a new connection had no room for its entry.
+	Drops uint64
+}
+
+// ReadConnectionTable reads the kernel's connection table. The drop counter
+// comes from `conntrack -S`, which asks the kernel over netlink, because
+// /proc/net/stat/nf_conntrack exists only in kernels built with
+// CONFIG_NF_CONNTRACK_PROCFS.
+func (n *Network) ReadConnectionTable(ctx context.Context) (ConnectionTable, error) {
+	output, err := n.run.Run(ctx, commandTimeout, "sysctl", "-n", "net.netfilter.nf_conntrack_count", "net.netfilter.nf_conntrack_max")
+	if err != nil {
+		return ConnectionTable{}, err
+	}
+	var table ConnectionTable
+	sizes := strings.Fields(output)
+	if len(sizes) != 2 {
+		return ConnectionTable{}, fmt.Errorf("failed to parse the connection table's size from %q", output)
+	}
+	for i, target := range []*int{&table.Connections, &table.Max} {
+		if *target, err = strconv.Atoi(sizes[i]); err != nil {
+			return ConnectionTable{}, fmt.Errorf("failed to parse the connection table's size: %w", err)
 		}
 	}
-	return count, limit, nil
+	stats, err := n.run.Run(ctx, commandTimeout, "conntrack", "-S")
+	if err != nil {
+		return ConnectionTable{}, err
+	}
+	// One line per CPU, such as "cpu=0 found=0 invalid=3 insert=0
+	// insert_failed=0 drop=12 early_drop=0 error=0 search_restart=0".
+	var found bool
+	for _, field := range strings.Fields(stats) {
+		value, ok := strings.CutPrefix(field, "drop=")
+		if !ok {
+			continue
+		}
+		drops, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return ConnectionTable{}, fmt.Errorf("failed to parse the connection table's drop counter: %w", err)
+		}
+		table.Drops, found = table.Drops+drops, true
+	}
+	if !found {
+		return ConnectionTable{}, fmt.Errorf("no drop counter in the connection table's statistics %q", stats)
+	}
+	return table, nil
 }
 
 // sizeConnectionTable matches the kernel's connection table to conntrackd's

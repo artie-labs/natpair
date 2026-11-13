@@ -328,6 +328,8 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |
 | `the instance exceeded its network allowance` or `a forwarding CPU is nearly full` is logged more than a few times an hour, with pacing on | The pair is near its limits. See [What to watch](#what-to-watch). |
 | `failed to load pacing` or `failed to pace an interface` is logged | Forwarded traffic isn't paced. See [troubleshooting](troubleshooting.md#failed-to-load-pacing-so-forwarded-traffic-isnt-paced). |
+| `the connection table is full` is logged | The kernel is dropping new worker connections. `the connection table is nearly full` warns earlier, at 90%. See [troubleshooting](troubleshooting.md#the-connection-table-is-full). |
+| `the health probe failed because this NAT's connection table is full` is logged | The owner's uploads fail because of the full table, not its path, so it stays the owner instead of stepping down. Workers' new connections fail the same way. See [troubleshooting](troubleshooting.md#the-health-probe-failed-because-this-nats-connection-table-is-full). |
 
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.
 It ships the logs of `natpair.service`, `natpair-bootstrap.service` and

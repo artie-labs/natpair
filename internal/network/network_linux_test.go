@@ -163,6 +163,14 @@ func TestOwnTrafficIsUntracked(t *testing.T) {
 	// outside the host shows. The campaign's own-path probes cover it.
 }
 
+func TestReadConnectionTableFromKernel(t *testing.T) {
+	// The real tools' output parses, with the count before the limit.
+	table, err := network.New(testConfig(t), &mocks.FakeNetworkFence{}, network.SystemRunner{}).ReadConnectionTable(t.Context())
+	require.NoError(t, err)
+	assert.Positive(t, table.Max)
+	assert.Less(t, table.Connections, table.Max)
+}
+
 // sendTCP sends one TCP segment with the given flags from inside namespace,
 // built by hand so it needn't belong to a connection.
 func sendTCP(t *testing.T, namespace string, from, to netip.Addr, port uint16, flags byte) {
