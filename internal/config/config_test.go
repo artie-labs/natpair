@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,22 @@ func TestValidate(t *testing.T) {
 	assert.NoError(t, edit(func(c *NAT) { c.MaxConnections = 524288 }))
 	assert.EqualError(t, edit(func(c *NAT) { c.ReleaseURL = "http://example.com/releases" }), "release_url must start with https:// or s3://")
 	assert.NoError(t, edit(func(c *NAT) { c.ReleaseURL = "s3://example-mirror/natpair" }))
+	assert.EqualError(t, edit(func(c *NAT) { c.Pacing = &Pacing{Enabled: true, StartMbps: -1} }), "pacing start_mbps and start_kpps must not be negative")
+	assert.EqualError(t, edit(func(c *NAT) { c.Pacing = &Pacing{Enabled: true, PollIntervalMS: -1} }), "pacing poll_interval_ms must be from 1 to 60000")
+	assert.EqualError(t, edit(func(c *NAT) { c.Pacing = &Pacing{Enabled: true, PollIntervalMS: 60001} }), "pacing poll_interval_ms must be from 1 to 60000")
+	assert.NoError(t, edit(func(c *NAT) { c.Pacing = &Pacing{Enabled: true, StartMbps: 4750, PollIntervalMS: 1} }))
+}
+
+func TestPacing(t *testing.T) {
+	{
+		// Configurations without the setting load with pacing off
+		var unset *Pacing
+		assert.False(t, unset.On())
+		assert.Equal(t, 10*time.Millisecond, unset.Poll())
+	}
+	assert.False(t, (&Pacing{}).On())
+	assert.True(t, (&Pacing{Enabled: true}).On())
+	assert.Equal(t, 2500*time.Millisecond, (&Pacing{PollIntervalMS: 2500}).Poll())
 }
 
 func TestReleases(t *testing.T) {

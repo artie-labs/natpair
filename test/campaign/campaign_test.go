@@ -101,6 +101,9 @@ type lab struct {
 	dynamo     *fakeDynamoDB
 	all        []*process
 	results    []map[string]any
+	// pacing is the pacing setting restartPair writes into both NATs'
+	// configurations.
+	pacing *config.Pacing
 }
 
 func TestCampaign(t *testing.T) {
@@ -385,6 +388,8 @@ func TestCampaign(t *testing.T) {
 		l.require(!l.fresh(), "rewriting the expired deadline keeps forwarding closed")
 		return map[string]any{"guard_jumps_after_three_restarts": jumps, "forwarded_before_deadline": true, "blocked_after_deadline": true, "expired_rewrite_blocked": true, "controller_running": false}
 	})
+
+	l.pacingCases()
 }
 
 // runCase runs one fault case and records its result.
@@ -691,6 +696,7 @@ func (l *lab) writeDeadline(name string, deadline time.Duration) {
 func (l *lab) writeConfig(name, pair string) {
 	cfg := l.configs[name]
 	cfg.Pair = pair
+	cfg.Pacing = l.pacing
 	l.configs[name] = cfg
 	encoded, err := json.MarshalIndent(cfg, "", "  ")
 	require.NoError(l.t, err)

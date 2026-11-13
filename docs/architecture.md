@@ -111,6 +111,129 @@ compares it with the release it runs.
 A release that never gets ready stays on the standby, so traffic stays on the
 old release. See [operations](operations.md#upgrade) for the steps.
 
+## Pacing forwarded traffic
+
+Pacing is optional and off by default. Turn it on with the module's
+`pacing` input, as in [operations](operations.md#pace-forwarded-traffic).
+
+AWS limits each instance's bandwidth in each direction and its packets per
+second. Above a limit, the hypervisor drops packets at random from every
+flow. That includes the lease renewals and connection copies the pair
+depends on, so one worker sending too much can slow every worker and put the
+lease at risk. With pacing on, the NAT keeps forwarded traffic just under
+the limits itself. A worker that sends too much slows to its fair share, and
+the others barely notice.
+
+**Which packets.** Uploads, from workers to the internet, leave through the
+shared ENI. Downloads, from the internet to workers, leave through the NAT's
+own interface, because only traffic from the worker CIDRs uses the shared
+ENI's route table. AWS counts both against the same limits, so both are
+paced against one budget. A small BPF program on every interface copies each
+arriving packet's source address into its mark. A packet the NAT sends
+itself has no mark, so lease renewals, probes, conntrackd's copies and AWS
+API calls are never paced. The mark also tells which worker sent an upload
+after source NAT has replaced its address.
+
+**How a packet waits.** A second BPF program, on packets leaving, gives each
+forwarded worker packet a departure time, and `sch_fq` holds it until then.
+This is the earliest departure time model that Cilium's bandwidth manager
+uses. Each interface gets one `sch_fq` per transmit queue under `mq`, so CPUs
+don't share a qdisc lock. A packet that would have to wait more than 20 ms
+is dropped instead. That tells the sender to slow down and keeps the queues
+short.
+
+**Fair shares.** Each worker address has its own token bucket, in bytes and
+in packets, and all traffic shares one more. Four times a second the daemon
+looks at which workers had packets wait more than 1 ms. Workers that didn't
+keep what they use, and those that did split the rest of the cap equally.
+Below the cap, no worker waits. A packet that its worker's bucket delayed
+skips the shared bucket, so a heavy worker's queue never holds up the
+others. With the AWS VPC CNI, each pod has its own address, so each pod is
+its own worker.
+
+**Finding the cap.** The daemon reads the ENA driver's allowance counters,
+`bw_in_allowance_exceeded`, `bw_out_allowance_exceeded` and
+`pps_allowance_exceeded`, every 10 ms by default, on every interface. ENA
+refreshes them at least every millisecond. AWS counts the whole instance, and
+when it drops, it drops on both ENIs: on AWS, after a c7gn.medium's burst ran
+out, its own ENI lost 40% of the acknowledgements going back to workers.
+Bandwidth and packet rate each have their own cap:
+
+- Until a counter first moves, there is no cap, unless you set a start.
+  While the counters stay still and traffic presses a cap, it rises by 5% a
+  second.
+- When a counter moves, the cap drops to 80% of the rate forwarded at the
+  time, and the NAT remembers that rate. If the counters keep moving after
+  the cut, the next cut is to 50%.
+- The cap then climbs back to 95% of the remembered rate in 3 s. 10 s after
+  the cut, and only while traffic presses it, it rises again by 5% a second
+  to check whether the limit went up, as it does when burst credits refill.
+  The counters show a drop within one poll, so a probe that finds the same
+  limit goes about 0.05% over it and costs one cut.
+- When burst credits run out and the limit falls to the instance's baseline,
+  the counters move again and the cap follows it down. On a c7gn.medium the
+  limit fell from 8.35 to 3.1 Gbps. Replayed in a test, the cap is under
+  3.1 Gbps within 100 ms.
+
+AWS doesn't always count. Once, when a c7gn.medium's burst ran out, its
+traffic fell from 6.25 to 3.1 Gbps with no counter moving on any host.
+Pacing can't see that, so the caps stay where they were and AWS's own limit
+applies.
+
+After a cut, the cap ignores the counters for 50 ms, while packets already
+queued under the old cap leave.
+
+A cap only cuts when forwarded traffic is to blame. It must make up at
+least half of what AWS counts against that allowance: bytes sent, for
+bandwidth, and packets sent and received, for packet rate. And if a cut
+forwards less but AWS keeps dropping at the same rate, the cap goes back to
+where it was and stops cutting until the drops stop. Otherwise traffic the
+NAT can't pace, such as its own, would push the workers' caps down for
+nothing.
+
+A NAT can start from a configured cap, or with no cap until the counters
+first move. A cut never takes a cap below 100 Mbit/s or 100,000 packets a
+second, because counters that move while forwarded traffic is lower than that
+come from other traffic.
+
+**The CPUs' limit.** A NAT forwards in the kernel, on the CPUs that take the
+network interrupts, at about 1.1 µs a full-size packet and 1.6 µs a small
+one. One CPU runs out at about 600,000 small packets a second, long before
+AWS's packet rate allowance. A NAT whose CPU is full can't renew its lease,
+resolve DNS or probe its path, so it steps down, and the standby inherits
+the same load. So the daemon also caps forwarded packets a second by CPU,
+starting with no cap.
+
+- Every 100 ms it reads `/proc/stat`, and judges the average of the last
+  three readings. `/proc/stat` counts in hundredths of a second, so one
+  reading can be off by a tenth.
+- When the busiest CPU averages more than 80% busy, or one reading shows it
+  full, the cap drops to 80% of the rate forwarded at the time. A flood of
+  small packets is cut at the end of the first 100 ms it fills a CPU. A cut
+  that wasn't enough is followed by another 300 ms later.
+- While the busiest CPU averages under 70% and traffic presses the cap, it
+  rises by 10% a second. From 70% to 80% it stays. So the cap settles where
+  the CPU has a little room, whatever the packet size, and climbs back as
+  soon as the load that caused a cut is gone.
+
+It cuts only when forwarding is to blame: forwarded traffic is at the cap,
+and at 1.6 µs a packet it explains at least half of the load. If a cut
+forwards less but the CPU stays as busy, as when conntrackd or traffic that
+senders keep offering fills it, the cap goes back to where it was and stops
+cutting until the CPU calms down. It never goes below 250,000 packets a
+second per CPU. The packet cap in force is the lower of the two. Pacing
+delays and drops packets on the way out, so it bounds incoming traffic only
+as TCP senders slow down.
+
+**Takeovers.** Pacing runs on its own and nothing waits for it, so it can't
+delay or stop a takeover, and forwarding works if it fails to load. Both
+NATs pace their own interface all the time. A new owner paces the shared ENI
+within a second of the ENI appearing. Each NAT keeps its caps in memory and
+starts again from the configured values when its daemon restarts, or when
+`natpair pacing-on` turns pacing back on. If no
+daemon renews the limits for 10 s, the kernel stops pacing, so a NAT whose
+daemon is gone, or runs a release without pacing, forwards unpaced.
+
 ## Network details
 
 - Both NATs and the shared ENI must be in one availability zone, because an
@@ -142,6 +265,16 @@ old release. See [operations](operations.md#upgrade) for the steps.
 - **Connection copies.** conntrackd sends connection state to the peer in
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.
+- **Pacing.** The pace program keeps state for at most 65,536 workers, and
+  forgets the least recently seen one first. The NAT's own traffic never
+  has state there. A packet gets a worker's state only if it arrived on an
+  interface, so the mark program marked it with its source address, and
+  that mark, or else its destination, is in the worker CIDRs. Traffic from
+  the internet is only forwarded as replies on a worker's own connections,
+  so it can't create or drain another worker's state. A worker that can
+  send from other workers' addresses can use up their fair shares. AWS stops
+  that unless an instance turns off its source and destination check, or
+  several pods share one node's addresses.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs
