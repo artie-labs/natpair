@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of 120 s, so the same table holds 4 times as many new connections a
   second. NATs set this at boot.
 
+### Security
+
+- The host firewall drops traffic from outside the VPC without an answer,
+  instead of resetting TCP, so scans of the NAT's addresses go unanswered.
+  It accepts a TCP reply to the NAT's own untracked connections only when
+  one of its sockets owns it. TCP without SYN to the shared address that
+  matches no tracked connection still gets a reset, so remote servers close
+  connections a new owner never copied. The VPC and the peer still get
+  resets from closed ports.
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed

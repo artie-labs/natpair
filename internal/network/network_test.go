@@ -109,17 +109,20 @@ func TestBootstrap(t *testing.T) {
 		"-A NATPAIR_INPUT -s 10.0.0.0/16 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 10.0.1.11/32 -j ACCEPT\n"+
 		// Replies to the NAT's own untracked connections, as narrowly as
-		// they allow: TCP without SYN to its ephemeral ports, UDP from the two
-		// link-local services it uses, and rate-limited ICMP errors.
-		"-A NATPAIR_INPUT -d 10.0.1.10 -p tcp ! --syn --dport 32768:60999 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
+		// they allow: TCP without SYN to its ephemeral ports that one of its
+		// sockets owns, UDP from the two link-local services it uses, and
+		// rate-limited ICMP errors.
+		"-A NATPAIR_INPUT -d 10.0.1.10 -p tcp ! --syn --dport 32768:60999 -m conntrack --ctstate UNTRACKED -m socket -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 169.254.169.123/32 -d 10.0.1.10 -p udp --sport 123 --dport 32768:60999 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -s 169.254.169.253/32 -d 10.0.1.10 -p udp --sport 53 --dport 32768:60999 -m conntrack --ctstate UNTRACKED -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type fragmentation-needed -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type host-unreachable -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type port-unreachable -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type time-exceeded -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
-		// TCP gets a reset, so a remote server learns at once that a connection is gone.
-		"-A NATPAIR_INPUT -p tcp -j REJECT --reject-with tcp-reset\n"+
+		// TCP to the shared address for a connection the NAT doesn't know gets
+		// a reset, so a remote server learns at once that a connection is
+		// gone. Everything else from outside the VPC gets no answer.
+		"-A NATPAIR_INPUT -d 10.0.1.100/32 -p tcp ! --syn -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset\n"+
 		"-A NATPAIR_INPUT -j DROP\nCOMMIT\n", log.inputs[0])
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C INPUT -j NATPAIR_INPUT")
 	assert.Less(t, slices.Index(log.commands, "modprobe nf_conntrack"), conntrackSettings)

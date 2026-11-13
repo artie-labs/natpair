@@ -253,8 +253,9 @@ daemon is gone, or runs a release without pacing, forwards unpaced.
   replies to copied connections arrive at the other instance, and AWS would
   drop replies it tracked on the old one.
 - So the host firewall on each NAT is what filters traffic to the NAT itself.
-  It accepts new connections only from the VPC and the peer, resets other TCP
-  and drops everything else. Traffic the NAT forwards doesn't pass through it.
+  It accepts new connections only from the VPC and the peer, and drops
+  everything else from outside the VPC without an answer. Traffic the NAT
+  forwards doesn't pass through it.
 - The NAT's own connections skip the kernel's connection table, so when
   worker connections fill it, the NAT's DNS lookups, lease renewals, AWS API
   calls and connection copies still work. The own-path probes still use the
@@ -285,18 +286,27 @@ daemon is gone, or runs a release without pacing, forwards unpaced.
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.
 - **Host firewall.** It accepts new connections to the NAT only from the VPC
-  and the peer. It resets other TCP and drops everything else. Forwarded
-  traffic doesn't pass through it.
+  and the peer, which get the kernel's usual reset from a closed port. From
+  outside the VPC, it drops everything without an answer, on every port of
+  the NAT's own and shared addresses. The one exception is TCP without SYN
+  to the shared address that matches no connection the NAT tracks. It gets
+  a reset, so a remote server still sending on a connection the new owner
+  never copied closes it at once, instead of waiting for its own timeout.
+  A scan of the NAT's own address learns nothing, and a scan of the shared
+  address learns only that it answers such packets. Forwarded traffic
+  doesn't pass through the firewall.
 - **Untracked connections.** These skip the connection table, both ways:
   TCP on the NAT's own ephemeral ports (32768 to 60999), UDP between those
   ports and the VPC, the peer's copies to port 3780, and UDP with Amazon Time
   Sync (169.254.169.123, port 123) and the Route 53 Resolver
   (169.254.169.253, port 53). Without state, the firewall accepts only their
   replies:
-  - TCP without SYN, to the NAT's own address and ephemeral ports. Such a
-    packet can't open a connection, and the kernel resets it unless one of
-    the NAT's sockets owns it. All other TCP gets the reset it always got,
-    so every port answers alike and a scan learns nothing.
+  - TCP without SYN, to the NAT's own address and ephemeral ports, that
+    belongs to one of the NAT's sockets. Such a packet can't open a
+    connection. The kernel finds the socket by the packet's addresses and
+    ports, which needs no connection tracking, and ignores sockets
+    listening on any address. Other TCP to those ports is dropped like any
+    other port's.
   - UDP from those two link-local services, from their port to the NAT's
     ephemeral ports. Nothing outside the instance can send from a
     link-local address.
