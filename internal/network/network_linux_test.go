@@ -92,3 +92,31 @@ func TestOwnTrafficStaysOnMain(t *testing.T) {
 	run(t, "ip", "rule", "del", "iif", "lo", "lookup", "main", "priority", "7000")
 	assert.Contains(t, run(t, "ip", "route", "get", "203.0.113.9", "from", "10.0.1.10"), "shared-test2")
 }
+
+func TestPeerRoute(t *testing.T) {
+	// Two links in one subnet, as a NAT's own interface and the shared ENI.
+	for _, link := range []struct{ name, address string }{{"own-test", "10.94.5.10/24"}, {"shared-test", "10.94.5.100/24"}} {
+		run(t, "ip", "link", "add", link.name, "type", "dummy")
+		t.Cleanup(func() {
+			_, err := command.Run(context.WithoutCancel(t.Context()), 2*time.Second, "ip", "link", "del", link.name)
+			assert.NoError(t, err)
+		})
+		run(t, "ip", "addr", "add", link.address, "dev", link.name)
+		run(t, "ip", "link", "set", link.name, "up")
+	}
+	// The shared address's subnet route wins, as on AWS once the shared ENI
+	// is attached.
+	run(t, "ip", "route", "replace", "10.94.5.0/24", "dev", "shared-test", "src", "10.94.5.100")
+	cfg := testConfig(t)
+	cfg.PeerIP = netip.MustParseAddr("10.94.5.11")
+	cfg.Instance.Interface, cfg.Instance.PrivateIP = "own-test", netip.MustParseAddr("10.94.5.10")
+	require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, network.SystemRunner{}).RoutePeer(t.Context()))
+	var routes []struct {
+		Dev     string `json:"dev"`
+		PrefSrc string `json:"prefsrc"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(run(t, "ip", "-j", "route", "get", "10.94.5.11")), &routes))
+	require.Len(t, routes, 1)
+	assert.Equal(t, "own-test", routes[0].Dev)
+	assert.Equal(t, "10.94.5.10", routes[0].PrefSrc)
+}
