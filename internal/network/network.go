@@ -138,7 +138,17 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 		// connection that should survive.
 		"net.netfilter.nf_conntrack_tcp_be_liberal=1",
 		// conntrackd replicates entries from conntrack events.
-		"net.netfilter.nf_conntrack_events=1"); err != nil {
+		"net.netfilter.nf_conntrack_events=1",
+		// A cleanly closed connection keeps its entry this long, in
+		// TIME_WAIT, so the table fills at the rate of new connections times
+		// this period. Linux's 120 s is twice the longest a segment may live
+		// in the network, which both ends already wait out themselves. The
+		// NAT's entry only has to outlast late retransmits of the final FIN
+		// and ACK, and each one restarts the 30 s. A packet that comes even
+		// later gets the reset for unknown connections, which only closes a
+		// connection that is already closed. At 30 s, the same table holds
+		// 4 times as many new connections a second.
+		"net.netfilter.nf_conntrack_tcp_timeout_time_wait=30"); err != nil {
 		return err
 	}
 	if err := n.sizeConnectionTable(ctx); err != nil {
@@ -326,9 +336,9 @@ func (n *Network) ReadConnectionTable(ctx context.Context) (ConnectionTable, err
 
 // sizeConnectionTable matches the kernel's connection table to conntrackd's
 // limit. The kernel sizes the table and its hash buckets from memory, 7,680 on
-// a t4g.micro. Closed connections stay in the table for 120 s, so about 1,000
-// new connections a second fill it, and then the NAT's own DNS lookups fail.
-// A quarter as many buckets as entries keeps lookups short.
+// a t4g.micro. Closed connections stay in the table for 30 s, so about 250
+// new connections a second would fill that, and then new worker connections
+// fail. A quarter as many buckets as entries keeps lookups short.
 func (n *Network) sizeConnectionTable(ctx context.Context) error {
 	_, err := n.run.Run(ctx, commandTimeout, "sysctl", "-qw",
 		fmt.Sprintf("net.netfilter.nf_conntrack_max=%d", n.cfg.ConnectionLimit()),

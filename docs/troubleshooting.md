@@ -160,8 +160,8 @@ pace traffic again.
 ### `the connection table is nearly full`
 
 The kernel's connection table is at least 90% full. Once it's full, new
-worker connections and the NAT's probes are dropped. Closed connections stay
-in the table for 2 minutes, so a high rate of new connections fills it
+worker connections and the NAT's probes are dropped. A closed connection
+keeps its entry for 30 s, so a high rate of new connections fills the table
 faster than the number of open ones suggests. Raise `max_connections` and
 replace the NATs. natpair logs this at most once a minute.
 

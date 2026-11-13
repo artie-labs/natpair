@@ -96,6 +96,8 @@ func TestBootstrap(t *testing.T) {
 	// The conntrack settings exist only once the module is loaded.
 	conntrackSettings := slices.IndexFunc(log.commands, func(c string) bool { return strings.Contains(c, "nf_conntrack_tcp_loose") })
 	require.Contains(t, log.commands, "modprobe nf_conntrack")
+	// Closed connections leave the table after 30 s instead of 120 s.
+	assert.Contains(t, log.commands[conntrackSettings], " net.netfilter.nf_conntrack_tcp_timeout_time_wait=30")
 	// The connection table matches conntrackd's limit, not the kernel's default from memory.
 	assert.Contains(t, log.commands, "sysctl -qw net.netfilter.nf_conntrack_max=262144 net.netfilter.nf_conntrack_buckets=65536")
 	// New inbound connections to the NAT itself come only from the VPC or the
