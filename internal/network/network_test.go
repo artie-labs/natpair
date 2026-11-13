@@ -142,6 +142,37 @@ func TestBootstrap(t *testing.T) {
 	assert.Less(t, slices.Index(log.commands, "sysctl -qw net.ipv4.ip_local_port_range=32768 60999"), restores[1])
 }
 
+func TestReadConnectionTable(t *testing.T) {
+	newNetwork := func(responses map[string]string, fail map[string]error) *network.Network {
+		log := &commandLog{responses: responses, fail: fail}
+		return network.New(testConfig(t), &mocks.FakeNetworkFence{}, log.runner())
+	}
+	sizes := "sysctl -n net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max"
+	{
+		// The drop counter is summed over CPUs, without early drops, which
+		// made room.
+		n := newNetwork(map[string]string{
+			sizes: "262133\n262144",
+			"conntrack -S": "cpu=0   \tfound=0 invalid=3 insert=0 insert_failed=1 drop=12 early_drop=40 error=0 search_restart=0 \n" +
+				"cpu=1   \tfound=0 invalid=0 insert=0 insert_failed=0 drop=5 early_drop=7 error=0 search_restart=2 clash_resolve=0 chaintoolong=0",
+		}, nil)
+		table, err := n.ReadConnectionTable(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, network.ConnectionTable{Connections: 262133, Max: 262144, Drops: 17}, table)
+	}
+	{
+		// Output without a drop counter is an error, not zero drops.
+		n := newNetwork(map[string]string{sizes: "10\n262144", "conntrack -S": "cpu=0 found=0 invalid=0"}, nil)
+		_, err := n.ReadConnectionTable(t.Context())
+		assert.EqualError(t, err, `no drop counter in the connection table's statistics "cpu=0 found=0 invalid=0"`)
+	}
+	{
+		n := newNetwork(map[string]string{sizes: "10\n262144"}, map[string]error{"conntrack -S": errors.New("conntrack failed: exit status 1")})
+		_, err := n.ReadConnectionTable(t.Context())
+		assert.EqualError(t, err, "conntrack failed: exit status 1")
+	}
+}
+
 func TestClaimShared(t *testing.T) {
 	{
 		log := &commandLog{}

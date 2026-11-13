@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own canary's probes now use ports 61000 to 65535. NATs log `the connection
   table is nearly full` at 90%. NATs set this up at boot, so pairs pick it
   up when they roll to a release with this fix.
+- A full connection table made the owner step down, and then the NAT that
+  took over from it, because their probes need an entry in the table. A
+  probe that fails while the kernel drops packets for lack of room, with the
+  table at least 90% full, no longer counts as a path failure. NATs log `the
+  connection table is full` and `the health probe failed because this NAT's
+  connection table is full`.
 
 ## [0.1.1] - 2026-11-09
 
