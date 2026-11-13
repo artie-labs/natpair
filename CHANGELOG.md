@@ -35,8 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It accepts a TCP reply to the NAT's own untracked connections only when
   one of its sockets owns it. TCP without SYN to the shared address that
   matches no tracked connection still gets a reset, so remote servers close
-  connections a new owner never copied. The VPC and the peer still get
-  resets from closed ports.
+  connections a new owner never copied, but only on ports 1024 to 60999,
+  and at most 50 at once and then 10 a second for each remote address.
+  Worker TCP is now translated to those ports on the shared address. The
+  VPC and the peer still get resets from closed ports.
 
 ## [0.1.1] - 2026-11-09
 

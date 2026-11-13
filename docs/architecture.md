@@ -159,11 +159,15 @@ old release. See [operations](operations.md#upgrade) for the steps.
   and the peer, which get the kernel's usual reset from a closed port. From
   outside the VPC, it drops everything without an answer, on every port of
   the NAT's own and shared addresses. The one exception is TCP without SYN
-  to the shared address that matches no connection the NAT tracks. It gets
-  a reset, so a remote server still sending on a connection the new owner
-  never copied closes it at once, instead of waiting for its own timeout.
-  A scan of the NAT's own address learns nothing, and a scan of the shared
-  address learns only that it answers such packets. Forwarded traffic
+  to the shared address that matches no connection the NAT tracks, on a
+  port worker connections use. The NAT translates worker TCP to ports 1024
+  to 60999 on the shared address, and keeps a worker's port when it's
+  already in that range. Such a packet gets a reset, so a remote server
+  still sending on a connection the new owner never copied closes it at
+  once, instead of waiting for its own timeout. Each remote address gets at
+  most 50 resets at once and then 10 a second. A scan of the NAT's own
+  address learns nothing, and a scan of the shared address gets a few
+  answers on worker ports and silence for the rest. Forwarded traffic
   doesn't pass through the firewall.
 - **Untracked connections.** These skip the connection table, both ways:
   TCP on the NAT's own ephemeral ports (32768 to 60999), UDP between those

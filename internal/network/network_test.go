@@ -119,10 +119,13 @@ func TestBootstrap(t *testing.T) {
 		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type host-unreachable -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type port-unreachable -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
 		"-A NATPAIR_INPUT -d 10.0.1.10 -p icmp --icmp-type time-exceeded -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n"+
-		// TCP to the shared address for a connection the NAT doesn't know gets
-		// a reset, so a remote server learns at once that a connection is
-		// gone. Everything else from outside the VPC gets no answer.
-		"-A NATPAIR_INPUT -d 10.0.1.100/32 -p tcp ! --syn -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset\n"+
+		// TCP to the shared address, on a worker port, for a connection the
+		// NAT doesn't know gets a reset, so a remote server learns at once
+		// that a connection is gone. The resets are limited for each remote
+		// address. Everything else from outside the VPC gets no answer.
+		"-A NATPAIR_INPUT -d 10.0.1.100/32 -p tcp ! --syn --dport 1024:60999 -m conntrack --ctstate INVALID "+
+		"-m hashlimit --hashlimit-upto 10/second --hashlimit-burst 50 --hashlimit-mode srcip --hashlimit-name natpair_reset "+
+		"--hashlimit-htable-size 4096 --hashlimit-htable-max 65536 --hashlimit-htable-expire 60000 -j REJECT --reject-with tcp-reset\n"+
 		"-A NATPAIR_INPUT -j DROP\nCOMMIT\n", log.inputs[0])
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C INPUT -j NATPAIR_INPUT")
 	assert.Less(t, slices.Index(log.commands, "modprobe nf_conntrack"), conntrackSettings)
@@ -227,9 +230,14 @@ func TestPrepareNetwork(t *testing.T) {
 	assert.Equal(t, "*nat\n:NATPAIR_SNAT - [0:0]\n-F NATPAIR_SNAT\n"+
 		// The NAT's own connections keep their own address.
 		"-A NATPAIR_SNAT -m addrtype --src-type LOCAL -j RETURN\n"+
-		// Workers and the shared canary leave with the shared ENI's IP.
+		// Workers and the shared canary leave with the shared ENI's IP, and
+		// their TCP with ports in the worker range, the only ones that get a
+		// reset for an unknown connection.
+		"-A NATPAIR_SNAT -s 10.0.16.0/20 -p tcp -j SNAT --to-source 10.0.1.100:1024-60999\n"+
 		"-A NATPAIR_SNAT -s 10.0.16.0/20 -j SNAT --to-source 10.0.1.100\n"+
+		"-A NATPAIR_SNAT -s 10.0.32.0/20 -p tcp -j SNAT --to-source 10.0.1.100:1024-60999\n"+
 		"-A NATPAIR_SNAT -s 10.0.32.0/20 -j SNAT --to-source 10.0.1.100\n"+
+		"-A NATPAIR_SNAT -s 198.18.0.6/32 -p tcp -j SNAT --to-source 10.0.1.100:1024-60999\n"+
 		"-A NATPAIR_SNAT -s 198.18.0.6/32 -j SNAT --to-source 10.0.1.100\n"+
 		// The own canary leaves through this NAT's own interface and IP, on
 		// ports the NAT's own sockets never use.

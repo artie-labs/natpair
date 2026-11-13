@@ -174,6 +174,10 @@ func sendTCP(t *testing.T, namespace string, from, to netip.Addr, port uint16, f
 			return err
 		}
 		defer unix.Close(fd)
+		// Without the bind, the kernel picks the source address.
+		if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: source}); err != nil {
+			return err
+		}
 		return unix.Sendto(fd, segment, 0, &unix.SockaddrInet4{Addr: destination})
 	}))
 }
@@ -197,10 +201,13 @@ func ruleCount(t *testing.T, namespace, chain string, parts ...string) int {
 }
 
 // TestHostFirewall runs the NAT's firewall in its own namespace, fw-nat,
-// between a host outside the VPC, in fw-out, and the peer inside it, in
+// between hosts outside the VPC, in fw-out, and the peer inside it, in
 // fw-vpc.
 func TestHostFirewall(t *testing.T) {
 	own, shared, outside := netip.MustParseAddr("10.94.7.10"), netip.MustParseAddr("10.94.7.100"), netip.MustParseAddr("10.94.7.20")
+	// scanner is a second host outside, so its resets are limited apart
+	// from outside's.
+	scanner := netip.MustParseAddr("10.94.7.21")
 	cfg := testConfig(t)
 	cfg.Instance.PrivateIP = own
 	cfg.SharedAddress = netip.PrefixFrom(shared, 24)
@@ -222,6 +229,7 @@ func TestHostFirewall(t *testing.T) {
 	nat("ip", "addr", "add", shared.String()+"/24", "dev", "fw-nat-out")
 	nat("ip", "addr", "add", "10.0.1.1/24", "dev", "fw-nat-vpc")
 	run(t, "ip", "-n", "fw-out", "addr", "add", outside.String()+"/24", "dev", "fw-out")
+	run(t, "ip", "-n", "fw-out", "addr", "add", scanner.String()+"/24", "dev", "fw-out")
 	run(t, "ip", "-n", "fw-vpc", "addr", "add", peer+"/24", "dev", "fw-vpc")
 	run(t, "ip", "-n", "fw-vpc", "link", "set", "fw-vpc", "up")
 	run(t, "ip", "-n", "fw-vpc", "route", "add", "default", "via", "10.0.1.1")
@@ -274,16 +282,39 @@ func TestHostFirewall(t *testing.T) {
 		defer listener.Close()
 		silent(own, 50001, ack)
 	}
+	resets := func() int { return ruleCount(t, "fw-nat", "NATPAIR_INPUT", "REJECT", "reset") }
 	{
-		// Probes to the shared address get no answer either, except TCP
-		// without SYN, which gets the reset for connections this NAT doesn't
-		// know
-		silent(shared, 22, syn)
-		silent(shared, 40000, syn)
-		resets, sent := ruleCount(t, "fw-nat", "NATPAIR_INPUT", "REJECT", "reset"), replies()
+		// Probes to the shared address get no answer either: any SYN, and
+		// TCP without SYN outside the ports workers' connections use
+		for _, port := range []uint16{22, 1023, 40000, 61000, 65535} {
+			silent(shared, port, syn)
+		}
+		for _, port := range []uint16{22, 1023, 61000, 61500, 65535} {
+			silent(shared, port, ack)
+		}
+	}
+	{
+		// TCP without SYN on a worker port, for a connection this NAT
+		// doesn't know, gets the reset, as after a takeover
+		before, sent := resets(), replies()
 		sendTCP(t, "fw-out", outside, shared, 40000, ack)
-		assert.Equal(t, resets+1, ruleCount(t, "fw-nat", "NATPAIR_INPUT", "REJECT", "reset"))
+		assert.Equal(t, before+1, resets())
 		assert.Equal(t, sent+1, replies())
+	}
+	{
+		// An ACK scan of the worker ports gets the burst of 50 resets, then
+		// 10 a second, and silence for the rest
+		before, drops := resets(), dropped()
+		started := time.Now()
+		for port := range uint16(200) {
+			sendTCP(t, "fw-out", scanner, shared, 2000+port, ack)
+		}
+		// The bucket refills at 10 a second while the scan runs.
+		refilled := int(time.Since(started).Seconds()*10) + 1
+		answered := resets() - before
+		assert.GreaterOrEqual(t, answered, 50)
+		assert.LessOrEqual(t, answered, 50+refilled)
+		assert.Equal(t, 200-answered, dropped()-drops)
 	}
 	{
 		// The NAT's own connections, which aren't tracked, still get their

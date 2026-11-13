@@ -35,6 +35,22 @@ const (
 	// by its port whether it goes to a socket or back to the canary.
 	localPorts  = "32768:60999"
 	canaryPorts = "61000-65535"
+	// workerPorts is the range worker TCP connections are translated to on
+	// the shared address. A port already in it is kept. It leaves out the
+	// well-known ports below 1024 and the canary's range, so a scan of
+	// those on the shared address gets no answer (see protectHost), and
+	// still offers 59,976 ports for each remote address and port.
+	workerPorts = "1024-60999"
+	// resetLimit and resetBurst bound the resets the shared address sends
+	// to each remote address, for connections this NAT doesn't know. A
+	// burst of 50 resets at once the connections one remote server most
+	// often loses in a takeover: the few opened just before it, which
+	// conntrackd hadn't copied yet. After that, 10 a second still resets
+	// 500 within 45 s, when the takeover ran without copies. A scan gets
+	// at most 50 answers and then 10 a second, so almost all of its
+	// probes go unanswered.
+	resetLimit = "10/second"
+	resetBurst = "50"
 	// syncPort is where conntrackd receives the peer's copies, as its
 	// configuration sets.
 	syncPort = "3780"
@@ -206,9 +222,16 @@ func (n *Network) protectHost(ctx context.Context) error {
 	// connection the new owner never copied then closes it at once. Dropped,
 	// it waits for its own timeout. A Postgres server, for example, keeps a
 	// dead replication connection, so its slot stays in use and the client
-	// can't reconnect. Such a packet never has SYN, and without
-	// nf_conntrack_tcp_loose the connection table marks it INVALID.
-	rules += fmt.Sprintf("-A %s -d %s/32 -p tcp ! --syn -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset\n", inputChain, n.cfg.SharedAddress.Addr())
+	// can't reconnect. Such a packet never has SYN, goes to a port in
+	// workerPorts, which PrepareNetwork translates worker connections to,
+	// and without nf_conntrack_tcp_loose the connection table marks it
+	// INVALID. The resets are limited for each remote address. Packets over
+	// the limit, and from more remote addresses than the limit's table
+	// holds, are dropped.
+	rules += fmt.Sprintf("-A %s -d %s/32 -p tcp ! --syn --dport %s -m conntrack --ctstate INVALID "+
+		"-m hashlimit --hashlimit-upto %s --hashlimit-burst %s --hashlimit-mode srcip --hashlimit-name natpair_reset "+
+		"--hashlimit-htable-size 4096 --hashlimit-htable-max 65536 --hashlimit-htable-expire 60000 "+
+		"-j REJECT --reject-with tcp-reset\n", inputChain, n.cfg.SharedAddress.Addr(), strings.Replace(workerPorts, "-", ":", 1), resetLimit, resetBurst)
 	// Everything else from outside the VPC is dropped without an answer. VPC
 	// sources and the peer were accepted above, so they still get the
 	// kernel's reset from a closed port and fail fast.
@@ -407,6 +430,9 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 	// are the whole VPC. Its own connections keep their own address.
 	rules += "-A " + snatChain + " -m addrtype --src-type LOCAL -j RETURN\n"
 	for _, source := range n.sharedSources() {
+		// TCP takes ports in workerPorts, the only ones that get a reset for
+		// an unknown connection (see protectHost).
+		rules += fmt.Sprintf("-A %s -s %s -p tcp -j SNAT --to-source %s:%s\n", snatChain, source, shared, workerPorts)
 		rules += fmt.Sprintf("-A %s -s %s -j SNAT --to-source %s\n", snatChain, source, shared)
 	}
 	// The own canary's probes take ports the NAT's own sockets never use, so
