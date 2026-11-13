@@ -163,10 +163,11 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 }
 
 // protectHost blocks new connections to the NAT's own services, such as SSH
-// and conntrackd, from outside the VPC. The security group can't do it: it
-// must allow all TCP and UDP, or AWS tracks connections through the NAT and,
-// after a takeover, drops replies to the ones it tracked on the old owner.
-// Traffic the NAT forwards doesn't pass through this chain.
+// and conntrackd, from outside the VPC, and drops other traffic from outside
+// the VPC without an answer, except the resets below. The security group
+// can't do it: it must allow all TCP and UDP, or AWS tracks connections
+// through the NAT and, after a takeover, drops replies to the ones it tracked
+// on the old owner. Traffic the NAT forwards doesn't pass through this chain.
 func (n *Network) protectHost(ctx context.Context) error {
 	rules := "*filter\n:" + inputChain + " - [0:0]\n-F " + inputChain + "\n"
 	rules += "-A " + inputChain + " -i lo -j ACCEPT\n"
@@ -179,11 +180,15 @@ func (n *Network) protectHost(ctx context.Context) error {
 	// narrowly as they allow. UDP replies from the VPC and the peer are
 	// accepted above.
 	own := n.cfg.Instance.PrivateIP.String()
-	// TCP replies, from anywhere, to the NAT's own ephemeral ports. Without
-	// SYN, a packet can't open a connection, and the kernel resets it unless
-	// it belongs to one of the NAT's sockets. Every other TCP packet still
-	// gets the reset rule below, as before, so all ports answer alike.
-	rules += fmt.Sprintf("-A %s -d %s -p tcp ! --syn --dport %s -m conntrack --ctstate UNTRACKED -j ACCEPT\n", inputChain, own, localPorts)
+	// TCP replies, from anywhere, to the NAT's own connections: packets
+	// without SYN, which can't open a connection, to its ephemeral ports, that
+	// belong to one of its sockets. The socket match finds the socket by the
+	// packet's addresses and ports, which needs no connection tracking. It
+	// ignores sockets listening on any address, so only a connected socket,
+	// one in TIME_WAIT, or a listener on the NAT's own address matches.
+	// Other packets, such as an ACK to a port with no connection, are
+	// dropped below without an answer.
+	rules += fmt.Sprintf("-A %s -d %s -p tcp ! --syn --dport %s -m conntrack --ctstate UNTRACKED -m socket -j ACCEPT\n", inputChain, own, localPorts)
 	// UDP replies from the link-local services. Nothing outside the
 	// instance can send from a link-local address.
 	for _, service := range []struct{ address, port string }{{timeSync, "123"}, {resolver, "53"}} {
@@ -196,12 +201,17 @@ func (n *Network) protectHost(ctx context.Context) error {
 	for _, kind := range []string{"fragmentation-needed", "host-unreachable", "port-unreachable", "time-exceeded"} {
 		rules += fmt.Sprintf("-A %s -d %s -p icmp --icmp-type %s -m limit --limit 50/second --limit-burst 100 -j ACCEPT\n", inputChain, own, kind)
 	}
-	// Reset other TCP instead of dropping it. A remote server still sending on
-	// a connection the new owner never copied then closes it at once. Dropped,
-	// it waits for its own timeout. A Postgres server, for example, keeps a dead
-	// replication connection, so its slot stays in use and the client can't
-	// reconnect.
-	rules += "-A " + inputChain + " -p tcp -j REJECT --reject-with tcp-reset\n"
+	// Reset TCP to the shared address that belongs to no connection this NAT
+	// knows, instead of dropping it. A remote server still sending on a
+	// connection the new owner never copied then closes it at once. Dropped,
+	// it waits for its own timeout. A Postgres server, for example, keeps a
+	// dead replication connection, so its slot stays in use and the client
+	// can't reconnect. Such a packet never has SYN, and without
+	// nf_conntrack_tcp_loose the connection table marks it INVALID.
+	rules += fmt.Sprintf("-A %s -d %s/32 -p tcp ! --syn -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset\n", inputChain, n.cfg.SharedAddress.Addr())
+	// Everything else from outside the VPC is dropped without an answer. VPC
+	// sources and the peer were accepted above, so they still get the
+	// kernel's reset from a closed port and fail fast.
 	rules += "-A " + inputChain + " -j DROP\nCOMMIT\n"
 	if _, err := n.run.RunWithInput(ctx, commandTimeout, rules, "iptables-restore", "--noflush", "-w", "1"); err != nil {
 		return err

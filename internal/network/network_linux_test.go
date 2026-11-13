@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"net"
 	"net/netip"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -176,10 +178,10 @@ func sendTCP(t *testing.T, namespace string, from, to netip.Addr, port uint16, f
 	}))
 }
 
-// ruleCount returns how many packets the NATPAIR_INPUT rule containing all
-// of parts has matched.
-func ruleCount(t *testing.T, parts ...string) int {
-	for line := range strings.SplitSeq(run(t, "iptables", "-w", "1", "-L", "NATPAIR_INPUT", "-v", "-x", "-n"), "\n") {
+// ruleCount returns how many packets the rule of chain, in namespace's
+// filter table, that contains all of parts has matched.
+func ruleCount(t *testing.T, namespace, chain string, parts ...string) int {
+	for line := range strings.SplitSeq(run(t, "ip", "netns", "exec", namespace, "iptables", "-w", "1", "-L", chain, "-v", "-x", "-n"), "\n") {
 		matches := true
 		for _, part := range parts {
 			matches = matches && strings.Contains(line, part)
@@ -190,62 +192,150 @@ func ruleCount(t *testing.T, parts ...string) int {
 			return count
 		}
 	}
-	t.Fatalf("no NATPAIR_INPUT rule with %v", parts)
+	t.Fatalf("no %s rule with %v", chain, parts)
 	return 0
 }
 
-func TestHostFirewallForUntrackedReplies(t *testing.T) {
-	// The NAT's own address, and a host outside the VPC in a namespace.
-	own, outside := netip.MustParseAddr("10.94.7.10"), netip.MustParseAddr("10.94.7.20")
-	run(t, "ip", "netns", "add", "fw-out")
-	run(t, "ip", "link", "add", "fw-nat", "type", "veth", "peer", "name", "fw-out", "netns", "fw-out")
-	ctx := context.WithoutCancel(t.Context())
-	t.Cleanup(func() {
-		for _, args := range [][]string{{"iptables", "-w", "1", "-D", "INPUT", "-j", "NATPAIR_INPUT"}, {"iptables", "-w", "1", "-t", "raw", "-D", "PREROUTING", "-j", "NATPAIR_UNTRACK_IN"}, {"iptables", "-w", "1", "-t", "raw", "-D", "OUTPUT", "-j", "NATPAIR_UNTRACK_OUT"}, {"ip", "link", "del", "fw-nat"}, {"ip", "netns", "del", "fw-out"}} {
-			_, err := command.Run(ctx, 2*time.Second, args[0], args[1:]...)
-			assert.NoError(t, err)
-		}
-	})
-	run(t, "ip", "addr", "add", own.String()+"/24", "dev", "fw-nat")
-	run(t, "ip", "link", "set", "fw-nat", "up")
-	run(t, "ip", "-n", "fw-out", "addr", "add", outside.String()+"/24", "dev", "fw-out")
-	run(t, "ip", "-n", "fw-out", "link", "set", "fw-out", "up")
+// TestHostFirewall runs the NAT's firewall in its own namespace, fw-nat,
+// between a host outside the VPC, in fw-out, and the peer inside it, in
+// fw-vpc.
+func TestHostFirewall(t *testing.T) {
+	own, shared, outside := netip.MustParseAddr("10.94.7.10"), netip.MustParseAddr("10.94.7.100"), netip.MustParseAddr("10.94.7.20")
 	cfg := testConfig(t)
 	cfg.Instance.PrivateIP = own
+	cfg.SharedAddress = netip.PrefixFrom(shared, 24)
+	peer := cfg.PeerIP.String()
+	ctx := context.WithoutCancel(t.Context())
+	for _, namespace := range []string{"fw-nat", "fw-out", "fw-vpc"} {
+		run(t, "ip", "netns", "add", namespace)
+		t.Cleanup(func() {
+			_, err := command.Run(ctx, 2*time.Second, "ip", "netns", "del", namespace)
+			assert.NoError(t, err)
+		})
+	}
+	nat := func(args ...string) string {
+		return run(t, "ip", append([]string{"netns", "exec", "fw-nat"}, args...)...)
+	}
+	run(t, "ip", "link", "add", "fw-nat-out", "netns", "fw-nat", "type", "veth", "peer", "name", "fw-out", "netns", "fw-out")
+	run(t, "ip", "link", "add", "fw-nat-vpc", "netns", "fw-nat", "type", "veth", "peer", "name", "fw-vpc", "netns", "fw-vpc")
+	nat("ip", "addr", "add", own.String()+"/24", "dev", "fw-nat-out")
+	nat("ip", "addr", "add", shared.String()+"/24", "dev", "fw-nat-out")
+	nat("ip", "addr", "add", "10.0.1.1/24", "dev", "fw-nat-vpc")
+	run(t, "ip", "-n", "fw-out", "addr", "add", outside.String()+"/24", "dev", "fw-out")
+	run(t, "ip", "-n", "fw-vpc", "addr", "add", peer+"/24", "dev", "fw-vpc")
+	run(t, "ip", "-n", "fw-vpc", "link", "set", "fw-vpc", "up")
+	run(t, "ip", "-n", "fw-vpc", "route", "add", "default", "via", "10.0.1.1")
+	run(t, "ip", "-n", "fw-out", "link", "set", "fw-out", "up")
+	for _, link := range []string{"fw-nat-out", "fw-nat-vpc", "lo"} {
+		nat("ip", "link", "set", link, "up")
+	}
+	// As Bootstrap sets it: a packet without SYN that matches no tracked
+	// connection is INVALID instead of starting one.
+	nat("sysctl", "-qw", "net.netfilter.nf_conntrack_tcp_loose=0")
 	n := network.New(cfg, &mocks.FakeNetworkFence{}, network.SystemRunner{})
-	require.NoError(t, n.ProtectHost(t.Context()))
-	require.NoError(t, n.UntrackOwnTraffic(t.Context()))
+	require.NoError(t, netns.Do("fw-nat", func() error {
+		if err := n.ProtectHost(t.Context()); err != nil {
+			return err
+		}
+		return n.UntrackOwnTraffic(t.Context())
+	}))
+	// Counts the TCP packets the NAT sends outside, such as resets.
+	nat("iptables", "-w", "1", "-A", "OUTPUT", "-o", "fw-nat-out", "-p", "tcp")
+	replies := func() int { return ruleCount(t, "fw-nat", "OUTPUT", "fw-nat-out") }
+	dropped := func() int { return ruleCount(t, "fw-nat", "NATPAIR_INPUT", "DROP") }
+	// silent sends one probe from outside the VPC and checks that the final
+	// rule dropped it and nothing answered it.
+	silent := func(to netip.Addr, port uint16, flags byte) {
+		t.Helper()
+		drops, sent := dropped(), replies()
+		sendTCP(t, "fw-out", outside, to, port, flags)
+		assert.Equal(t, drops+1, dropped(), "%s port %d flags %#x", to, port, flags)
+		assert.Equal(t, sent, replies(), "%s port %d flags %#x", to, port, flags)
+	}
 
 	const ack, syn = 0x10, 0x02
-	accepted := func() int { return ruleCount(t, "ACCEPT", "dpts:32768:60999", "UNTRACKED") }
-	reset := func() int { return ruleCount(t, "REJECT", "tcp", "reset") }
 	{
-		// A non-SYN packet to a well-known port gets the reset it got before
-		// the NAT's own connections went untracked, as every port does, so a
-		// scan learns nothing.
-		before, resets := accepted(), reset()
-		sendTCP(t, "fw-out", outside, own, 22, ack)
-		assert.Equal(t, before, accepted())
-		assert.Equal(t, resets+1, reset())
+		// Probes to the NAT's own address get no answer on any port, including
+		// its ephemeral ports when no socket owns the port, and the own
+		// canary's ports.
+		for _, port := range []uint16{22, 3780, 8080, 40000, 50000, 61500} {
+			silent(own, port, syn)
+			silent(own, port, ack)
+		}
 	}
 	{
-		// The canary's ports stay tracked
-		before, resets := accepted(), reset()
-		sendTCP(t, "fw-out", outside, own, 61234, ack)
-		assert.Equal(t, before, accepted())
-		assert.Equal(t, resets+1, reset())
+		// A socket listening on any address doesn't let an ACK through
+		var listener net.Listener
+		require.NoError(t, netns.Do("fw-nat", func() error {
+			var err error
+			listener, err = net.Listen("tcp4", ":50001")
+			return err
+		}))
+		defer listener.Close()
+		silent(own, 50001, ack)
 	}
 	{
-		// A reply to one of the NAT's own ephemeral ports reaches its sockets
-		before := accepted()
-		sendTCP(t, "fw-out", outside, own, 40000, ack)
-		assert.Equal(t, before+1, accepted())
+		// Probes to the shared address get no answer either, except TCP
+		// without SYN, which gets the reset for connections this NAT doesn't
+		// know
+		silent(shared, 22, syn)
+		silent(shared, 40000, syn)
+		resets, sent := ruleCount(t, "fw-nat", "NATPAIR_INPUT", "REJECT", "reset"), replies()
+		sendTCP(t, "fw-out", outside, shared, 40000, ack)
+		assert.Equal(t, resets+1, ruleCount(t, "fw-nat", "NATPAIR_INPUT", "REJECT", "reset"))
+		assert.Equal(t, sent+1, replies())
 	}
 	{
-		// A SYN can't use that rule to open a connection
-		before, resets := accepted(), reset()
-		sendTCP(t, "fw-out", outside, own, 40001, syn)
-		assert.Equal(t, before, accepted())
-		assert.Equal(t, resets+1, reset())
+		// The NAT's own connections, which aren't tracked, still get their
+		// replies, through the socket match
+		var listener net.Listener
+		require.NoError(t, netns.Do("fw-out", func() error {
+			var err error
+			listener, err = net.Listen("tcp4", outside.String()+":8443")
+			return err
+		}))
+		defer listener.Close()
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_, _ = io.Copy(conn, conn)
+		}()
+		accepted := ruleCount(t, "fw-nat", "NATPAIR_INPUT", "socket")
+		require.NoError(t, netns.Do("fw-nat", func() error {
+			dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: own.AsSlice()}, Timeout: 5 * time.Second}
+			conn, err := dialer.Dial("tcp4", outside.String()+":8443")
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			if _, err := conn.Write([]byte("ping")); err != nil {
+				return err
+			}
+			echo := make([]byte, 4)
+			if _, err := io.ReadFull(conn, echo); err != nil {
+				return err
+			}
+			assert.Equal(t, "ping", string(echo))
+			return nil
+		}))
+		// At least the SYN-ACK and the echo
+		assert.GreaterOrEqual(t, ruleCount(t, "fw-nat", "NATPAIR_INPUT", "socket"), accepted+2)
+	}
+	{
+		// The peer, inside the VPC, still gets the kernel's reset from a
+		// closed port, so it fails fast
+		for _, port := range []string{"22", "40000"} {
+			err := netns.Do("fw-vpc", func() error {
+				conn, err := net.DialTimeout("tcp4", own.String()+":"+port, 5*time.Second)
+				if err == nil {
+					_ = conn.Close()
+				}
+				return err
+			})
+			assert.ErrorIs(t, err, syscall.ECONNREFUSED, "port %s", port)
+		}
 	}
 }
