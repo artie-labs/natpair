@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table at least 90% full, no longer counts as a path failure. NATs log `the
   connection table is full` and `the health probe failed because this NAT's
   connection table is full`.
+- An owner that got more traffic than it could forward stepped down, the
+  NAT that took over saturated and stepped down too, and the pair moved 2 to
+  4 times a minute, each move pausing forwarding for about 10 s. When an
+  owner's upload times out, it now tries 40 TCP handshakes with the probe
+  receiver through the shared Elastic IP. If some complete and some don't,
+  the path is congested, not broken, and the round doesn't count as a path
+  failure. If none or all complete, it counts as before. NATs log `the
+  health probe failed, but the path is alive`, and their reports show
+  `congested`.
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
   second. NATs set this at boot.

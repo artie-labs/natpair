@@ -78,6 +78,12 @@ the NATs one at a time, as in [Replace a NAT](operations.md#replace-a-nat).
   `system.net.aws.ec2.*_allowance_exceeded`. Move to an instance type with
   more baseline bandwidth, as in
   [Replace a NAT](operations.md#replace-a-nat).
+- **More packets than the CPU can forward.** Small packets at a high rate,
+  such as 800,000 UDP packets a second on a c7gn.medium, saturate the
+  CPU, and packets beyond what it can process are lost. natpair logs
+  [`the health probe failed, but the path is alive`](#the-health-probe-failed-but-the-path-is-alive)
+  and keeps the owner serving. Move to an instance type with more vCPUs,
+  or find the worker sending the traffic.
 - **Connection table full.** When the table reaches `max_connections`, the
   kernel drops new connections and logs `nf_conntrack: table full, dropping
   packet` in `sudo dmesg`, and natpair logs
@@ -163,6 +169,26 @@ fail the same way. Its `health round` lines show `"table_full":true`. Fix
 the table as for
 [`the connection table is full`](#the-connection-table-is-full). natpair
 logs this at most once a minute.
+
+### `the health probe failed, but the path is alive`
+
+The full message ends with `so forwarding is congested and it doesn't count
+as a path failure`. The owner's upload timed out, and of the 40 TCP
+handshakes it then tried with the probe receiver through the shared Elastic
+IP, the `handshakes` field's count completed and the rest were lost. The
+path works but loses packets, usually because more traffic arrives than the
+NAT can forward, so the owner keeps serving: the standby would get the same
+traffic. Its `health round` lines show `"congested":true`. Check the NAT's
+CPU with `top` (high `si` means the kernel is busy forwarding) and its
+[network limits](#the-nat-is-too-small). natpair logs this at most once a
+minute.
+
+### `failed to check whether the path is alive, so the failed probe counts`
+
+After an upload timed out, the owner couldn't try the handshakes, usually
+because it couldn't resolve the probe receiver's address. The failed round
+counts toward stepping down, as it would without the check. natpair logs
+this at most once a minute.
 
 ### `failed to read the connection table, so a full table can't be told from a path failure`
 
