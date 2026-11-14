@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- On Linux 6.5 and later, such as the Amazon Linux 2023 6.18 kernel, a NAT
+  whose forwarding filled its CPU did that forwarding inside its daemon's
+  system calls, so its lease renewals and DNS lookups timed out. The daemon
+  now turns on threaded NAPI for every ENI, so receive processing runs in
+  kernel threads that the scheduler shares with the daemon. It does this at
+  start, when the shared ENI comes up during a takeover, and every 5 s.
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed
