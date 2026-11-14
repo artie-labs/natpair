@@ -111,9 +111,6 @@ func TestBootstrap(t *testing.T) {
 		"-A NATPAIR_INPUT -j DROP\nCOMMIT\n", log.inputs[0])
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C INPUT -j NATPAIR_INPUT")
 	assert.Less(t, slices.Index(log.commands, "modprobe nf_conntrack"), conntrackSettings)
-	// conntrackd's copies to the peer leave through the own interface from
-	// the own address, never through the shared ENI.
-	assert.Contains(t, log.commands, "ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10")
 }
 
 func TestClaimShared(t *testing.T) {
@@ -187,6 +184,10 @@ func TestPrepareNetwork(t *testing.T) {
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C FORWARD -s 10.0.16.0/20 -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT")
 	// Worker packets from unknown connections are reset, not dropped in silence.
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C FORWARD -s 10.0.32.0/20 -p tcp -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset")
+	// conntrackd's copies to the peer leave through the own interface from
+	// the own address, never through the shared ENI. Every takeover sets the
+	// route again, in case the kernel dropped it since boot.
+	assert.Contains(t, log.commands, "ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10")
 }
 
 func TestActivateShared(t *testing.T) {

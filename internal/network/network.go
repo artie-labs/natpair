@@ -89,9 +89,6 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	if err := n.protectHost(ctx); err != nil {
 		return err
 	}
-	if err := n.routePeer(ctx); err != nil {
-		return err
-	}
 	// The conntrack settings below exist only once this module is loaded. On
 	// a fresh boot nothing has loaded it yet. A container can't load modules,
 	// but its host may already have, as in natpair's own tests.
@@ -168,7 +165,8 @@ func (n *Network) protectHost(ctx context.Context) error {
 // packets-per-second allowance. On AWS, after a full resync under connection
 // churn, the shared ENI sent about 130,000 packets a second while receiving
 // 40,000, and AWS dropped about 90,000 a second. This host route is more
-// specific than either subnet route, so it always wins.
+// specific than either subnet route, so it always wins. The route has no
+// gateway, because the peer is in the own interface's subnet.
 func (n *Network) routePeer(ctx context.Context) error {
 	_, err := n.run.Run(ctx, commandTimeout, "ip", "route", "replace", netip.PrefixFrom(n.cfg.PeerIP, 32).String(),
 		"dev", n.cfg.Instance.Interface, "src", n.cfg.Instance.PrivateIP.String())
@@ -241,8 +239,11 @@ func (n *Network) createCanary(ctx context.Context, index int, canary config.Can
 	return n.ensureRule(ctx, "filter", "FORWARD", "-d", guestHost, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 }
 
-// PrepareNetwork installs SNAT and routing rules for the shared ENI. It is
-// safe to run repeatedly, and before the shared ENI is attached.
+// PrepareNetwork installs SNAT and routing rules for the shared ENI, and the
+// route to the peer. It is safe to run repeatedly, and before the shared ENI
+// is attached. Bootstrap and every takeover run it, so a takeover also puts
+// back a route the kernel dropped since boot, such as when the own interface
+// went down.
 //
 // Worker traffic and the shared canary are translated to the shared ENI's
 // private IP and routed out through the shared ENI, because the Internet
@@ -266,6 +267,9 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 		return err
 	}
 	if err := n.ensureSharedRules(ctx); err != nil {
+		return err
+	}
+	if err := n.routePeer(ctx); err != nil {
 		return err
 	}
 	for _, prefix := range cfg.ProtectedCIDRs {

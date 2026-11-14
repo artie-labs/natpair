@@ -47,8 +47,17 @@ func TestSharedPath(t *testing.T) {
 
 func TestSharedRules(t *testing.T) {
 	cfg := testConfig(t)
+	// PrepareNetwork routes to the peer through the own interface.
+	cfg.Instance.Interface = "own-test"
+	run(t, "ip", "link", "add", "own-test", "type", "dummy")
+	t.Cleanup(func() {
+		_, err := command.Run(context.WithoutCancel(t.Context()), 2*time.Second, "ip", "link", "del", "own-test")
+		assert.NoError(t, err)
+	})
+	run(t, "ip", "addr", "add", "10.0.1.10/24", "dev", "own-test")
+	run(t, "ip", "link", "set", "own-test", "up")
 	n := network.New(cfg, &mocks.FakeNetworkFence{}, network.SystemRunner{})
-	// Running twice must not fail on rules that already exist.
+	// Running twice must not fail on rules or routes that already exist.
 	for range 2 {
 		require.NoError(t, n.PrepareNetwork(t.Context()))
 	}
@@ -62,6 +71,7 @@ func TestOwnTrafficStaysOnMain(t *testing.T) {
 	// address, and the shared table sends everything out another interface.
 	cfg := testConfig(t)
 	cfg.ProtectedCIDRs = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16")}
+	cfg.Instance.Interface = "own-test"
 	for _, link := range []string{"own-test", "shared-test2"} {
 		run(t, "ip", "link", "add", link, "type", "dummy")
 		run(t, "ip", "link", "set", link, "up")
@@ -107,6 +117,7 @@ func TestPeerRoute(t *testing.T) {
 	// The shared address's subnet route wins, as on AWS once the shared ENI
 	// is attached.
 	run(t, "ip", "route", "replace", "10.94.5.0/24", "dev", "shared-test", "src", "10.94.5.100")
+	require.Contains(t, run(t, "ip", "route", "get", "10.94.5.11"), "shared-test")
 	cfg := testConfig(t)
 	cfg.PeerIP = netip.MustParseAddr("10.94.5.11")
 	cfg.Instance.Interface, cfg.Instance.PrivateIP = "own-test", netip.MustParseAddr("10.94.5.10")
