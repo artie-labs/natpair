@@ -144,7 +144,8 @@ kernel's path.
   Past the budget the program drops worker packets. Dropping the other 10%
   is cheap, so the CPU has room again.
 - **It lowers the budget** to 90% of itself, once a second and down to half
-  the measured rate, while the NIC still drops at least 5%. The program's
+  the measured rate, while the CPU stays full and the NIC still drops at
+  least 5%. The program's
   own drops take CPU too, so a bigger flood needs a smaller budget: at 1.2
   million packets a second, a c7gn.medium stayed full under 90%.
 - **It raises the shared ENI's receive ring and receive threads.** Before
