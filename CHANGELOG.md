@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - natpair spreads the ENA queue interrupts across the CPUs, queue n on CPU n,
   and the install script turns irqbalance off. irqbalance could put all of an
   interface's queues on one CPU, so a two-CPU NAT forwarded with one. On a
-  c7gn.large that was 9.6 Gbps instead of 14.7.
+  c7gn.large that was 9.6 Gbps instead of about 18.
 
 ## [0.1.1] - 2026-11-09
 

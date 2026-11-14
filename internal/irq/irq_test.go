@@ -1,9 +1,13 @@
 package irq
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // interrupts is /proc/interrupts on a two-CPU NAT holding the shared ENI.
@@ -23,13 +27,59 @@ func TestPlan(t *testing.T) {
 	{
 		// Each interface's queue n goes to CPU n. The management interrupts
 		// and the timer stay where they are.
-		assert.Equal(t, []Placement{{59, 0}, {60, 1}, {63, 0}, {64, 1}}, Plan(interrupts, 2))
+		assert.Equal(t, []placement{{59, 0}, {60, 1}, {63, 0}, {64, 1}}, plan(interrupts, 2))
 	}
 	{
 		// More queues than CPUs wrap around
-		assert.Equal(t, []Placement{{59, 0}, {60, 0}, {63, 0}, {64, 0}}, Plan(interrupts, 1))
+		assert.Equal(t, []placement{{59, 0}, {60, 0}, {63, 0}, {64, 0}}, plan(interrupts, 1))
 	}
 	{
-		assert.Empty(t, Plan("           CPU0\n 10:  5  GICv3  27 Level  arch_timer\n", 2))
+		assert.Empty(t, plan("           CPU0\n 10:  5  GICv3  27 Level  arch_timer\n", 2))
 	}
+}
+
+func TestSpread(t *testing.T) {
+	// /proc/interrupts on a two-CPU amd64 NAT, with both of ens5's queues on
+	// CPU 0 and interrupt 29 gone from /proc/irq.
+	const amd64Interrupts = `            CPU0       CPU1
+  24:          0          0  PCI-MSI-0000:00:05.0   0-edge      ena-mgmnt@pci:0000:00:05.0
+  25:    1830467          0  PCI-MSI-0000:00:05.0   1-edge      ens5-Tx-Rx-0
+  26:    1702931          0  PCI-MSI-0000:00:05.0   2-edge      ens5-Tx-Rx-1
+  29:         12          0  PCI-MSI-0000:00:06.0   1-edge      ens6-Tx-Rx-0
+`
+	proc := t.TempDir()
+	writeFile(t, filepath.Join(proc, "interrupts"), amd64Interrupts)
+	for irq, cpus := range map[string]string{"24": "0-1", "25": "0", "26": "0"} {
+		writeFile(t, filepath.Join(proc, "irq", irq, "smp_affinity_list"), cpus+"\n")
+	}
+
+	moved, err := spread(proc, 2)
+	assert.Equal(t, 1, moved)
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+	assert.ErrorContains(t, err, "failed to read interrupt 29's CPUs")
+	assert.Equal(t, "0-1\n", readFile(t, filepath.Join(proc, "irq", "24", "smp_affinity_list")))
+	assert.Equal(t, "0\n", readFile(t, filepath.Join(proc, "irq", "25", "smp_affinity_list")))
+	assert.Equal(t, "1", readFile(t, filepath.Join(proc, "irq", "26", "smp_affinity_list")))
+	{
+		// A second pass finds them in place and writes nothing
+		moved, _ := spread(proc, 2)
+		assert.Zero(t, moved)
+	}
+	{
+		_, err := spread(t.TempDir(), 2)
+		assert.ErrorIs(t, err, fs.ErrNotExist)
+	}
+}
+
+func writeFile(t *testing.T, path, contents string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o644))
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(contents)
 }
