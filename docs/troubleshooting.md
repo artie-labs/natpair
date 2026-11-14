@@ -80,9 +80,10 @@ the NATs one at a time, as in [Replace a NAT](operations.md#replace-a-nat).
   [Replace a NAT](operations.md#replace-a-nat).
 - **Connection table full.** When the table reaches `max_connections`, the
   kernel drops new connections and logs `nf_conntrack: table full, dropping
-  packet` in `sudo dmesg`. Raise `max_connections` and replace the NATs. Each
-  262,144 connections uses about 160 MB of memory, half in the kernel and half
-  in conntrackd.
+  packet` in `sudo dmesg`, and natpair logs
+  [`the connection table is full`](#the-connection-table-is-full). Raise
+  `max_connections` and replace the NATs. Each 262,144 connections uses
+  about 160 MB of memory, half in the kernel and half in conntrackd.
 
 ## Log messages
 
@@ -134,3 +135,40 @@ associated with the shared ENI.
 This NAT took over while it was installing a release, so it runs a binary it
 didn't boot with and doesn't count as ready. Once it's the standby again, the
 updater reinstalls the pinned release and reboots it. No action is needed.
+
+### `the connection table is nearly full`
+
+The kernel's connection table is at least 90% full. Once it's full, new
+worker connections and the NAT's probes are dropped. A closed connection
+keeps its entry for 30 s, so a high rate of new connections fills the table
+faster than the number of open ones suggests. Raise `max_connections` and
+replace the NATs. natpair logs this at most once a minute.
+
+### `the connection table is full`
+
+The full message ends with `so the kernel drops new connections. Raise
+max_connections and replace the NATs.` Since the last health round, the
+kernel dropped packets it couldn't track while the table was at least 90%
+full. New worker connections fail, and existing ones carry on. The
+`dropped` field counts the packets. Raise `max_connections` and replace the
+NATs. natpair logs this at most once a minute.
+
+### `the health probe failed because this NAT's connection table is full`
+
+The full message ends with `so it doesn't count as a path failure`. The
+NAT's upload failed while its table was full, because the kernel dropped
+the upload's new connection as it drops new worker connections. The owner
+doesn't step down for it: the standby loads copies of the owner's TCP
+connections when it takes over, so when TCP fills the table, it would fail
+the same way. Its `health round` lines show `"table_full":true`. Fix
+the table as for
+[`the connection table is full`](#the-connection-table-is-full). natpair
+logs this, and the `health round` line, at most once a minute.
+
+### `failed to read the connection table, so a full table can't be told from a path failure`
+
+natpair couldn't read the table's size with `sysctl` or the kernel's drop
+counter with `conntrack -S`. Until it can, a probe that fails because the
+table is full counts as a path failure, and the owner may step down. Check
+that `conntrack -S` works on the NAT. natpair logs this at most once a
+minute.
