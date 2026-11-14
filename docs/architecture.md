@@ -288,6 +288,64 @@ newer kernels. If something else writes 0, the daemon writes 1 again within
 - **Connection copies.** conntrackd sends connection state to the peer in
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.
+- **Host firewall.** It accepts new connections to the NAT only from the VPC
+  and the peer, which get the kernel's usual reset from a closed port. From
+  outside the VPC, it drops everything without an answer, on every port of
+  the NAT's own and shared addresses. The one exception is TCP without SYN
+  to the shared address that matches no connection the NAT tracks, on a
+  port worker connections use. The NAT translates worker TCP to ports 1024
+  to 60999 on the shared address, and keeps a worker's port when it's
+  already in that range. Such a packet gets a reset, so a remote server
+  still sending on a connection the new owner never copied closes it at
+  once, instead of waiting for its own timeout. Each remote address gets at
+  most 50 resets at once and then 10 a second. A scan of the NAT's own
+  address learns nothing, and a scan of the shared address gets a few
+  answers on worker ports and silence for the rest. Forwarded traffic
+  doesn't pass through the firewall.
+- **Untracked connections.** These skip the connection table, both ways:
+  TCP on the NAT's own ephemeral ports (32768 to 60999), UDP between those
+  ports and the VPC, the peer's copies to port 3780, and UDP with Amazon Time
+  Sync (169.254.169.123, port 123) and the Route 53 Resolver
+  (169.254.169.253, port 53). Without state, the firewall accepts only their
+  replies:
+  - TCP without SYN, to the NAT's own address and ephemeral ports, that
+    belongs to one of the NAT's sockets. Such a packet can't open a
+    connection. The kernel finds the socket by the packet's addresses and
+    ports, which needs no connection tracking, and ignores sockets
+    listening on any address. Other TCP to those ports is dropped like any
+    other port's.
+  - UDP from those two link-local services, from their port to the NAT's
+    ephemeral ports. Nothing outside the instance can send from a
+    link-local address.
+  - ICMP fragmentation-needed, host-unreachable, port-unreachable and
+    time-exceeded messages to the NAT's own address, limited to 50 a
+    second. Errors about tracked connections are accepted as before.
+  The NAT's own sockets keep to the ephemeral range, and the own-path probes
+  use ports 61000 to 65535, which stay tracked.
+- **Congested paths.** A failed upload that the handshake check calls
+  congested keeps the owner serving, so traffic can't hold a broken owner
+  in place unless its path still carries some packets. A completed
+  handshake can't be forged from off the path: the answer must acknowledge
+  the random 32-bit sequence number the kernel chose for that SYN, and
+  reach the port address translation chose for it. Flooding the NAT, from
+  workers or from the internet to the shared address, can only make
+  handshakes fail, which counts toward failing over. The limit: a path
+  that a fault leaves degraded but not dead, such as one losing 99% of
+  packets, or one that drops only full-size packets while a flood loses
+  some small ones, counts as congested for as long as that lasts. An
+  attacker can't cause such a fault, only add a flood while it lasts.
+- **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
+  of its connections. Linux acts on one only if it matches a socket's
+  addresses and ports. For TCP, its sequence number must also fall inside
+  the connection's unacknowledged data, which an attacker who can't see the
+  traffic has to guess. A forged fragmentation-needed message can lower
+  the path MTU no further than 552 bytes, which slows a connection but
+  doesn't break it. On an established TCP connection, Linux records an
+  unreachable message only as a soft error, which ends the connection only
+  if it is already timing out. While a connection is being set up, a forged
+  one that matches can abort it, and the caller tries again. A forged
+  port-unreachable that matches a DNS lookup's random port fails that
+  lookup, which is retried. The rate limit bounds all of it.
 - **Overload guard.** Anyone on the internet can flood the shared address and
   engage the guard, which then drops worker packets with the flood's. Without
   the guard the NIC drops them at random, and the owner hands over as well.
