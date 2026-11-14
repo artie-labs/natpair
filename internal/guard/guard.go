@@ -13,7 +13,8 @@
 // An XDP program on the shared ENI runs before the kernel builds a packet
 // buffer. While its budget is 0 it passes everything after one map lookup.
 // When the busiest CPU stays full and the NIC drops packets, the daemon
-// gives it a per-CPU budget of packets per tick. Past the budget it drops
+// gives it a per-CPU budget of packets per tick, and raises the priority of
+// the shared ENI's receive threads. Past the budget it drops
 // worker packets for about 100 ns each, where the kernel's path costs about
 // 1,450 ns, so the CPU keeps up again. It still passes everything that isn't
 // IPv4, such as ARP, and a bounded number of replies to the shared canary's
@@ -67,11 +68,14 @@ const (
 	// NIC dropped more than half.
 	engageDropShare = 0.05
 	dropReadings    = 10
-	// clearBusy and clearReadings: the budget comes off once the busiest
-	// CPU's share over the last 300 ms has been below 80% at each reading for
-	// 1 s.
-	clearBusy     = 0.80
-	clearReadings = 10
+	// clearShedShare and clearReadings: the budget comes off once the
+	// program has dropped less than 5% of the packets it saw over the last
+	// second, so the budget hardly binds. The CPU can't tell: under a steady flood, the
+	// budget itself keeps the busiest CPU near 80%. On AWS, a rule of "below
+	// 80% for 1 s" took the budget off 2 s after it went on, and the flood
+	// filled the CPU again 1 s later.
+	clearShedShare = 0.05
+	clearReadings  = 10
 	// budgetShare is the share of the measured rate the budget lets through.
 	// The 10% it drops costs much less than forwarding it would, so the CPU
 	// has room again for the probe and the NAT's own work.
@@ -130,9 +134,10 @@ type Decision struct {
 	Changed bool
 	// Budget is the packets each CPU passes per tick, 0 for no limit.
 	Budget uint64
-	// Busiest is the busiest CPU's busy share over the window the
-	// controller judged, and DropShare the share of packets the shared ENI
-	// dropped over the last second.
+	// Busiest is the busiest CPU's busy share over the last 300 ms.
+	// DropShare is the share of packets the shared ENI dropped over the last
+	// second while unlimited, and the share the program dropped while
+	// limiting. On Limiting they are the readings that engaged it.
 	Busiest, DropShare float64
 	// Rate is the busiest CPU's measured packets a second, on Limiting.
 	Rate float64
@@ -148,11 +153,13 @@ type Controller struct {
 	// history holds the last readings, oldest first, at most
 	// dropReadings+1, so it spans dropReadings intervals.
 	history []Reading
-	// from is the reading where measuring or limiting started.
-	from Reading
-	// cool counts the readings in a row since then whose busiest CPU was
-	// below clearBusy.
-	cool int
+	// from is the reading where measuring or limiting started, and since
+	// counts the readings after it.
+	from  Reading
+	since int
+	// engagedBy is the decision that started measuring, which the engaged
+	// log line reports.
+	engagedBy Decision
 }
 
 // Mode returns what the program is doing.
@@ -173,21 +180,18 @@ func (c *Controller) Step(r Reading) Decision {
 	case Measuring:
 		return c.limit(r)
 	case Limiting:
+		c.since++
 		busiest, _ := c.busiest(engageReadings)
-		if busiest >= clearBusy {
-			c.cool = 0
-		} else {
-			c.cool++
-		}
-		if c.cool < clearReadings {
-			return Decision{Mode: Limiting, Busiest: busiest}
+		share, full := c.shedShare()
+		if !full || share >= clearShedShare {
+			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
 		}
 		shed := sumSince(c.from.Shed, r.Shed)
 		// A fresh history makes the next engagement wait for a full second
 		// of readings since, and keeps the program's own drops, which ENA
 		// adds to rx_dropped, out of the drop share.
 		*c = Controller{history: []Reading{r}}
-		return Decision{Mode: Unlimited, Changed: true, Busiest: busiest, Shed: shed}
+		return Decision{Mode: Unlimited, Changed: true, Busiest: busiest, DropShare: share, Shed: shed}
 	}
 	busiest, hot := c.busiest(engageReadings)
 	share, full := c.dropShare()
@@ -195,7 +199,8 @@ func (c *Controller) Step(r Reading) Decision {
 		return Decision{Mode: Unlimited, Busiest: busiest, DropShare: share}
 	}
 	c.mode, c.from = Measuring, r
-	return Decision{Mode: Measuring, Changed: true, Budget: measuring, Busiest: busiest, DropShare: share}
+	c.engagedBy = Decision{Mode: Measuring, Changed: true, Budget: measuring, Busiest: busiest, DropShare: share}
+	return c.engagedBy
 }
 
 // limit sets the budget from what each CPU passed while measuring.
@@ -215,10 +220,10 @@ func (c *Controller) limit(r Reading) Decision {
 		*c = Controller{history: []Reading{r}}
 		return Decision{Mode: Unlimited, Changed: true}
 	}
-	c.mode, c.from = Limiting, r
+	c.mode, c.from, c.since = Limiting, r, 0
 	// A budget of 0 would mean no limit, so it lets at least one through.
 	budget := max(1, uint64(budgetShare*rate*tickSeconds))
-	return Decision{Mode: Limiting, Changed: true, Budget: budget, Rate: rate}
+	return Decision{Mode: Limiting, Changed: true, Budget: budget, Rate: rate, Busiest: c.engagedBy.Busiest, DropShare: c.engagedBy.DropShare}
 }
 
 // record adds a reading. Counters that went backwards, as when the NIC
@@ -260,6 +265,23 @@ func (c *Controller) dropShare() (float64, bool) {
 		return 0, true
 	}
 	return dropped / total, true
+}
+
+// shedShare returns the share of packets the program dropped over the last
+// clearReadings intervals, and whether that many readings have passed since
+// limiting started.
+func (c *Controller) shedShare() (float64, bool) {
+	n := len(c.history)
+	if c.since < clearReadings || n <= clearReadings {
+		return 0, false
+	}
+	first, last := c.history[n-1-clearReadings], c.history[n-1]
+	shed := float64(sumSince(first.Shed, last.Shed))
+	total := shed + float64(sumSince(first.Passed, last.Passed))
+	if total == 0 {
+		return 0, true
+	}
+	return shed / total, true
 }
 
 // sumSince returns how much the per-CPU counters grew from before to after.

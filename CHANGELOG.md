@@ -82,7 +82,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the owner's CPU forwards, so the NIC drops them at random, the owner drops
   a tenth of the worker traffic in an XDP program instead, before the kernel
   spends time on it. It always passes replies to its path probe, so the
-  owner no longer hands over just because a flood filled its CPU. It logs
+  owner no longer hands over just because a flood filled its CPU. While it
+  drops, the shared ENI's receive threads run at nice -10, and while it's
+  attached the shared ENI's receive ring is at its largest size. It logs
   `overload guard engaged` and `overload guard cleared`, and
   `/var/lib/natpair/overload-guard-off` turns it off. The shared canary's
   TCP connections now take ports 61000 to 65535 on the shared address.

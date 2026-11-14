@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/artie-labs/natpair/internal/command"
 )
@@ -65,14 +66,14 @@ func TestGuard(t *testing.T) {
 	g := New(Config{SharedAddress: netip.MustParseAddr("10.99.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: off})
 	// An 18-minute budget window, so the pings below all fall in one
 	g.match.tickShift, g.match.exemptShift = 40, 44
-	t.Cleanup(g.close)
+	t.Cleanup(func() { g.close(context.WithoutCancel(t.Context())) })
 
 	// No interface holds the shared address yet, as on a standby
-	require.NoError(t, g.ensure())
+	require.NoError(t, g.ensure(t.Context()))
 	assert.False(t, attached(t))
 
 	ip(t, "addr", "add", "10.99.0.1/24", "dev", "guard-shared")
-	require.NoError(t, g.ensure())
+	require.NoError(t, g.ensure(t.Context()))
 	assert.True(t, attached(t))
 	assert.Equal(t, 5, pings(t, 5), "budget 0 passes everything")
 	{
@@ -86,22 +87,43 @@ func TestGuard(t *testing.T) {
 		assert.Equal(t, 5, pings(t, 5))
 	}
 	{
+		// While limiting, the shared interface's threaded NAPI receive
+		// threads run at nice -10, and go back to 0 when the guard detaches
+		require.NoError(t, os.WriteFile("/sys/class/net/guard-shared/threaded", []byte("1"), 0o644))
+		pids, err := receiveThreads("/proc", "guard-shared")
+		require.NoError(t, err)
+		require.NotEmpty(t, pids)
+		require.NoError(t, g.prioritize(receiveNice))
+		for _, pid := range pids {
+			nice, err := unix.Getpriority(unix.PRIO_PROCESS, pid)
+			require.NoError(t, err)
+			// The raw value is 20 - nice
+			assert.Equal(t, 30, nice)
+		}
+		require.NoError(t, g.prioritize(0))
+		for _, pid := range pids {
+			nice, err := unix.Getpriority(unix.PRIO_PROCESS, pid)
+			require.NoError(t, err)
+			assert.Equal(t, 20, nice)
+		}
+	}
+	{
 		// The off switch detaches it, and removing it attaches it again
 		require.NoError(t, os.WriteFile(off, nil, 0o600))
-		require.NoError(t, g.ensure())
+		require.NoError(t, g.ensure(t.Context()))
 		assert.False(t, attached(t))
 		require.NoError(t, os.Remove(off))
-		require.NoError(t, g.ensure())
+		require.NoError(t, g.ensure(t.Context()))
 		assert.True(t, attached(t))
 		// Again is a no-op
-		require.NoError(t, g.ensure())
+		require.NoError(t, g.ensure(t.Context()))
 		assert.True(t, attached(t))
 	}
 	{
 		// It never goes on the primary interface, even if that holds the
 		// shared address
 		g.cfg.PrimaryInterface = "guard-shared"
-		assert.EqualError(t, g.ensure(), "the primary interface guard-shared holds the shared address 10.99.0.1, so the overload guard stays off it")
+		assert.EqualError(t, g.ensure(t.Context()), "the primary interface guard-shared holds the shared address 10.99.0.1, so the overload guard stays off it")
 		assert.False(t, attached(t))
 		g.cfg.PrimaryInterface = "guard-primary"
 	}
@@ -109,21 +131,21 @@ func TestGuard(t *testing.T) {
 		// The shared ENI goes away between two checks, as on a handover,
 		// and a new one comes back with the shared address
 		ip(t, "link", "del", "guard-shared")
-		require.NoError(t, g.step())
+		require.NoError(t, g.step(t.Context()))
 		assert.Nil(t, g.attached)
 		ip(t, "link", "add", "guard-shared", "type", "veth", "peer", "name", "guard-peer0")
 		ip(t, "link", "set", "guard-peer0", "netns", "guard-peer")
 		ip(t, "addr", "add", "10.99.0.1/24", "dev", "guard-shared")
 		ip(t, "link", "set", "guard-shared", "up")
-		require.NoError(t, g.ensure())
+		require.NoError(t, g.ensure(t.Context()))
 		assert.True(t, attached(t))
 	}
 	{
 		// A handover takes the shared address away
-		require.NoError(t, g.ensure())
+		require.NoError(t, g.ensure(t.Context()))
 		require.True(t, attached(t))
 		ip(t, "addr", "del", "10.99.0.1/24", "dev", "guard-shared")
-		require.NoError(t, g.ensure())
+		require.NoError(t, g.ensure(t.Context()))
 		assert.False(t, attached(t))
 	}
 }

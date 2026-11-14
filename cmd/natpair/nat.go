@@ -403,8 +403,10 @@ func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
 	}
+	// The guard first: attaching it and raising the ring restart the
+	// interface, and threaded NAPI then covers the receive queues they leave.
+	s.guard.Ensure(ctx)
 	threadReceive("", napi.Enable)
-	s.guard.Ensure()
 	return nil
 }
 

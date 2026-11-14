@@ -144,8 +144,8 @@ send more packets than the owner's CPU forwards, so it drops about a tenth of
 them, and more if they keep coming faster, to keep its own path probe
 working. `busiest_cpu` and `nic_drop_share` show the overload it saw, and
 `budget_pps_per_cpu` how many packets a second each CPU now forwards. It logs
-`overload guard cleared`, with how many packets it `dropped`, once the CPU
-has room again.
+`overload guard cleared`, with how many packets it `dropped`, once the
+traffic fits the budget again.
 
 Find the worker sending the most packets, often small UDP, and slow it down,
 or move to an instance type with more CPUs, as in
@@ -157,8 +157,9 @@ The daemon couldn't attach or run the overload guard, and the `err` field
 says why. The NAT forwards as it would without the guard. If `err` says
 `failed to attach the overload guard`, check that nothing else attached an
 XDP program to the shared ENI (`ip -d link show`), and that its MTU is at
-most 3,502 bytes, the most ENA allows with XDP. The daemon tries again every
-5 s, and logs the same failure once.
+most 3,502 bytes, the most ENA allows with XDP. If `err` names the receive
+ring, the guard is attached but the ring kept its size. The daemon tries
+again every 5 s, and logs the same failure once.
 
 ### `this boot was prepared by another release, so this NAT reports none until it reboots`
 

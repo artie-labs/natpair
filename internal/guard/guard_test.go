@@ -120,30 +120,33 @@ func TestControllerEngagesAndClears(t *testing.T) {
 
 	// While measuring, CPU 0 passed 50,000 packets in 100 ms and CPU 1
 	// 10,000. The budget is 90% of the busiest CPU's 500,000 a second, per
-	// 2^20 ns tick: 471.86, rounded down.
+	// 2^20 ns tick: 471.86, rounded down. The decision repeats what engaged it.
 	limit := c.Step(n.next(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{50_000, 10_000}}))
-	assert.Equal(t, Decision{Mode: Limiting, Changed: true, Budget: 471, Rate: 500_000}, limit)
+	assert.Equal(t, Decision{Mode: Limiting, Changed: true, Budget: 471, Rate: 500_000, Busiest: 1, DropShare: 0.5}, limit)
 
-	// Still busy, so the budget holds
-	held := load{busyTicks: 9, received: 100_000, passed: [2]uint64{45_000, 1_000}, shed: [2]uint64{50_000, 4_000}}
-	assert.Empty(t, changed(steps(&c, &n, held, 20)))
-	// The CPU calms down. Each reading judges the last 300 ms: 9, 9 and 5
-	// of 10 ticks busy is 77%, below 80%, so the count starts at once.
-	calm := load{busyTicks: 5, received: 30_000, passed: [2]uint64{30_000, 0}, shed: [2]uint64{100, 0}}
-	assert.Empty(t, changed(steps(&c, &n, calm, 5)))
 	{
-		// Load comes back before a second has passed. 5, 10 and 10 ticks is
-		// 83%, which starts the count again.
-		busy := load{busyTicks: 10, received: 50_000, passed: [2]uint64{50_000, 0}}
-		assert.Empty(t, changed(steps(&c, &n, busy, 2)))
+		// The flood goes on, and the budget keeps the CPU at 70%, below
+		// where it engaged. It holds while it drops 47% of what it sees,
+		// which a rule based on the CPU alone took off after 2 s on AWS.
+		flooding := load{busyTicks: 7, received: 95_000, passed: [2]uint64{45_000, 5_000}, shed: [2]uint64{45_000, 0}}
+		assert.Empty(t, changed(steps(&c, &n, flooding, 30)))
+		assert.Equal(t, Limiting, c.Mode())
 	}
-	// 10, 10 and 5 ticks is still 83%, so the count restarts at the second
-	// calm reading and reaches 10 at the eleventh
-	assert.Empty(t, changed(steps(&c, &n, calm, 10)))
-	assert.Equal(t, Limiting, c.Mode())
-	cleared := c.Step(n.next(calm))
-	// 20 held readings shed 54,000 each, and 16 calm ones 100
-	assert.Equal(t, Decision{Mode: Unlimited, Changed: true, Busiest: 0.5, Shed: 20*54_000 + 16*100}, cleared)
+	// The flood eases. Dropping 7.5% of what it sees still holds the budget
+	tail := load{busyTicks: 5, received: 40_000, passed: [2]uint64{37_000, 0}, shed: [2]uint64{3_000, 0}}
+	assert.Empty(t, changed(steps(&c, &n, tail, 20)))
+	// It stops. The share over the last second falls below 5% at the fourth
+	// quiet reading: 6 readings shedding 3,000 and 4 shedding 10, of 400,000.
+	// At the third it is 5.3%.
+	quiet := load{busyTicks: 5, received: 40_000, passed: [2]uint64{39_990, 0}, shed: [2]uint64{10, 0}}
+	decisions := steps(&c, &n, quiet, 4)
+	assert.Empty(t, changed(decisions[:3]))
+	cleared := decisions[3]
+	assert.Equal(t, Unlimited, cleared.Mode)
+	assert.True(t, cleared.Changed)
+	assert.Zero(t, cleared.Budget)
+	// 30 flooding readings shed 45,000 each, 20 tail ones 3,000 and 4 quiet ones 10
+	assert.Equal(t, uint64(30*45_000+20*3_000+4*10), cleared.Shed)
 	assert.Equal(t, Unlimited, c.Mode())
 
 	// Flooded again at once, it waits for a second of readings since it
@@ -200,7 +203,7 @@ func TestControllerBudgetLetsAtLeastOnePacketThrough(t *testing.T) {
 	var n nat
 	steps(&c, &n, flood, 11)
 	decision := c.Step(n.next(load{busyTicks: 10, received: 1, dropped: 1, passed: [2]uint64{1, 0}}))
-	assert.Equal(t, Decision{Mode: Limiting, Changed: true, Budget: 1, Rate: 10}, decision)
+	assert.Equal(t, Decision{Mode: Limiting, Changed: true, Budget: 1, Rate: 10, Busiest: 1, DropShare: 0.5}, decision)
 }
 
 func TestControllerForgetsReadingsAcrossANICReset(t *testing.T) {
