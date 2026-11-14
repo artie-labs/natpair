@@ -115,6 +115,46 @@ The check runs only for an owner whose upload timed out while its
 connection table wasn't full. A failure that
 came back over the path, such as a reply showing the wrong source address,
 always counts.
+## Shedding a flood: the overload guard
+
+Workers can send more small packets than the owner's CPU forwards. On a
+1-vCPU c7gn.medium, 64-byte UDP at 800,000 packets a second or more fills the
+CPU. The shared ENI's receive ring then overflows, and the NIC drops packets
+at random, including the replies to the owner's own probe, which leaves
+through the shared Elastic IP like worker traffic. The probe fails, the owner
+hands over, and the new owner gets the same flood.
+
+So the owner runs a small XDP program on the shared ENI. XDP runs in the
+driver, before the kernel builds a packet buffer, and dropping a packet there
+costs about 100 ns, against about 1,450 ns for the kernel's path.
+
+- **Normally it does nothing.** Its budget is 0, and it passes every packet
+  after one map lookup, a few nanoseconds.
+- **It engages** when the busiest CPU has been at least 95% busy for 300 ms
+  and the NIC dropped at least 5% of what reached the shared ENI in the last
+  second. A full CPU alone isn't enough: TCP as fast as it goes also fills a
+  small NAT's CPU, but TCP senders slow down at the first losses, so the NIC
+  drops little and the probe gets through.
+- **It measures for 100 ms**, then gives each CPU a budget of 90% of the
+  packets the busiest CPU passed, per 1 ms tick. Past the budget it drops
+  worker packets. Dropping the other 10% is cheap, so the CPU has room again.
+- **It always passes** anything that isn't IPv4, such as ARP, and replies to
+  the probes: TCP from the probe receiver's port to the shared address on
+  ports 61000 to 65535, which only the shared canary's connections use. Past
+  the budget, each CPU passes at most 128 such replies every 16.8 ms.
+- **It clears** once the busiest CPU has stayed below 80% for 1 s, and then
+  waits at least 1 s before it can engage again.
+
+The daemon attaches the program when a takeover configures the shared ENI,
+before forwarding opens, and checks every 5 s that it's on the interface that
+holds the shared address, and only there. It never attaches to the NAT's own
+interface, where its lease renewals, DNS lookups and conntrackd copies
+arrive. Attaching restarts an ENA interface, which costs no gap while
+forwarding is still closed. The program goes away when the daemon stops.
+
+The guard only drops packets. It never decides who owns the pair: the probes
+and the lease still do, so a broken owner fails over as before. To turn it
+off, see [operations](operations.md#turn-the-overload-guard-off).
 
 ## Taking over
 
@@ -283,6 +323,16 @@ newer kernels. If something else writes 0, the daemon writes 1 again within
   one that matches can abort it, and the caller tries again. A forged
   port-unreachable that matches a DNS lookup's random port fails that
   lookup, which is retried. The rate limit bounds all of it.
+- **Overload guard.** Anyone on the internet can send packets that match
+  its exemption, TCP from the receiver's port to the shared address's probe
+  ports. Each costs what it would without the guard, and past the budget
+  each CPU passes at most 128 of them every 16.8 ms, about 1.5% of a CPU,
+  and drops the rest. So forged replies can't buy more CPU than they could
+  without the guard. What they can do is crowd out real probe replies while
+  the guard is engaged, which fails the probe. A flood big enough to engage
+  the guard does that anyway without it. The guard never sees the NAT's own
+  interface, so it can't drop lease renewals, DNS answers or conntrackd
+  copies, and it only drops, so it can't keep a broken owner serving.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs

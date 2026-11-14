@@ -20,6 +20,7 @@ import (
 	"github.com/artie-labs/natpair/internal/controller"
 	"github.com/artie-labs/natpair/internal/dynamo"
 	"github.com/artie-labs/natpair/internal/fence"
+	"github.com/artie-labs/natpair/internal/guard"
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/irq"
@@ -201,7 +202,15 @@ func runNAT(ctx context.Context, args []string) error {
 	// The instance role signs uploads to a receiver that requires IAM
 	// authentication.
 	prober := &probe.Client{Credentials: awsConfig.Credentials}
-	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe()}
+	overload := guard.New(guard.Config{
+		SharedAddress:    cfg.SharedAddress.Addr(),
+		PrimaryInterface: cfg.Instance.Interface,
+		ReceiverPort:     cfg.ReceiverPort(),
+		FirstProbePort:   config.SharedProbePortFirst,
+		LastProbePort:    config.SharedProbePortLast,
+		OffPath:          config.OverloadGuardOffPath,
+	})
+	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe(), guard: overload}
 
 	var ctrl *controller.Controller
 	monitor := health.New(health.Config{
@@ -258,6 +267,10 @@ func runNAT(ctx context.Context, args []string) error {
 	})
 	group.Go(func() error {
 		keepReceiveThreaded(ctx)
+		return nil
+	})
+	group.Go(func() error {
+		overload.Run(ctx)
 		return nil
 	})
 	group.Go(func() error {
@@ -361,6 +374,7 @@ type localSteps struct {
 	conntrack conntrackd.Client
 	prober    *probe.Client
 	target    probe.Target
+	guard     *guard.Guard
 }
 
 func (s localSteps) PrepareNetwork(ctx context.Context) error {
@@ -380,13 +394,17 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 }
 
 // ActivateShared configures the shared ENI, then turns on threaded NAPI for
-// it before forwarding opens. The attached ENI is a new network device that
-// starts with threaded NAPI off.
+// it and attaches the overload guard before forwarding opens. The attached
+// ENI is a new network device that starts with threaded NAPI off. Attaching
+// the guard restarts an ENA interface, which costs no gap while forwarding
+// is still closed, and the check of the shared Elastic IP that follows
+// retries until the interface is back.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
 	}
 	threadReceive("", napi.Enable)
+	s.guard.Ensure()
 	return nil
 }
 

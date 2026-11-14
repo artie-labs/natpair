@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/artie-labs/natpair/internal/instance"
@@ -32,6 +33,14 @@ const (
 	// DefaultMaxConnections is the connection limit when the configuration
 	// doesn't set max_connections.
 	DefaultMaxConnections = 262144
+	// OverloadGuardOffPath turns the overload guard off while it exists.
+	OverloadGuardOffPath = StateDir + "/overload-guard-off"
+	// SharedProbePortFirst and SharedProbePortLast are the ports the shared
+	// canary's TCP connections take on the shared address. The overload
+	// guard lets replies to them through, so the owner's path probe works
+	// while it sheds a flood.
+	SharedProbePortFirst = 61000
+	SharedProbePortLast  = 65535
 )
 
 // maxConnectionsAllowed lists the limits max_connections accepts. The hash
@@ -190,6 +199,20 @@ func (c NAT) OwnProbe() probe.Target {
 // SharedProbe sends uploads out through the shared Elastic IP.
 func (c NAT) SharedProbe() probe.Target {
 	return c.target(c.SharedCanary(), c.SharedPublicIP)
+}
+
+// ReceiverPort returns the probe receiver's port: the one in ProbeURL, or
+// 443. Validate has already checked that ProbeURL parses.
+func (c NAT) ReceiverPort() uint16 {
+	parsed, err := url.Parse(c.ProbeURL)
+	if err != nil {
+		return 443
+	}
+	port, err := strconv.ParseUint(parsed.Port(), 10, 16)
+	if err != nil || port == 0 {
+		return 443
+	}
+	return uint16(port)
 }
 
 func (c NAT) target(canary Canary, expected netip.Addr) probe.Target {

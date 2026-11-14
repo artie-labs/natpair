@@ -233,6 +233,9 @@ func TestPrepareNetwork(t *testing.T) {
 	assert.Equal(t, "*nat\n:NATPAIR_SNAT - [0:0]\n-F NATPAIR_SNAT\n"+
 		// The NAT's own connections keep their own address.
 		"-A NATPAIR_SNAT -m addrtype --src-type LOCAL -j RETURN\n"+
+		// The shared canary's TCP takes the ports the overload guard lets
+		// through.
+		"-A NATPAIR_SNAT -s 198.18.0.6/32 -p tcp -j SNAT --to-source 10.0.1.100:61000-65535\n"+
 		// Workers and the shared canary leave with the shared ENI's IP, and
 		// their TCP with ports in the worker range, the only ones that get a
 		// reset for an unknown connection.

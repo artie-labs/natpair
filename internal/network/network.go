@@ -449,6 +449,11 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 	// The protected CIDRs may hold this NAT's own addresses, such as when they
 	// are the whole VPC. Its own connections keep their own address.
 	rules += "-A " + snatChain + " -m addrtype --src-type LOCAL -j RETURN\n"
+	// The shared canary's TCP connections, the owner's path probes, take
+	// ports from their own range, so the overload guard can tell their
+	// replies from worker traffic and let them through while it sheds a
+	// flood.
+	rules += fmt.Sprintf("-A %s -s %s/32 -p tcp -j SNAT --to-source %s:%d-%d\n", snatChain, cfg.SharedCanary().Guest(), shared, config.SharedProbePortFirst, config.SharedProbePortLast)
 	for _, source := range n.sharedSources() {
 		// TCP takes ports in workerPorts, the only ones that get a reset for
 		// an unknown connection (see protectHost).
