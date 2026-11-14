@@ -15,7 +15,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/stretchr/testify/assert"
@@ -221,5 +223,100 @@ func TestSign(t *testing.T) {
 	{
 		// Without credentials, the upload fails instead of going out unsigned
 		assert.ErrorContains(t, (&Client{}).sign(t.Context(), newRequest(), digest, "us-east-2"), "requires AWS credentials")
+	}
+}
+
+func TestHandshakes(t *testing.T) {
+	{
+		// Every attempt connects to a listening receiver, without TLS
+		target := startReceiver(t, probetest.Handler())
+		completed, err := (&Client{}).Handshakes(t.Context(), target, 40)
+		require.NoError(t, err)
+		assert.Equal(t, 40, completed)
+	}
+	{
+		// Attempts that run out of time count as lost, not as a failed check
+		target := startReceiver(t, probetest.Handler())
+		expired, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		defer cancel()
+		completed, err := (&Client{}).Handshakes(expired, target, 40)
+		require.NoError(t, err)
+		assert.Zero(t, completed)
+	}
+	{
+		// A refused attempt isn't a lost packet, so the check fails
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		require.NoError(t, err)
+		require.NoError(t, listener.Close())
+		target := Target{URL: "https://" + listener.Addr().String() + "/nat", Source: netip.MustParseAddr("127.0.0.1")}
+		_, err = (&Client{}).Handshakes(t.Context(), target, 40)
+		assert.ErrorIs(t, err, syscall.ECONNREFUSED)
+	}
+	{
+		_, err := (&Client{}).Handshakes(t.Context(), Target{URL: "http://127.0.0.1/nat"}, 40)
+		assert.EqualError(t, err, `probe URL "http://127.0.0.1/nat" must be a plain HTTPS URL`)
+	}
+	{
+		// An attempt that fails on this host, such as from an address it
+		// doesn't have, says nothing about the path, so the check fails
+		// instead of counting it as a lost packet
+		target := startReceiver(t, probetest.Handler())
+		target.Source = netip.MustParseAddr("192.0.2.1")
+		_, err := (&Client{}).Handshakes(t.Context(), target, 40)
+		assert.ErrorIs(t, err, syscall.EADDRNOTAVAIL)
+	}
+}
+
+func TestHandshakesUseTheUploadsAddress(t *testing.T) {
+	t.Cleanup(func() { lookupNetIP = net.DefaultResolver.LookupNetIP })
+	target := startReceiver(t, probetest.Handler())
+	address, err := url.Parse(target.URL)
+	require.NoError(t, err)
+	target.URL = "https://example.com:" + address.Port() + "/nat"
+	lookups := 0
+	lookupNetIP = func(context.Context, string, string) ([]netip.Addr, error) {
+		lookups++
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	client := &Client{}
+	_, err = client.Upload(t.Context(), target)
+	require.NoError(t, err)
+	// The handshakes go where the upload went, without spending their
+	// time on another lookup
+	completed, err := client.Handshakes(t.Context(), target, 40)
+	require.NoError(t, err)
+	assert.Equal(t, 40, completed)
+	assert.Equal(t, 1, lookups)
+}
+
+func TestUploadTimeout(t *testing.T) {
+	{
+		// A receiver that never answers runs the upload out of time, and
+		// net/http's write error alone wouldn't show it
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = listener.Close() })
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				t.Cleanup(func() { _ = conn.Close() })
+			}
+		}()
+		target := Target{URL: "https://" + listener.Addr().String() + "/nat", Source: netip.MustParseAddr("127.0.0.1")}
+		_, err = (&Client{}).Upload(t.Context(), target)
+		assert.ErrorIs(t, err, ErrTimeout)
+	}
+	{
+		// A wrong reply isn't a timeout, even if it's checked after the
+		// deadline, as by a starved CPU
+		t.Cleanup(func() { clock = time.Now })
+		clock = func() time.Time { return time.Now().Add(time.Hour) }
+		target := startReceiver(t, http.NotFoundHandler())
+		_, err := (&Client{}).Upload(t.Context(), target)
+		assert.EqualError(t, err, "probe receiver returned status 404 with 19 bytes")
+		assert.NotErrorIs(t, err, ErrTimeout)
 	}
 }

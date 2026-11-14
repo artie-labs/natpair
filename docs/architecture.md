@@ -94,6 +94,40 @@ the same way. Full means the kernel dropped
 packets it couldn't track since the last round while the table was at least
 90% full.
 
+When the owner's upload times out, it then tries 40 TCP handshakes with the
+probe receiver at once, through the shared Elastic IP like the upload, and
+closes each one as soon as it connects:
+
+- **Some complete and some don't.** The path works but loses packets, as
+  when workers send more than the owner can forward. On AWS, small UDP
+  packets beyond what the CPU could process lost up to 87% of the packets
+  through the NAT. The standby would get the same traffic on taking over,
+  and the pair used to move 2 to 4 times a minute, pausing forwarding each
+  time. So the round doesn't count as failed, and it ends any run of failed
+  rounds. No upload passed, so the owner stops offering to take over until
+  two pass again, so the standby's updater doesn't reboot the standby meanwhile.
+- **None complete.** The path is dead, and the round counts as failed.
+- **All complete.** Small packets got through, so lost packets may not be
+  what failed the upload, as on a path that drops full-size packets. The
+  round counts as failed, as it did before the check. Under light loss all
+  40 can still complete, so a slightly overloaded owner can still step
+  down.
+
+The check runs only for an owner whose upload timed out while its
+connection table wasn't full. A failure that came back over the path, such
+as a reply showing the wrong source address, always counts. Only an attempt
+that runs out of time counts as lost. If one fails any other way, such as
+a refused connection or one the NAT couldn't start, the check fails and the
+round counts as failed.
+
+The check can't tell why the path loses packets. Loss on the owner's path
+alone, such as from a fault in its host, also counts as congested, so the
+owner keeps serving while some handshakes complete. Run `natpair
+maintenance` on it to hand over. A congested owner publishes no probe
+flows, so its standby can't show it copied them. So while the owner is
+congested, it hands over to a standby that has proven its own path, without waiting for the standby to verify its copied connections. Connections the standby hasn't
+copied may reset. Upgrades still wait for a ready standby.
+
 ## Taking over
 
 When the standby takes the lease, it:
@@ -191,6 +225,24 @@ old release. See [operations](operations.md#upgrade) for the steps.
     of each type. Errors about tracked connections are accepted as before.
   The NAT's own sockets keep to the ephemeral range, and the own-path probes
   use ports 61000 to 65535, which stay tracked.
+- **Congested paths.** A failed upload that the handshake check calls
+  congested keeps the owner serving, so traffic can't hold a broken owner
+  in place unless its path still carries some packets. A completed
+  handshake can't be forged from off the path: the answer must acknowledge
+  the random 32-bit sequence number the kernel chose for that SYN, and
+  reach the source port the kernel chose for it. Flooding the NAT, from
+  workers or from the internet to the shared address, can only make
+  handshakes fail, which counts toward failing over. The limit: a path
+  that a fault leaves degraded but not dead, such as one losing up to
+  about 90% of packets, or one that drops only full-size packets while a
+  flood loses some small ones, counts as congested for as long as that
+  lasts, with no time limit. At 99% loss, all 40 handshakes usually fail,
+  and the owner fails over. An attacker can't cause such a fault, only add
+  a flood while it lasts. `natpair maintenance` still hands over from a
+  congested owner, to a standby that has proven its own path, so a person
+  with root on the owner can end it. The standby's copied connections
+  aren't verified then, which only risks resetting the ones it hasn't
+  copied.
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
   of its connections. Linux acts on one only if it matches a socket's
   addresses and ports. For TCP, its sequence number must also fall inside
