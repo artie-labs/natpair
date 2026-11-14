@@ -109,19 +109,30 @@ costs about 100 ns, against about 1,450 ns for the kernel's path.
 - **It measures for 100 ms**, then gives each CPU a budget of 90% of the
   packets the busiest CPU passed, per 1 ms tick. Past the budget it drops
   worker packets. Dropping the other 10% is cheap, so the CPU has room again.
+- **It raises the shared ENI's receive threads** to nice -10 while it
+  limits. With threaded NAPI, each receive queue has a kernel thread
+  that shares the CPU with the daemon. On a 1-vCPU NAT, each health round's
+  own work held the CPU for longer than the receive ring lasts, so the NIC
+  dropped the probe's replies even with the budget on. The budget bounds
+  what those threads do, so they can't take the whole CPU.
 - **It always passes** anything that isn't IPv4, such as ARP, and replies to
   the probes: TCP from the probe receiver's port to the shared address on
   ports 61000 to 65535, which only the shared canary's connections use. Past
   the budget, each CPU passes at most 128 such replies every 16.8 ms.
-- **It clears** once the busiest CPU has stayed below 80% for 1 s, and then
-  waits at least 1 s before it can engage again.
+- **It clears** once it has dropped less than 5% of what it saw over the
+  last second, and then waits at least 1 s before it can engage again.
+
+When it attaches, the daemon also raises the shared ENI's receive ring to
+the most the NIC allows, 2,048 packets on a c7gn.medium against ENA's
+default of 1,024, so the ring rides out short waits for the CPU. It puts the
+ring back when the guard detaches.
 
 The daemon attaches the program when a takeover configures the shared ENI,
 before forwarding opens, and checks every 5 s that it's on the interface that
 holds the shared address, and only there. It never attaches to the NAT's own
 interface, where its lease renewals, DNS lookups and conntrackd copies
-arrive. Attaching restarts an ENA interface, which costs no gap while
-forwarding is still closed. The program goes away when the daemon stops.
+arrive. Attaching, and changing the ring, each restart an ENA interface,
+which costs no gap while forwarding is still closed. The program goes away when the daemon stops.
 
 The guard only drops packets. It never decides who owns the pair: the probes
 and the lease still do, so a broken owner fails over as before. To turn it
@@ -192,7 +203,10 @@ old release. See [operations](operations.md#upgrade) for the steps.
   the guard is engaged, which fails the probe. A flood big enough to engage
   the guard does that anyway without it. The guard never sees the NAT's own
   interface, so it can't drop lease renewals, DNS answers or conntrackd
-  copies, and it only drops, so it can't keep a broken owner serving.
+  copies, and it only drops, so it can't keep a broken owner serving. It
+  raises the priority only of kernel threads named for the shared ENI,
+  checked by the kernel's own kernel-thread flag, so a process that names
+  itself like one gets nothing.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs

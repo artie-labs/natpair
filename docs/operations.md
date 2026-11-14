@@ -267,9 +267,10 @@ sudo touch /var/lib/natpair/overload-guard-off
 
 Within 5 s the daemon logs `overload guard detached` with the reason. Remove
 the file to turn it back on, and the owner logs `overload guard attached`.
-The file lasts across restarts and reboots until you remove it. Each attach
-or detach restarts the shared ENI's driver, which on AWS paused forwarding
-for less than 40 ms.
+The file lasts across restarts and reboots until you remove it. Detaching
+also puts the shared ENI's receive ring back to its earlier size. Each
+attach or detach restarts the shared ENI's driver, which on AWS paused
+forwarding for less than 40 ms.
 
 ## Download releases from your own S3 bucket
 
