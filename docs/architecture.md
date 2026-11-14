@@ -127,6 +127,13 @@ old release. See [operations](operations.md#upgrade) for the steps.
   lease renewals and health reports reach DynamoDB without depending on the
   internet path the NATs forward. Workers' DynamoDB traffic goes through the
   NATs like their other traffic, so it leaves from the shared Elastic IP.
+- A NAT forwards on the CPU that took each network queue's interrupt. natpair
+  puts queue n of every ENI on CPU n, checks again every 5 s, which catches
+  the shared ENI after a takeover, and turns irqbalance off. Otherwise
+  irqbalance can put all of an ENI's queues on one CPU, and a two-CPU NAT
+  forwards with only one of them. Every ENI's queues start at CPU 0, so on a
+  type with more CPUs than queues per ENI, the CPUs past the queue count take
+  no queue interrupts. This has only been measured on two-CPU types.
 - By default the NATs forward traffic from every CIDR of the VPC. Their own
   traffic, such as AWS API calls and lease renewals, always keeps their own
   address and route, even though that address is inside the VPC.
