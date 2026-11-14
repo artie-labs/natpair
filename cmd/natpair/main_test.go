@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,4 +39,27 @@ func TestReportedRelease(t *testing.T) {
 	{
 		assert.Empty(t, reportedRelease(filepath.Join(t.TempDir(), "release")))
 	}
+}
+
+func TestThreadReceiveLogsALastingFailureOnce(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	writeFails := func() (int, error) { return 0, errors.New("write failed") }
+	readFails := func() (int, error) { return 1, errors.New("read failed") }
+	works := func() (int, error) { return 0, nil }
+
+	lastErr := threadReceive("", writeFails)
+	lastErr = threadReceive(lastErr, writeFails)
+	assert.Equal(t, 1, strings.Count(logs.String(), "write failed"))
+	// A different failure is logged, and so is an interface turned on beside it
+	lastErr = threadReceive(lastErr, readFails)
+	assert.Equal(t, 1, strings.Count(logs.String(), "read failed"))
+	assert.Equal(t, 1, strings.Count(logs.String(), `"interfaces":1`))
+	// A pass that works resets it, so the same failure is logged again
+	lastErr = threadReceive(lastErr, works)
+	assert.Empty(t, lastErr)
+	threadReceive(lastErr, writeFails)
+	assert.Equal(t, 2, strings.Count(logs.String(), "write failed"))
 }
