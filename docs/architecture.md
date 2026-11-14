@@ -95,44 +95,47 @@ at random, including the replies to the owner's own probe, which leaves
 through the shared Elastic IP like worker traffic. The probe fails, the owner
 hands over, and the new owner gets the same flood.
 
-So the owner runs a small XDP program on the shared ENI. XDP runs in the
-driver, before the kernel builds a packet buffer, and dropping a packet there
-costs about 100 ns, against about 1,450 ns for the kernel's path.
+So the owner sheds the excess with a small XDP program on the shared ENI.
+XDP runs in the driver, before the kernel builds a packet buffer, and
+dropping a packet there costs about 100 ns, against about 1,450 ns for the
+kernel's path.
 
-- **Normally it does nothing.** Its budget is 0, and it passes every packet
-  after one map lookup, a few nanoseconds.
+- **Normally nothing is attached.** The daemon watches the busiest CPU and
+  the shared ENI's counters every 100 ms. With any XDP program attached,
+  ENA's receive path costs more: full-rate TCP through a c7gn.medium cost
+  about 15% more CPU a packet, and its throughput fell from 8.9 to 7.7 Gbps.
 - **It engages** when the busiest CPU has been at least 95% busy for 300 ms
   and the NIC dropped at least 5% of what reached the shared ENI in the last
-  second. A full CPU alone isn't enough: TCP as fast as it goes also fills a
-  small NAT's CPU, but TCP senders slow down at the first losses, so the NIC
-  drops little and the probe gets through.
-- **It measures for 100 ms**, then gives each CPU a budget of 90% of the
-  packets the busiest CPU passed, per 1 ms tick. Past the budget it drops
-  worker packets. Dropping the other 10% is cheap, so the CPU has room again.
-- **It raises the shared ENI's receive threads** to nice -10 while it
-  limits. With threaded NAPI, each receive queue has a kernel thread
-  that shares the CPU with the daemon. On a 1-vCPU NAT, each health round's
-  own work held the CPU for longer than the receive ring lasts, so the NIC
-  dropped the probe's replies even with the budget on. The budget bounds
-  what those threads do, so they can't take the whole CPU.
+  second, because its receive ring was full. A full CPU alone isn't enough:
+  TCP as fast as it goes also fills a small NAT's CPU, but TCP senders slow
+  down at the first losses, so the NIC drops about 2% and the probe gets
+  through.
+- **It attaches the program and measures for 200 ms**, then gives each CPU
+  a budget of 90% of the packets the busiest CPU passed, per 1 ms tick.
+  Past the budget the program drops worker packets. Dropping the other 10%
+  is cheap, so the CPU has room again.
+- **It raises the shared ENI's receive ring and receive threads.** Before
+  attaching, the daemon raises the receive ring to the most the NIC allows,
+  2,048 packets on a c7gn.medium against ENA's default of 1,024. While it
+  limits, the receive threads that threaded NAPI gives each receive queue
+  run at nice -10. On a 1-vCPU NAT those threads share the CPU with the
+  daemon, and each health round's own work held the CPU for longer than the
+  ring lasts, so the NIC dropped the probe's replies even with the budget
+  on. The budget bounds what the threads do, so they can't take the whole
+  CPU.
 - **It always passes** anything that isn't IPv4, such as ARP, and replies to
   the probes: TCP from the probe receiver's port to the shared address on
   ports 61000 to 65535, which only the shared canary's connections use. Past
   the budget, each CPU passes at most 128 such replies every 16.8 ms.
 - **It clears** once it has dropped less than 5% of what it saw over the
-  last second, and then waits at least 1 s before it can engage again.
+  last second. The daemon then detaches the program, puts the ring and the
+  threads back, and waits at least 1 s before it can engage again.
 
-When it attaches, the daemon also raises the shared ENI's receive ring to
-the most the NIC allows, 2,048 packets on a c7gn.medium against ENA's
-default of 1,024, so the ring rides out short waits for the CPU. It puts the
-ring back when the guard detaches.
-
-The daemon attaches the program when a takeover configures the shared ENI,
-before forwarding opens, and checks every 5 s that it's on the interface that
-holds the shared address, and only there. It never attaches to the NAT's own
-interface, where its lease renewals, DNS lookups and conntrackd copies
-arrive. Attaching, and changing the ring, each restart an ENA interface,
-which costs no gap while forwarding is still closed. The program goes away when the daemon stops.
+Attaching the program, and changing the ring, each restart an ENA
+interface, which loses a few milliseconds of packets in the middle of a
+flood. The daemon watches only the interface that holds the shared address,
+and never the NAT's own interface, where its lease renewals, DNS lookups and
+conntrackd copies arrive. The program goes away when the daemon stops.
 
 The guard only drops packets. It never decides who owns the pair: the probes
 and the lease still do, so a broken owner fails over as before. To turn it
