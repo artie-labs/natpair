@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The module's new `kernel` input pins the Amazon Linux 2023 kernel line the
   NATs boot, 6.18 by default. The image lookup picked whichever line AWS
   published last, so new NATs booted 6.1, 6.12 or 6.18 depending on the day.
-  Running NATs keep their image. Replaced NATs boot the pinned line.
+  Running NATs keep their image. Replaced NATs boot the pinned line. 6.18
+  needs the daemon to turn on threaded NAPI (#16), so release this with it.
 
 ## [0.1.1] - 2026-11-09
 
