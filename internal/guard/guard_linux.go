@@ -38,8 +38,12 @@ const receiveNice = -10
 // commandTimeout bounds each ethtool call.
 const commandTimeout = 2 * time.Second
 
-// Guard keeps the overload guard attached to the shared ENI while this NAT
-// holds it, and sets its budget.
+// Guard watches the shared ENI while this NAT holds it, and attaches the
+// overload guard's program to it only while it sheds a flood. With any XDP
+// program attached, ENA's receive path costs more: on AWS, full-rate TCP
+// through a c7gn.medium cost 1,396 ns of CPU a packet against 1,220 without,
+// and its throughput fell from 8.9 to 7.7 Gbps. Watching needs no program:
+// the CPUs and the NIC's counters say when to attach.
 type Guard struct {
 	cfg     Config
 	match   match
@@ -48,15 +52,18 @@ type Guard struct {
 	mu sync.Mutex
 	// prog is loaded on the first attach and kept until Run returns.
 	prog *program
-	// attached is the XDP link, nil while detached, on interface name with
-	// index.
-	attached link.Link
+	// name and index are the shared ENI the guard watches, "" while no
+	// interface holds the shared address. attached is the XDP link on it,
+	// nil while detached.
 	name     string
 	index    int
+	attached link.Link
 	// ringBefore is the receive ring size the guard raised from, to restore
 	// on detach, or 0 if it didn't change it.
 	ringBefore int
 	ctrl       Controller
+	// off is set while the off switch exists.
+	off bool
 	// ensureErr and stepErr are the last failures logged by each loop, so
 	// a lasting one is logged once.
 	ensureErr, stepErr string
@@ -78,11 +85,12 @@ func New(cfg Config) *Guard {
 	}
 }
 
-// Ensure attaches the guard to the interface that holds the shared address,
-// and detaches it when no interface does, or while the off switch exists. A
-// takeover runs it right after the shared ENI is configured, before
-// forwarding opens, because attaching restarts an ENA interface. Failures
-// are logged, never returned: without the guard the NAT forwards as before.
+// Ensure starts watching the interface that holds the shared address, and
+// stops, detaching the program, when no interface does or while the off
+// switch exists. A takeover runs it right after the shared ENI is
+// configured, so a flood that follows the shared ENI is caught at once.
+// Failures are logged, never returned: without the guard the NAT forwards
+// as before.
 func (g *Guard) Ensure(ctx context.Context) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -90,8 +98,8 @@ func (g *Guard) Ensure(ctx context.Context) {
 }
 
 // Run checks where the shared ENI is every 5 s, and reads the CPUs and the
-// shared ENI's counters every Interval to set the budget. It detaches the
-// guard when ctx ends.
+// shared ENI's counters every Interval to attach, limit and detach the
+// program. It detaches the program when ctx ends.
 func (g *Guard) Run(ctx context.Context) {
 	// Detaching restores the ring after ctx ends, so it gets its own.
 	defer g.close(context.WithoutCancel(ctx))
@@ -114,56 +122,88 @@ func (g *Guard) Run(ctx context.Context) {
 }
 
 func (g *Guard) ensure(ctx context.Context) error {
-	if _, err := os.Stat(g.cfg.OffPath); err == nil {
-		return g.detach(ctx, "the off switch "+g.cfg.OffPath+" exists")
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	_, err := os.Stat(g.cfg.OffPath)
+	off := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("failed to check the overload guard's off switch: %w", err)
+	}
+	if off != g.off {
+		g.off = off
+		slog.Info("overload guard switched", slog.Bool("on", !off), slog.String("off_switch", g.cfg.OffPath))
+	}
+	if off {
+		return g.forget(ctx)
 	}
 	iface, err := g.sharedInterface()
 	if err != nil {
 		return err
 	}
 	if iface == nil {
-		return g.detach(ctx, "no interface holds the shared address")
+		return g.forget(ctx)
 	}
 	if iface.Name == g.cfg.PrimaryInterface {
-		return errors.Join(g.detach(ctx, "the primary interface holds the shared address"),
+		return errors.Join(g.forget(ctx),
 			fmt.Errorf("the primary interface %s holds the shared address %s, so the overload guard stays off it", iface.Name, g.cfg.SharedAddress))
 	}
-	if g.attached != nil && g.index == iface.Index && g.stillAttached() {
-		if g.ctrl.Mode() == Limiting {
-			// A NIC reset recreates the receive threads at nice 0.
-			return g.prioritize(receiveNice)
-		}
-		return nil
-	}
-	if err := g.detach(ctx, "the shared address moved to "+iface.Name); err != nil {
-		return err
-	}
-	if g.prog == nil {
-		if g.prog, err = loadProgram(g.match); err != nil {
+	if g.name != iface.Name || g.index != iface.Index {
+		if err := g.forget(ctx); err != nil {
 			return err
 		}
+		g.name, g.index = iface.Name, iface.Index
+		slog.Info("overload guard watching", slog.String("interface", iface.Name))
+		return nil
 	}
-	if err := g.prog.setBudget(0); err != nil {
-		return err
+	if g.attached != nil && !g.stillAttached() {
+		// The kernel dropped the link, as when the interface was replaced.
+		return g.detach(ctx)
 	}
+	if g.ctrl.Mode() == Limiting {
+		// A NIC reset recreates the receive threads at nice 0.
+		return g.prioritize(receiveNice)
+	}
+	return nil
+}
+
+// forget stops watching, detaching the program if it's attached.
+func (g *Guard) forget(ctx context.Context) error {
+	if g.name == "" {
+		return nil
+	}
+	err := g.detach(ctx)
+	slog.Info("overload guard stopped watching", slog.String("interface", g.name))
+	g.name, g.index = "", 0
+	g.ctrl.Reset()
+	return err
+}
+
+// attach loads the program if needed, gives it budget and attaches it to
+// the watched interface, after raising the interface's receive ring. Each
+// of those restarts an ENA interface. Without the larger ring the guard
+// still works, so a ring failure is only logged.
+func (g *Guard) attach(ctx context.Context, budget uint64) (time.Duration, error) {
 	started := time.Now()
-	// Before the program, because each restarts an ENA interface. Without
-	// the larger ring the guard still works, so a failure only adds to the
-	// error.
-	ringErr := g.raiseRing(ctx, iface.Name)
+	if g.prog == nil {
+		prog, err := loadProgram(g.match)
+		if err != nil {
+			return 0, err
+		}
+		g.prog = prog
+	}
+	if err := g.prog.setBudget(budget); err != nil {
+		return 0, err
+	}
+	if err := g.raiseRing(ctx, g.name); err != nil {
+		slog.Warn("overload guard failed to raise the receive ring", slog.Any("err", err))
+	}
 	// Native mode only. The generic mode runs after the kernel builds a
 	// packet buffer, which is most of what the guard saves, and it copies
 	// large TCP packets into one buffer.
-	attached, err := link.AttachXDP(link.XDPOptions{Program: g.prog.prog, Interface: iface.Index, Flags: link.XDPDriverMode})
+	attached, err := link.AttachXDP(link.XDPOptions{Program: g.prog.prog, Interface: g.index, Flags: link.XDPDriverMode})
 	if err != nil {
-		return fmt.Errorf("failed to attach the overload guard to %s: %w", iface.Name, err)
+		return 0, errors.Join(fmt.Errorf("failed to attach the overload guard to %s: %w", g.name, err), g.restoreRing(ctx))
 	}
-	g.attached, g.name, g.index = attached, iface.Name, iface.Index
-	g.ctrl.Reset()
-	slog.Info("overload guard attached", slog.String("interface", iface.Name), slog.Int("rx_ring", g.ringNow(ctx, iface.Name)), slog.Duration("duration", time.Since(started)))
-	return ringErr
+	g.attached = attached
+	return time.Since(started), nil
 }
 
 // raiseRing sets the receive ring of iface to its largest size, so it holds
@@ -235,38 +275,47 @@ func (g *Guard) stillAttached() bool {
 	return xdp != nil && int(xdp.Ifindex) == g.index
 }
 
-// detach removes the guard from its interface, if it's on one, and puts the
-// receive threads' priority and the ring back where they were. They are
-// gone with the interface on a handover.
-func (g *Guard) detach(ctx context.Context, reason string) error {
+// detach removes the program from the watched interface, if it's on one,
+// and puts the receive threads' priority and the ring back where they were.
+// They are gone with the interface on a handover.
+func (g *Guard) detach(ctx context.Context) error {
 	if g.attached == nil {
 		return nil
 	}
 	var errs []error
+	if g.ctrl.Mode() == Limiting {
+		errs = append(errs, g.prioritize(0))
+	}
 	if err := g.attached.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("failed to detach the overload guard from %s: %w", g.name, err))
 	}
 	g.attached = nil
-	if g.ctrl.Mode() == Limiting {
-		errs = append(errs, g.prioritize(0))
-	}
 	g.ctrl.Reset()
-	if g.ringBefore > 0 {
-		if _, err := os.Stat(filepath.Join("/sys/class/net", g.name)); err == nil {
-			if _, err := command.Run(ctx, commandTimeout, "ethtool", "-G", g.name, "rx", strconv.Itoa(g.ringBefore)); err != nil {
-				errs = append(errs, fmt.Errorf("failed to restore the receive ring of %s to %d: %w", g.name, g.ringBefore, err))
-			}
-		}
-		g.ringBefore = 0
-	}
-	slog.Info("overload guard detached", slog.String("interface", g.name), slog.String("reason", reason))
+	errs = append(errs, g.restoreRing(ctx))
 	return errors.Join(errs...)
+}
+
+// restoreRing puts the receive ring back to the size raiseRing raised it
+// from, unless the interface is gone.
+func (g *Guard) restoreRing(ctx context.Context) error {
+	if g.ringBefore == 0 {
+		return nil
+	}
+	before := g.ringBefore
+	g.ringBefore = 0
+	if _, err := os.Stat(filepath.Join("/sys/class/net", g.name)); err != nil {
+		return nil
+	}
+	if _, err := command.Run(ctx, commandTimeout, "ethtool", "-G", g.name, "rx", strconv.Itoa(before)); err != nil {
+		return fmt.Errorf("failed to restore the receive ring of %s to %d: %w", g.name, before, err)
+	}
+	return nil
 }
 
 func (g *Guard) close(ctx context.Context) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	report(&g.ensureErr, g.detach(ctx, "the daemon is stopping"))
+	report(&g.ensureErr, g.forget(ctx))
 	if g.prog != nil {
 		report(&g.ensureErr, g.prog.Close())
 		g.prog = nil
@@ -300,43 +349,57 @@ func (g *Guard) sharedInterface() (*net.Interface, error) {
 
 // step takes one reading and applies the controller's decision.
 func (g *Guard) step(ctx context.Context) error {
-	if g.attached == nil {
+	if g.name == "" {
 		return nil
 	}
 	reading, err := g.read()
 	if errors.Is(err, fs.ErrNotExist) {
 		// The shared ENI went away between two checks, as on a handover.
-		return g.detach(ctx, "the shared ENI is gone")
+		return g.forget(ctx)
 	}
 	if err != nil {
 		return err
 	}
 	previous := g.ctrl.Mode()
 	decision := g.ctrl.Step(reading)
-	if decision.Changed {
-		if err := g.prog.setBudget(decision.Budget); err != nil {
-			g.ctrl.Reset()
-			return errors.Join(err, g.prog.setBudget(0))
-		}
+	if !decision.Changed {
+		return nil
 	}
-	var priorityErr error
-	switch {
-	case decision.Mode == Limiting && previous != Limiting:
-		priorityErr = g.prioritize(receiveNice)
+	switch decision.Mode {
+	case Measuring:
+		took, err := g.attach(ctx, decision.Budget)
+		if err != nil {
+			g.ctrl.Reset()
+			return err
+		}
+		slog.Info("overload guard attached", slog.String("interface", g.name),
+			slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Float64("nic_drop_share", round(decision.DropShare)),
+			slog.Int("rx_ring", g.ringNow(ctx, g.name)), slog.Duration("duration", took))
+	case Limiting:
+		if err := g.prog.setBudget(decision.Budget); err != nil {
+			return errors.Join(err, g.detach(ctx))
+		}
 		slog.Warn("overload guard engaged: the CPU can't forward everything the shared ENI receives, so it drops worker packets past a budget",
 			slog.String("interface", g.name),
 			slog.Float64("busiest_cpu", round(decision.Busiest)),
 			slog.Float64("nic_drop_share", round(decision.DropShare)),
 			slog.Int64("measured_pps_per_cpu", int64(decision.Rate)),
 			slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)))
-	case decision.Mode == Unlimited && previous == Limiting:
-		priorityErr = g.prioritize(0)
-		slog.Info("overload guard cleared", slog.String("interface", g.name),
-			slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Uint64("dropped", decision.Shed))
-	case decision.Mode == Unlimited && previous == Measuring:
-		slog.Info("overload guard stood down: no packets reached it while it measured", slog.String("interface", g.name))
+		return g.prioritize(receiveNice)
+	case Unlimited:
+		// The controller already forgot its mode, so detach puts the
+		// priority back here.
+		var priorityErr error
+		if previous == Limiting {
+			priorityErr = g.prioritize(0)
+			slog.Info("overload guard cleared", slog.String("interface", g.name),
+				slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Uint64("dropped", decision.Shed))
+		} else {
+			slog.Info("overload guard stood down: no packets reached it while it measured", slog.String("interface", g.name))
+		}
+		return errors.Join(priorityErr, g.detach(ctx))
 	}
-	return priorityErr
+	return nil
 }
 
 func (g *Guard) read() (Reading, error) {
@@ -356,11 +419,13 @@ func (g *Guard) read() (Reading, error) {
 		}
 		dropped += value
 	}
-	passed, shed, err := g.prog.counters()
-	if err != nil {
-		return Reading{}, err
+	reading := Reading{At: time.Since(g.started), CPUs: ParseCPUTimes(string(stat)), Received: received, Dropped: dropped}
+	if g.attached != nil {
+		if reading.Passed, reading.Shed, err = g.prog.counters(); err != nil {
+			return Reading{}, err
+		}
 	}
-	return Reading{At: time.Since(g.started), CPUs: ParseCPUTimes(string(stat)), Received: received, Dropped: dropped, Passed: passed, Shed: shed}, nil
+	return reading, nil
 }
 
 func readCounter(iface, name string) (uint64, error) {

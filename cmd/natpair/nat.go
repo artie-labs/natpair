@@ -315,10 +315,8 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 	return s.network.ClaimShared(ctx, mac)
 }
 
-// ActivateShared configures the shared ENI, then attaches the overload
-// guard to it. Attaching restarts an ENA interface, which costs no gap while
-// forwarding is still closed, and the check of the shared Elastic IP that
-// follows retries until the interface is back.
+// ActivateShared configures the shared ENI, then has the overload guard
+// watch it, so a flood that follows the shared ENI here is caught at once.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
