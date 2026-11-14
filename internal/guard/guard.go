@@ -59,7 +59,7 @@ const (
 	engageReadings = 3
 	// engageDropShare and dropReadings: the NIC must also have dropped at
 	// least 5% of what reached the shared ENI over the last second. ENA
-	// refreshes its drop counter once a second. A full CPU alone isn't
+	// refreshes its drop counters once a second. A full CPU alone isn't
 	// enough: TCP as fast as it goes also fills a c7gn.medium's CPU, but TCP
 	// senders slow down at the first losses, so the NIC drops little and the
 	// probe gets through. A flood that doesn't slow down overflows the
@@ -98,9 +98,12 @@ type Reading struct {
 	At time.Duration
 	// CPUs are each CPU's counters from /proc/stat.
 	CPUs []CPUTimes
-	// Received and Dropped are the shared ENI's rx_packets and rx_dropped.
-	// ENA counts the packets its NIC dropped, and the program's drops, in
-	// rx_dropped.
+	// Received is the shared ENI's rx_packets, and Dropped the sum of its
+	// rx_over_errors and rx_dropped. ENA counts the packets its receive ring
+	// had no room for in rx_over_errors, and its other drops and the
+	// program's in rx_dropped. On AWS, a c7gn.medium that received about
+	// 550,000 of 800,000 small packets a second counted the rest in
+	// rx_over_errors, and none in rx_dropped.
 	Received, Dropped uint64
 	// Passed and Shed are the program's per-CPU counters of packets it
 	// passed and dropped while it had a budget.

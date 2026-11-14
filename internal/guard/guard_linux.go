@@ -247,9 +247,13 @@ func (g *Guard) read() (Reading, error) {
 	if err != nil {
 		return Reading{}, err
 	}
-	dropped, err := readCounter(g.name, "rx_dropped")
-	if err != nil {
-		return Reading{}, err
+	var dropped uint64
+	for _, counter := range []string{"rx_over_errors", "rx_dropped"} {
+		value, err := readCounter(g.name, counter)
+		if err != nil {
+			return Reading{}, err
+		}
+		dropped += value
 	}
 	passed, shed, err := g.prog.counters()
 	if err != nil {
