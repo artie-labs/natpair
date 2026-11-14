@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -233,19 +234,49 @@ func TestHandshakes(t *testing.T) {
 		assert.Equal(t, 40, completed)
 	}
 	{
-		// None connects where nothing listens
+		// A refused attempt isn't a lost packet, so the check fails
 		listener, err := net.Listen("tcp4", "127.0.0.1:0")
 		require.NoError(t, err)
 		require.NoError(t, listener.Close())
 		target := Target{URL: "https://" + listener.Addr().String() + "/nat", Source: netip.MustParseAddr("127.0.0.1")}
-		completed, err := (&Client{}).Handshakes(t.Context(), target, 40)
-		require.NoError(t, err)
-		assert.Zero(t, completed)
+		_, err = (&Client{}).Handshakes(t.Context(), target, 40)
+		assert.ErrorIs(t, err, syscall.ECONNREFUSED)
 	}
 	{
 		_, err := (&Client{}).Handshakes(t.Context(), Target{URL: "http://127.0.0.1/nat"}, 40)
 		assert.EqualError(t, err, `probe URL "http://127.0.0.1/nat" must be a plain HTTPS URL`)
 	}
+	{
+		// An attempt that fails on this host, such as from an address it
+		// doesn't have, says nothing about the path, so the check fails
+		// instead of counting it as a lost packet
+		target := startReceiver(t, probetest.Handler())
+		target.Source = netip.MustParseAddr("192.0.2.1")
+		_, err := (&Client{}).Handshakes(t.Context(), target, 40)
+		assert.ErrorIs(t, err, syscall.EADDRNOTAVAIL)
+	}
+}
+
+func TestHandshakesUseTheUploadsAddress(t *testing.T) {
+	t.Cleanup(func() { lookupNetIP = net.DefaultResolver.LookupNetIP })
+	target := startReceiver(t, probetest.Handler())
+	address, err := url.Parse(target.URL)
+	require.NoError(t, err)
+	target.URL = "https://example.com:" + address.Port() + "/nat"
+	lookups := 0
+	lookupNetIP = func(context.Context, string, string) ([]netip.Addr, error) {
+		lookups++
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	client := &Client{}
+	_, err = client.Upload(t.Context(), target)
+	require.NoError(t, err)
+	// The handshakes go where the upload went, without spending their
+	// time on another lookup
+	completed, err := client.Handshakes(t.Context(), target, 40)
+	require.NoError(t, err)
+	assert.Equal(t, 40, completed)
+	assert.Equal(t, 1, lookups)
 }
 
 func TestUploadTimeout(t *testing.T) {

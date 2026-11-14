@@ -11,6 +11,7 @@ package probe
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -124,13 +125,21 @@ func (c *Client) Upload(ctx context.Context, target Target) (Flow, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	flow, err := c.upload(ctx, target)
-	// The cause doesn't always survive on the way up: net/http reports a
-	// write that hit the connection's deadline without wrapping the
-	// deadline error. So the upload's own deadline decides.
-	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if err != nil && timedOut(ctx) {
 		return Flow{}, fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	return flow, err
+}
+
+// timedOut reports whether ctx's deadline has passed. A failed connection
+// attempt or upload decides by the clock, not by its error, because the cause
+// doesn't always survive on the way up: net/http reports a write that hit the
+// connection's deadline without wrapping the deadline error. Nor by ctx.Err:
+// the connection's deadline is the same instant, and the timer that sets
+// ctx.Err can run after the I/O error comes back.
+func timedOut(ctx context.Context) bool {
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
 }
 
 func (c *Client) upload(ctx context.Context, target Target) (Flow, error) {
@@ -204,10 +213,12 @@ func (c *Client) upload(ctx context.Context, target Target) (Flow, error) {
 
 // Handshakes opens attempts TCP connections to target's receiver at once and
 // returns how many connected. Each starts like [Client.Upload]'s, from the
-// same namespace and source address, so it takes the same route and address
-// translation. Each closes with a reset as soon as it connects, without TLS,
-// so it leaves no socket behind. It fails only if the receiver's address is
-// unknown.
+// same namespace and source address, to the address the last upload used, so
+// it takes the same route and address translation. Each closes with a reset
+// as soon as it connects, without TLS, so it leaves no socket behind. Only an
+// attempt that runs out of time counts as lost. Any other failure, such as a
+// refused connection or one this host couldn't start, says nothing about
+// lost packets, so Handshakes then returns that error.
 //
 // A completed handshake shows the path delivers packets both ways, because
 // the answer must acknowledge the random sequence number the kernel chose
@@ -219,16 +230,23 @@ func (c *Client) Handshakes(ctx context.Context, target Target, attempts int) (i
 	}
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	remote, err := c.resolve(ctx, address)
+	remote, err := c.lastResolved(ctx, address)
 	if err != nil {
 		return 0, err
 	}
 	var completed atomic.Int64
+	var mu sync.Mutex
+	var failure error
 	var wg sync.WaitGroup
 	for range attempts {
 		wg.Go(func() {
 			conn, err := dial(ctx, target, remote)
 			if err != nil {
+				if !timedOut(ctx) {
+					mu.Lock()
+					failure = cmp.Or(failure, err)
+					mu.Unlock()
+				}
 				return
 			}
 			if tcp, ok := conn.(*net.TCPConn); ok {
@@ -239,7 +257,27 @@ func (c *Client) Handshakes(ctx context.Context, target Target, attempts int) (i
 		})
 	}
 	wg.Wait()
+	if failure != nil {
+		return 0, fmt.Errorf("failed to try a handshake with probe receiver %s: %w", remote, failure)
+	}
 	return int(completed.Load()), nil
+}
+
+// lastResolved returns the receiver's address the last upload used, so the
+// handshakes go where the upload went and don't spend their time on another
+// lookup. It resolves the host only if no upload has.
+func (c *Client) lastResolved(ctx context.Context, address *url.URL) (netip.AddrPort, error) {
+	c.mu.Lock()
+	ip, known := c.resolved[address.Hostname()]
+	c.mu.Unlock()
+	if !known {
+		return c.resolve(ctx, address)
+	}
+	port, err := receiverPort(address)
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	return netip.AddrPortFrom(ip, port), nil
 }
 
 // parseURL parses a receiver's URL, which must be a plain HTTPS URL.
@@ -313,16 +351,25 @@ func (c *Client) sign(ctx context.Context, request *http.Request, payloadDigest 
 	return nil
 }
 
+// receiverPort returns the receiver's port, 443 unless its URL names one.
+func receiverPort(address *url.URL) (uint16, error) {
+	value := address.Port()
+	if value == "" {
+		return 443, nil
+	}
+	port, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("invalid probe port %q: %w", value, err)
+	}
+	return uint16(port), nil
+}
+
 // resolve returns the receiver's address, or the host's last resolved
 // address if the lookup fails.
 func (c *Client) resolve(ctx context.Context, address *url.URL) (netip.AddrPort, error) {
-	port := uint16(443)
-	if value := address.Port(); value != "" {
-		parsed, err := strconv.ParseUint(value, 10, 16)
-		if err != nil {
-			return netip.AddrPort{}, fmt.Errorf("invalid probe port %q: %w", value, err)
-		}
-		port = uint16(parsed)
+	port, err := receiverPort(address)
+	if err != nil {
+		return netip.AddrPort{}, err
 	}
 	if ip, err := netip.ParseAddr(address.Hostname()); err == nil {
 		return netip.AddrPortFrom(ip.Unmap(), port), nil
