@@ -10,15 +10,18 @@
 // its probes and hand over in 6 of 6 runs, and the new owner then got the
 // same flood.
 //
-// An XDP program on the shared ENI runs before the kernel builds a packet
-// buffer. While its budget is 0 it passes everything after one map lookup.
-// When the busiest CPU stays full and the NIC drops packets, the daemon
-// gives it a per-CPU budget of packets per tick, and raises the priority of
-// the shared ENI's receive threads. Past the budget it drops
-// worker packets for about 100 ns each, where the kernel's path costs about
-// 1,450 ns, so the CPU keeps up again. It still passes everything that isn't
+// The daemon watches the busiest CPU and the shared ENI's counters. When the
+// busiest CPU stays full and the NIC drops packets, it attaches an XDP
+// program to the shared ENI, which runs before the kernel builds a packet
+// buffer, measures for two readings, and gives it a per-CPU budget of
+// packets per tick. It also raises the shared ENI's receive ring and the
+// priority of its receive threads. Past the budget the program drops worker
+// packets for about 100 ns each, where the kernel's path costs about 1,450
+// ns, so the CPU keeps up again. It still passes everything that isn't
 // IPv4, such as ARP, and a bounded number of replies to the shared canary's
-// TCP connections, which are the path probes.
+// TCP connections, which are the path probes. Once the flood fits the
+// budget, the daemon detaches the program, because any XDP program makes
+// ENA's receive path cost more.
 //
 // The guard only drops. It never decides ownership: the health checks still
 // do.
