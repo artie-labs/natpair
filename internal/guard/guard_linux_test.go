@@ -172,7 +172,11 @@ func TestGuard(t *testing.T) {
 
 // simulated is a netdevsim interface that holds the shared address, with
 // threaded NAPI on. netdevsim has a receive ring the guard can raise and
-// takes native XDP, like ENA. It returns the interface's name.
+// takes native XDP, like ENA. It returns the interface's name. netdevsim
+// creates the interface in the test's network namespace. On a host whose
+// network manager takes over new interfaces, such as systemd-networkd
+// removing addresses it didn't set, run the tests in a fresh one:
+// ip netns add test && ip netns exec test ./guard.test.
 func simulated(t *testing.T, id string) string {
 	if _, err := os.Stat("/sys/bus/netdevsim/new_device"); err != nil {
 		t.Skip("netdevsim isn't loaded. Run modprobe netdevsim to run this test")
@@ -317,4 +321,23 @@ func TestGuardRefusedLeavesTheRing(t *testing.T) {
 	}
 	assert.Empty(t, changes())
 	assert.Equal(t, 512, ringSize(t, name))
+}
+
+// TestGuardStartsAtDefaultPriority finds the receive threads at nice -10, as
+// a daemon killed while limiting leaves them, and puts them back when it
+// starts.
+func TestGuardStartsAtDefaultPriority(t *testing.T) {
+	name := simulated(t, "7319")
+	pids, err := receiveThreads("/proc", name)
+	require.NoError(t, err)
+	for _, pid := range pids {
+		require.NoError(t, unix.Setpriority(unix.PRIO_PROCESS, pid, -10))
+	}
+	require.Equal(t, []int{-10}, receiveNices(t, name))
+	g := New(Config{SharedAddress: netip.MustParseAddr("10.98.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: filepath.Join(t.TempDir(), "off")})
+	ctx, cancel := context.WithCancel(t.Context())
+	// Run returns at its first wait, after it starts watching
+	cancel()
+	g.Run(ctx)
+	assert.Equal(t, []int{0}, receiveNices(t, name))
 }

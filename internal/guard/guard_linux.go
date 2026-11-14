@@ -104,6 +104,13 @@ func (g *Guard) Run(ctx context.Context) {
 	// Detaching restores the ring after ctx ends, so it gets its own.
 	defer g.close(context.WithoutCancel(ctx))
 	g.Ensure(ctx)
+	g.mu.Lock()
+	if g.name != "" {
+		// A daemon killed while limiting left the receive threads at nice
+		// -10, with no budget to bound them. This one starts unlimited.
+		report(&g.ensureErr, g.prioritize(0))
+	}
+	g.mu.Unlock()
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
 	for readings := 1; ; readings++ {
