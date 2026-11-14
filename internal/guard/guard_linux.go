@@ -116,8 +116,17 @@ func (g *Guard) Run(ctx context.Context) {
 			g.Ensure(ctx)
 		}
 		g.mu.Lock()
+		detached := g.attached == nil
 		report(&g.stepErr, g.step(ctx))
+		justAttached := detached && g.attached != nil
 		g.mu.Unlock()
+		if justAttached {
+			// Attaching waits for ethtool and an interface restart, and the
+			// ticker doesn't. Without a reset, the next reading comes at
+			// once and the measured interval after it is anywhere from 0 to
+			// 100 ms.
+			ticker.Reset(Interval)
+		}
 	}
 }
 
@@ -155,6 +164,7 @@ func (g *Guard) ensure(ctx context.Context) error {
 	}
 	if g.attached != nil && !g.stillAttached() {
 		// The kernel dropped the link, as when the interface was replaced.
+		g.ctrl.Reset()
 		return g.detach(ctx)
 	}
 	if g.ctrl.Mode() == Limiting {
@@ -177,8 +187,8 @@ func (g *Guard) forget(ctx context.Context) error {
 }
 
 // attach loads the program if needed, gives it budget and attaches it to
-// the watched interface, after raising the interface's receive ring. Each
-// of those restarts an ENA interface. Without the larger ring the guard
+// the watched interface, then raises the interface's receive ring. Each of
+// the last two restarts an ENA interface. Without the larger ring the guard
 // still works, so a ring failure is only logged.
 func (g *Guard) attach(ctx context.Context, budget uint64) (time.Duration, error) {
 	started := time.Now()
@@ -192,17 +202,21 @@ func (g *Guard) attach(ctx context.Context, budget uint64) (time.Duration, error
 	if err := g.prog.setBudget(budget); err != nil {
 		return 0, err
 	}
-	if err := g.raiseRing(ctx, g.name); err != nil {
-		slog.Warn("overload guard failed to raise the receive ring", slog.Any("err", err))
-	}
 	// Native mode only. The generic mode runs after the kernel builds a
 	// packet buffer, which is most of what the guard saves, and it copies
 	// large TCP packets into one buffer.
 	attached, err := link.AttachXDP(link.XDPOptions{Program: g.prog.prog, Interface: g.index, Flags: link.XDPDriverMode})
 	if err != nil {
-		return 0, errors.Join(fmt.Errorf("failed to attach the overload guard to %s: %w", g.name, err), g.restoreRing(ctx))
+		return 0, fmt.Errorf("failed to attach the overload guard to %s: %w", g.name, err)
 	}
 	g.attached = attached
+	// The ring comes second, so a refused attach changes nothing. The
+	// kernel refuses a second program, and ENA too large an MTU, before
+	// either restarts the interface, and the guard tries again at every
+	// overload.
+	if err := g.raiseRing(ctx, g.name); err != nil {
+		slog.Warn("overload guard failed to raise the receive ring", slog.Any("err", err))
+	}
 	return time.Since(started), nil
 }
 
@@ -277,20 +291,19 @@ func (g *Guard) stillAttached() bool {
 
 // detach removes the program from the watched interface, if it's on one,
 // and puts the receive threads' priority and the ring back where they were.
-// They are gone with the interface on a handover.
+// They are gone with the interface on a handover. The caller decides what
+// the controller keeps.
 func (g *Guard) detach(ctx context.Context) error {
 	if g.attached == nil {
 		return nil
 	}
-	var errs []error
-	if g.ctrl.Mode() == Limiting {
-		errs = append(errs, g.prioritize(0))
-	}
+	// Nice 0 is the kernel's default for the receive threads, and threaded
+	// NAPI leaves them at it.
+	errs := []error{g.prioritize(0)}
 	if err := g.attached.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("failed to detach the overload guard from %s: %w", g.name, err))
 	}
 	g.attached = nil
-	g.ctrl.Reset()
 	errs = append(errs, g.restoreRing(ctx))
 	return errors.Join(errs...)
 }
@@ -360,6 +373,12 @@ func (g *Guard) step(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return g.apply(ctx, reading)
+}
+
+// apply gives the controller a reading and carries out its decision on the
+// watched interface.
+func (g *Guard) apply(ctx context.Context, reading Reading) error {
 	previous := g.ctrl.Mode()
 	decision := g.ctrl.Step(reading)
 	if !decision.Changed {
@@ -377,6 +396,7 @@ func (g *Guard) step(ctx context.Context) error {
 			slog.Int("rx_ring", g.ringNow(ctx, g.name)), slog.Duration("duration", took))
 	case Limiting:
 		if err := g.prog.setBudget(decision.Budget); err != nil {
+			g.ctrl.Reset()
 			return errors.Join(err, g.detach(ctx))
 		}
 		if previous == Limiting {
@@ -393,17 +413,13 @@ func (g *Guard) step(ctx context.Context) error {
 			slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)))
 		return g.prioritize(receiveNice)
 	case Unlimited:
-		// The controller already forgot its mode, so detach puts the
-		// priority back here.
-		var priorityErr error
 		if previous == Limiting {
-			priorityErr = g.prioritize(0)
 			slog.Info("overload guard cleared", slog.String("interface", g.name),
 				slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Uint64("dropped", decision.Shed))
 		} else {
 			slog.Info("overload guard stood down: no packets reached it while it measured", slog.String("interface", g.name))
 		}
-		return errors.Join(priorityErr, g.detach(ctx))
+		return g.detach(ctx)
 	}
 	return nil
 }

@@ -104,9 +104,10 @@ const (
 	tickShift = 20
 )
 
-// measuring is the budget written while the controller measures the rate.
-// No CPU passes that many packets in a tick, so the program only counts.
-const measuring = math.MaxUint64
+// measuringBudget is the budget written while the controller measures the
+// rate. No CPU passes that many packets in a tick, so the program only
+// counts.
+const measuringBudget = math.MaxUint64
 
 // tickSeconds is the length of the budget's window.
 var tickSeconds = float64(uint64(1)<<tickShift) / 1e9
@@ -190,7 +191,7 @@ func (c *Controller) Mode() Mode {
 }
 
 // Reset forgets every reading, as when the guard moves to another interface
-// or detaches. The caller sets the program's budget to 0.
+// or the program comes off without the controller deciding so.
 func (c *Controller) Reset() {
 	*c = Controller{}
 }
@@ -234,8 +235,8 @@ func (c *Controller) Step(r Reading) Decision {
 		}
 		shed := sumSince(c.from.Shed, r.Shed)
 		// A fresh history makes the next engagement wait for a full second
-		// of readings since, and keeps the program's own drops, which ENA
-		// adds to rx_dropped, out of the drop share.
+		// of readings, so NIC drops from the flood it just shed, which ENA
+		// reports up to a second late, don't count again.
 		*c = Controller{history: []Reading{r}}
 		return Decision{Mode: Unlimited, Changed: true, Busiest: busiest, DropShare: share, Shed: shed}
 	}
@@ -245,7 +246,7 @@ func (c *Controller) Step(r Reading) Decision {
 		return Decision{Mode: Unlimited, Busiest: busiest, DropShare: share}
 	}
 	c.mode, c.from = Measuring, r
-	c.engagedBy = Decision{Mode: Measuring, Changed: true, Budget: measuring, Busiest: busiest, DropShare: share}
+	c.engagedBy = Decision{Mode: Measuring, Changed: true, Budget: measuringBudget, Busiest: busiest, DropShare: share}
 	return c.engagedBy
 }
 

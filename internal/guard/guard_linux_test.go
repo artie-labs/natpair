@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,4 +168,153 @@ func TestGuard(t *testing.T) {
 		assert.False(t, attached(t))
 		assert.Empty(t, g.name)
 	}
+}
+
+// simulated is a netdevsim interface that holds the shared address, with
+// threaded NAPI on. netdevsim has a receive ring the guard can raise and
+// takes native XDP, like ENA. It returns the interface's name.
+func simulated(t *testing.T, id string) string {
+	if _, err := os.Stat("/sys/bus/netdevsim/new_device"); err != nil {
+		t.Skip("netdevsim isn't loaded. Run modprobe netdevsim to run this test")
+	}
+	require.NoError(t, os.WriteFile("/sys/bus/netdevsim/new_device", []byte(id+" 1"), 0o200))
+	t.Cleanup(func() {
+		assert.NoError(t, os.WriteFile("/sys/bus/netdevsim/del_device", []byte(id), 0o200))
+	})
+	if _, err := exec.LookPath("udevadm"); err == nil {
+		// udev may rename the new interface. Wait until it has.
+		_, err := command.Run(t.Context(), 10*time.Second, "udevadm", "settle")
+		require.NoError(t, err)
+	}
+	entries, err := os.ReadDir("/sys/bus/netdevsim/devices/netdevsim" + id + "/net")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	name := entries[0].Name()
+	ip(t, "addr", "add", "10.98.0.1/24", "dev", name)
+	ip(t, "link", "set", name, "up")
+	require.NoError(t, os.WriteFile("/sys/class/net/"+name+"/threaded", []byte("1"), 0o644))
+	return name
+}
+
+// ringSize returns the current receive ring size of iface.
+func ringSize(t *testing.T, iface string) int {
+	output, err := command.Run(t.Context(), 5*time.Second, "ethtool", "-g", iface)
+	require.NoError(t, err)
+	_, current, err := parseRings(output)
+	require.NoError(t, err)
+	return current
+}
+
+// ringChanges puts an ethtool first on PATH that records each change it is
+// asked to make, then runs the real one, and returns a function that reads
+// the changes so far.
+func ringChanges(t *testing.T) func() []string {
+	real, err := exec.LookPath("ethtool")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	log := filepath.Join(dir, "changes")
+	script := "#!/bin/sh\n[ \"$1\" = -G ] && echo \"$*\" >> " + log + "\nexec " + real + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ethtool"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return func() []string {
+		contents, err := os.ReadFile(log)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		require.NoError(t, err)
+		return strings.Split(strings.TrimSpace(string(contents)), "\n")
+	}
+}
+
+// receiveNices returns the nice values of iface's receive threads, or
+// skips the test if this PID namespace doesn't show them.
+func receiveNices(t *testing.T, iface string) []int {
+	pids, err := receiveThreads("/proc", iface)
+	require.NoError(t, err)
+	if len(pids) == 0 {
+		t.Skip("no receive threads visible in this PID namespace")
+	}
+	var nices []int
+	for _, pid := range pids {
+		raw, err := unix.Getpriority(unix.PRIO_PROCESS, pid)
+		require.NoError(t, err)
+		// The raw value is 20 - nice
+		nices = append(nices, 20-raw)
+	}
+	return nices
+}
+
+// TestGuardSheds drives the guard through a flood with the controller tests'
+// simulated readings, on a driver with a receive ring and receive threads
+// whose names are longer than 15 characters.
+func TestGuardSheds(t *testing.T) {
+	name := simulated(t, "7317")
+	g := New(Config{SharedAddress: netip.MustParseAddr("10.98.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: filepath.Join(t.TempDir(), "off")})
+	t.Cleanup(func() { g.close(context.WithoutCancel(t.Context())) })
+	require.NoError(t, g.ensure(t.Context()))
+	require.Equal(t, name, g.name)
+	// netdevsim's ring starts at 512 of at most 4,096
+	require.Equal(t, 512, ringSize(t, name))
+
+	var n nat
+	feed := func(l load, count int) {
+		for range count {
+			require.NoError(t, g.apply(t.Context(), n.next(l)))
+		}
+	}
+	feed(flood, 10)
+	assert.Nil(t, g.attached)
+	// The flood engages it: the program goes on and the ring to its largest
+	feed(flood, 1)
+	require.NotNil(t, g.attached)
+	assert.Equal(t, 4096, ringSize(t, name))
+	// It measures, then limits with a budget of 471 a tick, and the receive
+	// threads run at nice -10
+	feed(flood, 1)
+	feed(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{50_000, 10_000}}, 1)
+	require.Equal(t, Limiting, g.ctrl.Mode())
+	var budgets []uint64
+	require.NoError(t, g.prog.budgets.Lookup(uint32(0), &budgets))
+	assert.Equal(t, uint64(471), budgets[0])
+	assert.Equal(t, []int{-10}, receiveNices(t, name))
+
+	// Once it sheds under 5% for a second, it clears: the program comes
+	// off and the ring and the threads go back
+	feed(load{busyTicks: 5, received: 40_000, passed: [2]uint64{39_990, 0}, shed: [2]uint64{10, 0}}, 10)
+	assert.Equal(t, Unlimited, g.ctrl.Mode())
+	assert.Nil(t, g.attached)
+	assert.False(t, regexp.MustCompile(`prog/xdp id \d+`).MatchString(ip(t, "-d", "link", "show", name)))
+	assert.Equal(t, 512, ringSize(t, name))
+	assert.Equal(t, []int{0}, receiveNices(t, name))
+	// Flooded again at once, it engages after a second of readings since it
+	// cleared, as the controller decided
+	feed(flood, 9)
+	assert.Nil(t, g.attached)
+	feed(flood, 1)
+	assert.NotNil(t, g.attached)
+}
+
+// TestGuardRefusedLeavesTheRing has the driver refuse the program, as ENA
+// does above its largest XDP MTU, at every overload. Each ring change
+// restarts an ENA interface, so a refused attach must not change the ring.
+func TestGuardRefusedLeavesTheRing(t *testing.T) {
+	changes := ringChanges(t)
+	name := simulated(t, "7318")
+	// netdevsim refuses XDP above an MTU of 4,000
+	ip(t, "link", "set", name, "mtu", "9000")
+	g := New(Config{SharedAddress: netip.MustParseAddr("10.98.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: filepath.Join(t.TempDir(), "off")})
+	t.Cleanup(func() { g.close(context.WithoutCancel(t.Context())) })
+	require.NoError(t, g.ensure(t.Context()))
+
+	var n nat
+	for range 2 {
+		for range 10 {
+			require.NoError(t, g.apply(t.Context(), n.next(flood)))
+		}
+		assert.ErrorIs(t, g.apply(t.Context(), n.next(flood)), unix.EINVAL)
+		assert.Nil(t, g.attached)
+		assert.Equal(t, Unlimited, g.ctrl.Mode())
+	}
+	assert.Empty(t, changes())
+	assert.Equal(t, 512, ringSize(t, name))
 }

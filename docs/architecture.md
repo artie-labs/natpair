@@ -118,14 +118,14 @@ packet there costs about 100 ns, against about 1,450 ns for the kernel's path.
   5%. The program's own drops take CPU too, so a bigger flood needs a smaller
   budget: at 1.2 million packets a second, a c7gn.medium stayed full under
   90%.
-- **It raises the shared ENI's receive ring and receive threads.** Before
-  attaching, the daemon raises the receive ring to the most the NIC allows,
-  2,048 packets on a c7gn.medium against ENA's default of 1,024. While it
-  limits, the receive threads that threaded NAPI gives each receive queue run
-  at nice -10. On a 1-vCPU NAT those threads share the CPU with the daemon,
-  and each health round's own work held the CPU for longer than the ring
-  lasts, so the NIC dropped the probe's replies even with the budget on. The
-  budget bounds what the threads do, so they can't take the whole CPU.
+- **It raises the shared ENI's receive ring and receive threads.** Right
+  after attaching, the daemon raises the receive ring to the most the NIC
+  allows, 2,048 packets on a c7gn.medium against ENA's default of 1,024.
+  While it limits, the receive threads that threaded NAPI gives each receive
+  queue run at nice -10. On a 1-vCPU NAT those threads share the CPU with the
+  daemon, and each health round's own work held the CPU for longer than the
+  ring lasts, so the NIC dropped the probe's replies even with the budget on.
+  The budget bounds what the threads do, so they can't take the whole CPU.
 - **It always passes** anything that isn't IPv4, such as ARP, and replies to
   the probes: TCP from the probe receiver's port to the shared address on
   ports 61000 to 65535, which only the shared canary's connections use. Past
