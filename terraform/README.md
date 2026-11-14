@@ -62,7 +62,7 @@ See [`examples/`](../examples) for complete configurations.
 
 ## What the NATs may do
 
-The NATs' IAM policy allows only:
+The NATs' two IAM policies allow only:
 
 | Permission | Scope | Why |
 | --- | --- | --- |
