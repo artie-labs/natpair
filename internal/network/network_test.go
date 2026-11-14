@@ -129,12 +129,14 @@ func TestBootstrap(t *testing.T) {
 		"-A NATPAIR_INPUT -j DROP\nCOMMIT\n", log.inputs[0])
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C INPUT -j NATPAIR_INPUT")
 	assert.Less(t, slices.Index(log.commands, "modprobe nf_conntrack"), conntrackSettings)
-	// The NAT's own connections bypass the connection table: TCP on its
-	// ephemeral ports, UDP between those ports and the VPC, the peer's copies
+	// The NAT's own connections bypass the connection table: traffic within
+	// the host, TCP on its ephemeral ports, UDP between those ports and the VPC, the peer's copies
 	// and the two link-local services. The firewall that accepts their
 	// replies comes first.
 	assert.Equal(t, "*raw\n:NATPAIR_UNTRACK_OUT - [0:0]\n:NATPAIR_UNTRACK_IN - [0:0]\n"+
 		"-F NATPAIR_UNTRACK_OUT\n-F NATPAIR_UNTRACK_IN\n"+
+		"-A NATPAIR_UNTRACK_OUT -o lo -j CT --notrack\n"+
+		"-A NATPAIR_UNTRACK_IN -i lo -j CT --notrack\n"+
 		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -p tcp --sport 32768:60999 -j CT --notrack\n"+
 		"-A NATPAIR_UNTRACK_IN -d 10.0.1.10 -p tcp --dport 32768:60999 -j CT --notrack\n"+
 		"-A NATPAIR_UNTRACK_OUT -s 10.0.1.10 -d 10.0.0.0/16 -p udp --sport 32768:60999 -j CT --notrack\n"+

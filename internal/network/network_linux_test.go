@@ -102,37 +102,82 @@ func TestOwnTrafficStaysOnMain(t *testing.T) {
 }
 
 func TestOwnTrafficIsUntracked(t *testing.T) {
-	run(t, "ip", "link", "add", "own-test", "type", "dummy")
+	// The NAT runs in its own namespace with its firewall, whose state
+	// matches put the connection table in use, as on a NAT.
+	run(t, "ip", "netns", "add", "own-test")
 	t.Cleanup(func() {
-		_, err := command.Run(context.WithoutCancel(t.Context()), 2*time.Second, "ip", "link", "del", "own-test")
+		_, err := command.Run(context.WithoutCancel(t.Context()), 2*time.Second, "ip", "netns", "del", "own-test")
 		assert.NoError(t, err)
 	})
-	run(t, "ip", "addr", "add", "10.94.6.10/24", "dev", "own-test")
-	run(t, "ip", "link", "set", "own-test", "up")
+	nat := func(args ...string) string {
+		return run(t, "ip", append([]string{"netns", "exec", "own-test"}, args...)...)
+	}
+	nat("ip", "link", "set", "lo", "up")
+	nat("ip", "link", "add", "own-test", "type", "dummy")
+	nat("ip", "addr", "add", "10.94.6.10/24", "dev", "own-test")
+	nat("ip", "link", "set", "own-test", "up")
+	// Packets to 10.94.7.0/24 leave through the dummy interface, as to a
+	// host outside the NAT, and vanish there.
+	nat("ip", "route", "add", "10.94.7.0/24", "dev", "own-test")
 	cfg := testConfig(t)
 	cfg.Instance.PrivateIP = netip.MustParseAddr("10.94.6.10")
-	require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, network.SystemRunner{}).UntrackOwnTraffic(t.Context()))
-
-	tracked := func(port string) bool {
-		output, err := command.Run(t.Context(), 2*time.Second, "conntrack", "-L", "-p", "tcp", "--dport", port)
-		return err == nil && strings.Contains(output, "dport="+port)
+	n := network.New(cfg, &mocks.FakeNetworkFence{}, network.SystemRunner{})
+	inNAT := func(fn func() error) {
+		require.NoError(t, netns.Do("own-test", fn))
 	}
-	connect := func(port string) {
-		listener, err := net.Listen("tcp4", "10.94.6.10:"+port)
-		require.NoError(t, err)
-		defer listener.Close()
-		dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("10.94.6.10")}, Timeout: time.Second}
-		conn, err := dialer.Dial("tcp4", "10.94.6.10:"+port)
-		require.NoError(t, err)
-		defer conn.Close()
-		accepted, err := listener.Accept()
-		require.NoError(t, err)
-		_ = accepted.Close()
+	inNAT(func() error {
+		if err := n.ProtectHost(t.Context()); err != nil {
+			return err
+		}
+		return n.UntrackOwnTraffic(t.Context())
+	})
+	// tracked reports whether the connection table holds an entry for
+	// protocol to port.
+	tracked := func(protocol, port string) bool {
+		return strings.Contains(nat("conntrack", "-L", "-p", protocol, "--dport", port), "dport="+port)
 	}
-	// A connection of the NAT's own takes no entry in the connection table,
-	// so a full table can't drop it.
-	connect("40123")
-	assert.False(t, tracked("40123"))
+	{
+		// A connection of the NAT's own takes no entry in the connection
+		// table, so a full table can't drop it
+		inNAT(func() error {
+			dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("10.94.6.10")}, Timeout: 100 * time.Millisecond}
+			_, err := dialer.Dial("tcp4", "10.94.7.1:40123")
+			assert.Error(t, err)
+			return nil
+		})
+		assert.False(t, tracked("tcp", "40123"))
+	}
+	{
+		// UDP to outside the VPC stays tracked, which also shows the table
+		// is in use here
+		inNAT(func() error {
+			conn, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("10.94.6.10")}, &net.UDPAddr{IP: net.ParseIP("10.94.7.1"), Port: 40124})
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			_, err = conn.Write([]byte("x"))
+			return err
+		})
+		assert.True(t, tracked("udp", "40124"))
+	}
+	{
+		// Traffic within the host takes no entry either, such as DNS through
+		// a local stub resolver on 127.0.0.53
+		inNAT(func() error {
+			listener, err := net.Listen("tcp4", "127.0.0.1:40125")
+			if err != nil {
+				return err
+			}
+			defer listener.Close()
+			conn, err := net.DialTimeout("tcp4", "127.0.0.1:40125", time.Second)
+			if err != nil {
+				return err
+			}
+			return conn.Close()
+		})
+		assert.False(t, tracked("tcp", "40125"))
+	}
 	// Replies to the own canary's ports stay tracked, which only traffic from
 	// outside the host shows. The campaign's own-path probes cover it.
 }

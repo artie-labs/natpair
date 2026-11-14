@@ -154,13 +154,17 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 		"net.netfilter.nf_conntrack_events=1",
 		// A cleanly closed connection keeps its entry this long, in
 		// TIME_WAIT, so the table fills at the rate of new connections times
-		// this period. Linux's 120 s is twice the longest a segment may live
-		// in the network, which both ends already wait out themselves. The
-		// NAT's entry only has to outlast late retransmits of the final FIN
-		// and ACK, and each one restarts the 30 s. A packet that comes even
-		// later gets the reset for unknown connections, which only closes a
-		// connection that is already closed. At 30 s, the same table holds
-		// 4 times as many new connections a second.
+		// this period. At 30 s instead of Linux's 120 s, the same table holds
+		// 4 times as many new connections a second. The entry has to outlast
+		// late retransmits of the final FIN and ACK, and each one restarts
+		// the 30 s. A packet that comes even later gets the reset for unknown
+		// connections, which only closes a connection that is already
+		// closed. The cost: once the entry is gone, the NAT may give the same
+		// address and port to a new worker connection to the same server
+		// while that server still holds the old connection in its own
+		// TIME_WAIT, 60 s on Linux. A server that closed first and rejects
+		// the new SYN answers it for the old connection, and the worker's
+		// connect then takes a reset and a SYN retry, about 1 s.
 		"net.netfilter.nf_conntrack_tcp_timeout_time_wait=30"); err != nil {
 		return err
 	}
@@ -248,11 +252,13 @@ func (n *Network) protectHost(ctx context.Context) error {
 // and the owner's DNS lookups failed with the workers' connections.
 //
 // It exempts, both ways, only what protectHost can accept without state:
-// TCP on the NAT's own ephemeral ports, which covers lease renewals, AWS API
-// calls and the metadata service; UDP between those ports and the VPC, for
-// DNS and conntrackd's copies; conntrackd's copies arriving from the peer;
-// and UDP with the link-local services. Anything else the NAT sends, such as
-// UDP to the internet, stays tracked, as before.
+// traffic within the host, such as DNS through a local stub resolver like
+// systemd-resolved's 127.0.0.53; TCP on the NAT's own ephemeral ports, which
+// covers lease renewals, AWS API calls and the metadata service; UDP between
+// those ports and the VPC, for DNS and conntrackd's copies; conntrackd's
+// copies arriving from the peer; and UDP with the link-local services.
+// Anything else the NAT sends, such as UDP to the internet, stays tracked, as
+// before.
 //
 // The own canary's probes are translated to the NAT's address on
 // canaryPorts, outside the ephemeral range, so their replies stay tracked
@@ -272,6 +278,9 @@ func (n *Network) untrackOwnTraffic(ctx context.Context) error {
 	in := func(match string) {
 		rules += fmt.Sprintf("-A %s -d %s %s -j CT --notrack\n", untrackInChain, own, match)
 	}
+	// The firewall accepts everything on the loopback interface.
+	rules += "-A " + untrackOutChain + " -o lo -j CT --notrack\n"
+	rules += "-A " + untrackInChain + " -i lo -j CT --notrack\n"
 	out("-p tcp --sport " + localPorts)
 	in("-p tcp --dport " + localPorts)
 	for _, cidr := range n.cfg.Instance.VPCCIDRs {
