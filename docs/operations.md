@@ -175,7 +175,10 @@ A NAT you put in maintenance by hand isn't upgraded until you run
 `natpair resume`.
 
 An upgrade doesn't change the NATs' Amazon Linux image or kernel. New NATs
-boot the newest image on the module's `kernel` line, 6.18 by default. To
+boot the newest image on the module's `kernel` line, 6.18 by default. 6.12
+and 6.18 need a daemon that turns on threaded NAPI, as every release from
+this module's version on does. So keep `release` on the module's version, or
+set `kernel = "6.1"`. To
 move a running pair to another line, or to a newer image on the same line,
 [replace the NATs](#replace-a-nat). AWS adds a new long-term support kernel
 line to Amazon Linux 2023 each year and supports each for four years, though
