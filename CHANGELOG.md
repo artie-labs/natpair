@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the install script turns irqbalance off. irqbalance could put all of an
   interface's queues on one CPU, so a two-CPU NAT forwarded with one. On a
   c7gn.large that was 9.6 Gbps instead of 14.7.
+- The module's new `kernel` input pins the Amazon Linux 2023 kernel line the
+  NATs boot, 6.18 by default. The image lookup picked whichever line AWS
+  published last, so new NATs booted 6.1 or 6.18 depending on the day.
+  Running NATs keep their image. Replaced NATs boot the pinned line.
 
 ### Fixed
 
