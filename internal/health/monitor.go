@@ -12,6 +12,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -71,8 +72,17 @@ const (
 	// the table being full.
 	nearlyFullPercent = 90
 	// tableWarnInterval is the shortest time between repeats of each warning
-	// about the connection table.
+	// about the connection table, and about the handshake check.
 	tableWarnInterval = 60 * BaseInterval
+	// handshakeAttempts is how many TCP handshakes an owner whose upload
+	// timed out tries at once, to tell a congested path from a dead one. On
+	// AWS, forwarding more small UDP packets than the CPU could process lost
+	// 64 to 87% of pings through the NAT. At 87%, all 40 fail in 0.4% of
+	// rounds. A step-down needs two such rounds in a row, which at about
+	// 1.5 s a round come about once a day. Each failed attempt keeps an
+	// entry in the connection table for up to 2 minutes, a few thousand
+	// entries while an overload lasts.
+	handshakeAttempts = 40
 )
 
 // StaleAfter returns how old a report from rounds of the given interval may
@@ -111,6 +121,12 @@ type Report struct {
 	// PeerConfirmedFailure means the peer proved its path while this NAT was
 	// failing, so the failure is this NAT's. An owner steps down only then.
 	PeerConfirmedFailure bool `json:"peer_confirmed_failure"`
+	// Congested means this NAT is serving and its upload timed out, but
+	// some of its handshakes through the shared Elastic IP completed while
+	// others were lost. The path works but drops packets, as when more
+	// traffic arrives than the NAT can forward, so the round doesn't count as
+	// a path failure.
+	Congested bool `json:"congested"`
 	// CanTakeover means this NAT can forward and is not in maintenance or cooldown.
 	CanTakeover     bool `json:"can_takeover"`
 	PeerReady       bool `json:"peer_ready"`
@@ -141,9 +157,13 @@ type Config struct {
 	Release string
 }
 
-// Prober sends one verified upload.
+// Prober checks a path.
 type Prober interface {
+	// Upload sends one verified upload.
 	Upload(ctx context.Context, target probe.Target) (probe.Flow, error)
+	// Handshakes opens attempts TCP connections to target's receiver at once
+	// and returns how many connected.
+	Handshakes(ctx context.Context, target probe.Target, attempts int) (int, error)
 }
 
 // Conntrack reads conntrackd's counters and copied connections.
@@ -191,7 +211,7 @@ type timedFlow struct {
 // roundState is the part of a round's result that is logged as soon as it
 // changes.
 type roundState struct {
-	healthy, tableFull, ready, serving, peerReady bool
+	healthy, tableFull, congested, ready, serving, peerReady bool
 }
 
 // Monitor runs health rounds and keeps the latest report.
@@ -222,6 +242,8 @@ type Monitor struct {
 	tableRead bool
 	// These limit how often each warning about the connection table repeats.
 	tableUnread, nearlyFull, full, fullProbe warning
+	// These limit how often each warning about the handshake check repeats.
+	unchecked, congestedProbe warning
 	// logged is the state of the last logged round, logged at loggedAt.
 	logged    roundState
 	loggedAt  time.Duration
@@ -323,6 +345,19 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	// Read after the upload, so the drops since the last reading include the
 	// upload's packets.
 	tableFull := m.readTable(ctx, now)
+	// Lost packets fail an upload only by running it out of time, since TCP
+	// resends them. Any other failure, such as a reply showing the wrong
+	// source address, came back over the path, so it counts without a check.
+	// A standby's load doesn't move with the shared ENI, so its failures
+	// count too.
+	completed, checked := 0, false
+	if serving && !tableFull && errors.Is(probeErr, probe.ErrTimeout) {
+		completed, checked = m.handshakes(ctx, target, now)
+		// The check takes up to half a second, and the report should be as
+		// old as the round's end.
+		now = m.deps.Now()
+	}
+	congested := checked && completed > 0 && completed < handshakeAttempts
 
 	// countedFailure is whether this round counts as failed.
 	countedFailure := false
@@ -339,6 +374,23 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		if m.fullProbe.due(now) {
 			slog.Warn("the health probe failed because this NAT's connection table is full, so it doesn't count as a path failure",
 				slog.Any("probe_error", probeErr), slog.Int("connections", m.table.Connections), slog.Int("max_connections", m.table.Max))
+		}
+	case congested:
+		// The upload leaves through the shared Elastic IP and is translated
+		// like worker traffic, so when forwarding loses packets it loses
+		// the upload's too, and the upload runs out of time. The handshakes
+		// that completed prove the path delivers both ways, and the peer
+		// would get the same traffic on taking over. On AWS, an owner
+		// forwarding more UDP than its CPU could process stepped down, the
+		// new owner did too seconds later, and the pair moved 2 to 4 times
+		// a minute, each move pausing forwarding for about 10 s. So this
+		// round ends any run of failures. It ends any run of successes too,
+		// because no upload passed, so this NAT stops offering to take over
+		// and the peer's updater doesn't reboot the only NAT that could.
+		m.failures, m.successes = 0, 0
+		if m.congestedProbe.due(now) {
+			slog.Warn("the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure",
+				slog.Any("probe_error", probeErr), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts))
 		}
 	default:
 		m.failures, m.successes = m.failures+1, 0
@@ -428,6 +480,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		ProvenWhilePeerFailing: m.peerFailing && healthy,
 		PeerConfirmedFailure:   peerOK && peer.ProvenWhilePeerFailing,
 		Release:                m.config.Release,
+		Congested:              congested,
 		Serving:                serving,
 		PeerRelease:            peer.Release,
 		PeerServing:            peerOK && peer.Serving,
@@ -448,20 +501,27 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	// up almost all of natpair's logs, about 36,000 lines a day per owner.
 	// Failed rounds and changes are logged at once, and otherwise one round
 	// each logInterval.
-	state := roundState{healthy: healthy, tableFull: tableFull, ready: ready, serving: serving, peerReady: report.PeerReady}
+	state := roundState{healthy: healthy, tableFull: tableFull, congested: congested, ready: ready, serving: serving, peerReady: report.PeerReady}
 	// Each round that counts as failed is logged. Others, including failed
-	// rounds that don't count, such as with a full table, which can last
-	// hours, are logged when something changes and once a minute.
+	// rounds that don't count, such as with a full table or a congested
+	// path, which can last hours, are logged when something changes and
+	// once a minute.
 	if countedFailure || !m.hasLogged || state != m.logged || now-m.loggedAt >= logInterval {
 		m.logged, m.loggedAt, m.hasLogged = state, now, true
-		slog.Info("health round",
+		attrs := []any{
 			slog.Bool("healthy", healthy), slog.Bool("copied", verified), slog.Bool("ready", ready),
 			slog.Bool("peer_ready", report.PeerReady), slog.Duration("duration", m.deps.Now()-started),
 			slog.Bool("serving", serving), slog.Any("probe_error", probeErr), slog.Bool("table_full", tableFull),
+			slog.Bool("congested", congested),
 			slog.Int("tracked_connections", tracked), slog.Int("copied_connections", copied),
 			slog.Int("peer_tracked_connections", peer.TrackedConnections),
 			slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
-			slog.String("release", m.config.Release))
+			slog.String("release", m.config.Release),
+		}
+		if checked {
+			attrs = append(attrs, slog.Int("handshakes", completed))
+		}
+		slog.Info("health round", attrs...)
 	}
 	return report
 }
@@ -502,6 +562,28 @@ func (m *Monitor) readTable(ctx context.Context, now time.Duration) bool {
 		}
 	}
 	return full
+}
+
+// handshakes tries handshakeAttempts TCP handshakes through target's path,
+// after an upload that timed out, and returns how many completed. It reports
+// false if it couldn't try, such as when the receiver's address is unknown.
+//
+// Some but not all completing means the path delivers but loses packets.
+// None completing means it's dead. All completing means small packets get
+// through without loss, so the upload failed for another reason, such as a
+// path that drops full-size packets, and the failure counts. A handshake
+// can't be forged from off the path, because the answer must acknowledge
+// the random sequence number the kernel chose for the SYN, and a flood can
+// only make handshakes fail.
+func (m *Monitor) handshakes(ctx context.Context, target probe.Target, now time.Duration) (int, bool) {
+	completed, err := m.deps.Prober.Handshakes(ctx, target, handshakeAttempts)
+	if err != nil {
+		if m.unchecked.due(now) {
+			slog.Warn("failed to check whether the path is alive, so the failed probe counts", slog.Any("err", err))
+		}
+		return 0, false
+	}
+	return completed, true
 }
 
 // warning limits a repeated warning to one each tableWarnInterval.

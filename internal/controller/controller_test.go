@@ -397,6 +397,64 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+func TestCongestedOwnerHandsOver(t *testing.T) {
+	// congested is an owner whose uploads time out while some handshakes
+	// complete, so it publishes no probe flows, and its peer can't show it
+	// copied them.
+	congested := health.Report{Ready: true, CanForward: true, CanTakeover: true, Congested: true}
+	{
+		// Maintenance on a congested owner hands over to a peer that can
+		// take over, without waiting for the peer to verify its copies
+		logs := &syncBuffer{}
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+		defer slog.SetDefault(previous)
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.PeerCanTakeover = true
+		f.setReport(report)
+		require.NoError(t, controller.RequestMaintenance(f.stateDir))
+		require.Eventually(t, func() bool { return !f.controller.Serving() }, waitFor, 10*time.Millisecond)
+		assert.True(t, f.released(t))
+		assert.Contains(t, logs.String(), "connections the peer hasn't copied may reset")
+	}
+	{
+		// A handover request, which only upgrades make, still waits for a
+		// ready peer
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.PeerCanTakeover = true
+		f.setReport(report)
+		f.controller.SetHandover(true)
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving(), "the peer is not ready")
+	}
+	{
+		// An owner that isn't congested still waits for a ready peer
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		f.setReport(health.Report{Ready: true, CanForward: true, CanTakeover: true, PathHealthy: true, PeerCanTakeover: true})
+		require.NoError(t, controller.RequestMaintenance(f.stateDir))
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving(), "the peer is not ready")
+	}
+	{
+		// A congested owner waits while its peer can't take over
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		f.setReport(congested)
+		require.NoError(t, controller.RequestMaintenance(f.stateDir))
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving(), "the peer can't take over")
+	}
+}
+
 func TestContendWarnings(t *testing.T) {
 	// A contender that can't reach the lease store warns once, not on every attempt
 	logs := &syncBuffer{}

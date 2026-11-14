@@ -299,7 +299,12 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 			}
 		} else {
 			// Maintenance and a handover request hand over only to a peer that
-			// passes its forwarding and copied-connection checks.
+			// passes its forwarding and copied-connection checks. A congested
+			// owner's uploads time out, so it publishes no probe flows, and its
+			// peer can never show it copied them. So while this NAT is
+			// congested, maintenance needs only a peer that can take over.
+			// Handover requests come from upgrades, which wait for a ready
+			// peer.
 			if !report.Stale && report.PeerReady {
 				if c.maintenanceRequested() {
 					return errMaintenance
@@ -307,6 +312,9 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 				if c.handover.Load() {
 					return errHandover
 				}
+			} else if !report.Stale && report.Congested && report.PeerCanTakeover && c.maintenanceRequested() {
+				slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
+				return errMaintenance
 			}
 			if !storeDown {
 				if _, err := l.Valid(); err != nil {
@@ -421,7 +429,8 @@ func (c *Controller) SetHandover(want bool) {
 
 // RequestMaintenance takes the NAT in stateDir out of rotation. An owner hands
 // ownership to its peer once the peer passes its forwarding and
-// copied-connection checks, and a standby stops offering to take over. The
+// copied-connection checks, or, while the owner is congested, once the peer
+// can take over. A standby stops offering to take over. The
 // request persists until [Resume].
 func RequestMaintenance(stateDir string) error {
 	if err := os.WriteFile(filepath.Join(stateDir, maintenanceFile), nil, 0o600); err != nil {
