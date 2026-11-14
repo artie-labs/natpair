@@ -121,7 +121,10 @@ To go back, point the routes at the NAT Gateway again.
 To reboot, stop or replace the owner, hand over first:
 
 1. On the owner, run `sudo natpair maintenance`. It hands over once the
-   standby passes its checks.
+   standby passes its checks. If the owner's path is congested (see
+   [troubleshooting](troubleshooting.md#the-health-probe-failed-but-the-path-is-alive)),
+   it hands over as soon as the standby has proven its own path, and
+   connections the standby hasn't copied may reset.
 2. Wait for the other NAT to log `forwarding open`, and check that worker
    traffic works.
 3. Reboot, stop or replace the old owner. It no longer holds the shared ENI.

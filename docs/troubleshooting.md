@@ -183,7 +183,9 @@ traffic. Its `health round` lines show `"congested":true`. Check the NAT's
 CPU with `top` (high `si` means the kernel is busy forwarding) and its
 [network limits](#the-nat-is-too-small). If neither is high, the loss is
 likely the owner's own, such as a fault in its host, so run `sudo natpair
-maintenance` on it to hand over. natpair logs this, and the `health round`
+maintenance` on it to hand over. While the owner is congested, it hands over to a standby that has proven its own path, without waiting for the standby to verify its copied connections,
+and logs `handing over to a peer that hasn't verified its copied
+connections`. Connections the standby hasn't copied may reset. natpair logs this, and the `health round`
 line, at most once a minute.
 
 ### `failed to check whether the path is alive, so the failed probe counts`

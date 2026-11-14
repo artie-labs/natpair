@@ -106,9 +106,11 @@ closes each one as soon as it connects:
   time. So the round doesn't count as failed, and it ends any run of failed
   rounds.
 - **None complete.** The path is dead, and the round counts as failed.
-- **All complete.** Small packets get through without loss, so the upload
-  failed for another reason, such as a path that drops full-size packets,
-  and the round counts as failed.
+- **All complete.** Small packets got through, so lost packets may not be
+  what failed the upload, as on a path that drops full-size packets. The
+  round counts as failed, as it did before the check. Under light loss all
+  40 can still complete, so a slightly overloaded owner can still step
+  down.
 
 The check runs only for an owner whose upload timed out while its
 connection table wasn't full. A failure that came back over the path, such
@@ -120,7 +122,10 @@ round counts as failed.
 The check can't tell why the path loses packets. Loss on the owner's path
 alone, such as from a fault in its host, also counts as congested, so the
 owner keeps serving while some handshakes complete. Run `natpair
-maintenance` on it to hand over.
+maintenance` on it to hand over. A congested owner publishes no probe
+flows, so its standby can't show it copied them. So while the owner is
+congested, it hands over to a standby that has proven its own path, without waiting for the standby to verify its copied connections. Connections the standby hasn't
+copied may reset. A handover request works the same way.
 
 ## Taking over
 
@@ -227,11 +232,16 @@ old release. See [operations](operations.md#upgrade) for the steps.
   reach the source port the kernel chose for it. Flooding the NAT, from
   workers or from the internet to the shared address, can only make
   handshakes fail, which counts toward failing over. The limit: a path
-  that a fault leaves degraded but not dead, such as one losing 99% of
-  packets, or one that drops only full-size packets while a flood loses
-  some small ones, counts as congested for as long as that lasts, with no
-  time limit. An attacker can't cause such a fault, only add a flood while
-  it lasts.
+  that a fault leaves degraded but not dead, such as one losing up to
+  about 90% of packets, or one that drops only full-size packets while a
+  flood loses some small ones, counts as congested for as long as that
+  lasts, with no time limit. At 99% loss, all 40 handshakes usually fail,
+  and the owner fails over. An attacker can't cause such a fault, only add
+  a flood while it lasts. `natpair maintenance` still hands over from a
+  congested owner, to a standby that has proven its own path, so a person
+  with root on the owner can end it. The standby's copied connections
+  aren't verified then, which only risks resetting the ones it hasn't
+  copied.
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
   of its connections. Linux acts on one only if it matches a socket's
   addresses and ports. For TCP, its sequence number must also fall inside

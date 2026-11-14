@@ -157,7 +157,7 @@ func maintenance(_ context.Context, args []string) error {
 	if err := controller.RequestMaintenance(config.StateDir); err != nil {
 		return err
 	}
-	fmt.Println("Maintenance requested. An active NAT hands over once its peer passes its checks. Check that the peer serves and traffic works through it before replacing this NAT.")
+	fmt.Println("Maintenance requested. An active NAT hands over once its peer passes its checks, or, while its path is congested, once the peer has proven its own path. Check that the peer serves and traffic works through it before replacing this NAT.")
 	return nil
 }
 
