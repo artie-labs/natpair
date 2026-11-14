@@ -239,11 +239,11 @@ func TestControllerLowersTheBudgetWhileTheNICStillDrops(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []uint64{423, 380, 342, 307, 276, 262}, budgets)
-	{
-		// Once the NIC keeps up, it clears as before
-		quiet := load{busyTicks: 5, received: 40_000, passed: [2]uint64{40_000, 0}}
-		cleared := changed(steps(&c, &n, quiet, 10))
-		require.Len(t, cleared, 1)
-		assert.Equal(t, Unlimited, cleared[0].Mode)
-	}
+	// The flood ends, but ENA's counter catches up a second late: NIC drops
+	// against almost no traffic, with the CPU idle. They aren't the budget's
+	// fault, so it clears instead of cutting again
+	late := load{busyTicks: 1, received: 100, dropped: 20_000, passed: [2]uint64{100, 0}}
+	decisions := changed(steps(&c, &n, late, 3))
+	require.Len(t, decisions, 1)
+	assert.Equal(t, Unlimited, decisions[0].Mode)
 }
