@@ -11,7 +11,7 @@
 // the daemon's CPU samples were forwarding work, and its lease renewals and
 // DNS lookups timed out. With threaded NAPI (Linux 5.12 and later), each
 // receive queue is polled by a kernel thread named "napi/<interface>-<id>",
-// and the daemon used 0.9% of a CPU with no timeouts.
+// and the daemon used about 1% of a CPU with no timeouts.
 package napi
 
 import (

@@ -133,14 +133,13 @@ daemon depends on the kernel:
 
 NAPI is how Linux polls a network device's receive queues. So the daemon turns
 on threaded NAPI (writes 1 to `/sys/class/net/<interface>/threaded`) for every
-ENI: when it starts, right
-after the shared ENI comes up during a takeover, and every 5 s, which also
-catches an ENI that wasn't up yet. Each receive queue is then polled by a
-kernel thread named `napi/<interface>-<id>`, at the default priority, and the
-scheduler shares the CPU between those threads and the daemon as it did with
-ksoftirqd on 6.1. On the same 6.18 NAT and load with threaded NAPI on, the
-daemon used 0.9% of a CPU, with no lease or DNS timeouts, and the NAT
-forwarded 2.7% less.
+ENI: when it starts, right after the shared ENI comes up during a takeover,
+and every 5 s, which also catches an ENI that wasn't up yet. Each receive
+queue is then polled by a kernel thread named `napi/<interface>-<id>`, at the
+default priority, and the scheduler shares the CPU between those threads and
+the daemon as it did with ksoftirqd on 6.1. On the same 6.18 NAT and load with
+threaded NAPI on, the daemon used about 1% of a CPU, with no lease or DNS
+timeouts, and the NAT forwarded 4 to 6% less.
 
 The daemon leaves interfaces without a device, such as `lo`, alone, and
 leaves any value other than 0 in `threaded`, such as 2 for busy polling on
