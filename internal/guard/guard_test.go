@@ -117,6 +117,9 @@ func TestControllerEngagesAndClears(t *testing.T) {
 
 	measure := c.Step(n.next(flood))
 	assert.Equal(t, Decision{Mode: Measuring, Changed: true, Budget: math.MaxUint64, Busiest: 1, DropShare: 0.5}, measure)
+	// Attaching the program restarted the interface, so the first reading
+	// after it only starts the measured interval
+	assert.Equal(t, Decision{Mode: Measuring}, c.Step(n.next(flood)))
 
 	// While measuring, CPU 0 passed 50,000 packets in 100 ms and CPU 1
 	// 10,000. The budget is 90% of the busiest CPU's 500,000 a second, per
@@ -189,7 +192,7 @@ func TestControllerNeedsBothAFullCPUAndNICDrops(t *testing.T) {
 func TestControllerStandsDownWhenNothingReachesIt(t *testing.T) {
 	var c Controller
 	var n nat
-	steps(&c, &n, flood, 11)
+	steps(&c, &n, flood, 12)
 	require.Equal(t, Measuring, c.Mode())
 	// The CPU is full of something else: the program passed nothing
 	assert.Equal(t, Decision{Mode: Unlimited, Changed: true}, c.Step(n.next(flood)))
@@ -201,7 +204,7 @@ func TestControllerBudgetLetsAtLeastOnePacketThrough(t *testing.T) {
 	// 10 packets a second is 0.009 a tick, and a budget of 0 means no limit
 	var c Controller
 	var n nat
-	steps(&c, &n, flood, 11)
+	steps(&c, &n, flood, 12)
 	decision := c.Step(n.next(load{busyTicks: 10, received: 1, dropped: 1, passed: [2]uint64{1, 0}}))
 	assert.Equal(t, Decision{Mode: Limiting, Changed: true, Budget: 1, Rate: 10, Busiest: 1, DropShare: 0.5}, decision)
 }

@@ -157,9 +157,10 @@ The daemon couldn't attach or run the overload guard, and the `err` field
 says why. The NAT forwards as it would without the guard. If `err` says
 `failed to attach the overload guard`, check that nothing else attached an
 XDP program to the shared ENI (`ip -d link show`), and that its MTU is at
-most 3,502 bytes, the most ENA allows with XDP. If `err` names the receive
-ring, the guard is attached but the ring kept its size. The daemon tries
-again every 5 s, and logs the same failure once.
+most 3,502 bytes, the most ENA allows with XDP. The daemon tries again at
+the next overload, and logs the same failure once. `overload guard failed
+to raise the receive ring` means it sheds the flood with the ring's current
+size.
 
 ### `this boot was prepared by another release, so this NAT reports none until it reboots`
 

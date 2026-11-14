@@ -394,19 +394,14 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 }
 
 // ActivateShared configures the shared ENI, then turns on threaded NAPI for
-// it and attaches the overload guard before forwarding opens. The attached
-// ENI is a new network device that starts with threaded NAPI off. Attaching
-// the guard restarts an ENA interface, which costs no gap while forwarding
-// is still closed, and the check of the shared Elastic IP that follows
-// retries until the interface is back.
+// it before forwarding opens and has the overload guard watch it. The
+// attached ENI is a new network device that starts with threaded NAPI off.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
 	}
-	// The guard first: attaching it and raising the ring restart the
-	// interface, and threaded NAPI then covers the receive queues they leave.
-	s.guard.Ensure(ctx)
 	threadReceive("", napi.Enable)
+	s.guard.Ensure(ctx)
 	return nil
 }
 

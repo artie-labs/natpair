@@ -110,17 +110,18 @@ type Reading struct {
 	// rx_over_errors, and none in rx_dropped.
 	Received, Dropped uint64
 	// Passed and Shed are the program's per-CPU counters of packets it
-	// passed and dropped while it had a budget.
+	// passed and dropped while it had a budget, nil while it isn't attached.
 	Passed, Shed []uint64
 }
 
-// Mode is what the program is doing.
+// Mode is what the guard is doing.
 type Mode int
 
 const (
-	// Unlimited passes everything.
+	// Unlimited has no program attached.
 	Unlimited Mode = iota
-	// Measuring passes everything and counts it, for one Interval.
+	// Measuring attaches the program, which passes everything and counts
+	// it, for two readings.
 	Measuring
 	// Limiting drops worker packets past the budget.
 	Limiting
@@ -130,9 +131,10 @@ const (
 type Decision struct {
 	// Mode is the mode after the reading.
 	Mode Mode
-	// Changed is set when Budget must be written to the program.
+	// Changed is set when the program must be attached with Budget
+	// (Measuring), given Budget (Limiting) or detached (Unlimited).
 	Changed bool
-	// Budget is the packets each CPU passes per tick, 0 for no limit.
+	// Budget is the packets each CPU passes per tick.
 	Budget uint64
 	// Busiest is the busiest CPU's busy share over the last 300 ms.
 	// DropShare is the share of packets the shared ENI dropped over the last
@@ -158,8 +160,10 @@ type Controller struct {
 	from  Reading
 	since int
 	// engagedBy is the decision that started measuring, which the engaged
-	// log line reports.
+	// log line reports, and measuring is set once the reading that starts
+	// the measured interval is in.
 	engagedBy Decision
+	measuring bool
 }
 
 // Mode returns what the program is doing.
@@ -178,6 +182,12 @@ func (c *Controller) Step(r Reading) Decision {
 	c.record(r)
 	switch c.mode {
 	case Measuring:
+		if !c.measuring {
+			// The first reading after the program attached, which restarts
+			// an ENA interface, so the rate comes from the next interval.
+			c.measuring, c.from = true, r
+			return Decision{Mode: Measuring}
+		}
 		return c.limit(r)
 	case Limiting:
 		c.since++
