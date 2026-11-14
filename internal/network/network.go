@@ -158,17 +158,17 @@ func (n *Network) protectHost(ctx context.Context) error {
 	return n.ensureRule(ctx, "filter", "INPUT", "-j", inputChain)
 }
 
-// routePeer sends traffic to the peer, conntrackd's copies above all,
-// through this NAT's own interface from its own address. conntrackd sends
-// from an unbound socket, so the route decides. Once the shared ENI is
-// attached, its address adds a route to the same subnet that wins over the
-// own interface's, so the copies left through the shared ENI from the shared
-// address. Its MTU is 1500 and the own interface's 9001, so conntrackd's
-// datagrams of about 8.9 KB left as 7 fragments each, and they counted
-// against the shared ENI's packet allowance. On AWS, after a full resync
-// under connection churn, the shared ENI sent about 130,000 packets a second
-// while receiving 40,000, and AWS dropped about 90,000 a second. This host
-// route is more specific than either subnet route, so it always wins.
+// routePeer sends traffic to the peer, such as conntrackd's copies, through
+// this NAT's own interface from its own address. conntrackd sends from an
+// unbound socket, so the route picks both. Once the shared ENI is attached,
+// its address adds a route to the same subnet that wins over the own
+// interface's, and the copies left through the shared ENI from the shared
+// address. The shared ENI's MTU is 1500 and the own interface's 9001, so each
+// datagram of about 8.9 KB left as 7 fragments, all counted against the NAT's
+// packets-per-second allowance. On AWS, after a full resync under connection
+// churn, the shared ENI sent about 130,000 packets a second while receiving
+// 40,000, and AWS dropped about 90,000 a second. This host route is more
+// specific than either subnet route, so it always wins.
 func (n *Network) routePeer(ctx context.Context) error {
 	_, err := n.run.Run(ctx, commandTimeout, "ip", "route", "replace", netip.PrefixFrom(n.cfg.PeerIP, 32).String(),
 		"dev", n.cfg.Instance.Interface, "src", n.cfg.Instance.PrivateIP.String())
