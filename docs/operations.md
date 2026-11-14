@@ -169,7 +169,10 @@ says what it's waiting for.
 A release that never gets ready stays on the standby, and traffic stays on the
 owner's old release. To roll back, pin the previous release and its SHA-256
 again, and the standby moves back. If the new release can't run at all, the
-standby can't move itself back, so replace it.
+standby can't move itself back, so replace it. Installing natpair turns
+irqbalance off, and moving back to a release from before that change, 0.1.1
+or earlier, leaves it off. Run `sudo systemctl enable --now irqbalance` on
+each NAT to turn it back on.
 
 A NAT you put in maintenance by hand isn't upgraded until you run
 `natpair resume`.
