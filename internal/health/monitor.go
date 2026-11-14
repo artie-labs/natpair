@@ -329,9 +329,10 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		m.failures, m.successes = 0, m.successes+1
 	case tableFull:
 		// A full table drops the upload's new connection, as it drops new
-		// worker connections. The peer would load the same copied table on
-		// taking over, and fail the same way, so this round proves nothing
-		// about the path and counts neither way. On AWS, an owner whose table
+		// worker connections. The peer loads copies of this NAT's TCP
+		// connections on taking over, so when TCP fills the table, as on AWS,
+		// it would fail the same way. This round proves nothing about the
+		// path and counts neither way. On AWS, an owner whose table
 		// filled stepped down, and so did the NAT that took over from it.
 		if m.fullProbe.due(now) {
 			slog.Warn("the health probe failed because this NAT's connection table is full, so it doesn't count as a path failure",

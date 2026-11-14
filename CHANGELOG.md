@@ -11,9 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A full connection table cut off the NAT's own traffic: under 3,000 new
   worker connections a second, the owner's DNS lookups failed and it stepped
-  down. The NAT's own TCP connections, its UDP with the VPC and with Amazon
-  Time Sync and the Route 53 Resolver, and the peer's copies now skip the
-  connection table. The host firewall accepts their replies without state,
+  down. Traffic within the NAT, its own TCP connections, its UDP with the
+  VPC and with Amazon Time Sync and the Route 53 Resolver, and the peer's
+  copies now skip the connection table. The host firewall accepts their replies without state,
   only on the NAT's own ephemeral ports, with rate-limited ICMP errors. The
   own canary's probes now use ports 61000 to 65535. NATs log `the connection
   table is nearly full` at 90%. NATs set this up at boot, so pairs pick it
@@ -26,7 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection table is full`.
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
-  second. NATs set this at boot.
+  second. The NAT may then give a closed connection's address and port to a
+  new one sooner, so a connection to a server that closed the old one first
+  can take about 1 s longer to open. NATs set this at boot.
 
 ### Security
 

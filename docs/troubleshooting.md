@@ -158,8 +158,9 @@ NATs. natpair logs this at most once a minute.
 The full message ends with `so it doesn't count as a path failure`. The
 NAT's upload failed while its table was full, because the kernel dropped
 the upload's new connection as it drops new worker connections. The owner
-doesn't step down for it: the standby would load the same copied table and
-fail the same way. Its `health round` lines show `"table_full":true`. Fix
+doesn't step down for it: the standby loads copies of the owner's TCP
+connections when it takes over, so when TCP fills the table, it would fail
+the same way. Its `health round` lines show `"table_full":true`. Fix
 the table as for
 [`the connection table is full`](#the-connection-table-is-full). natpair
 logs this at most once a minute.

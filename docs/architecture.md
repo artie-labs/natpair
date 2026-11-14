@@ -88,8 +88,9 @@ usual.
 
 A round whose upload failed while the NAT's connection table was full
 doesn't count as failed. The kernel dropped the upload's new connection, as
-it drops new worker connections, and the standby would load the same copied
-table on taking over and fail the same way. Full means the kernel dropped
+it drops new worker connections. The standby loads copies of the owner's
+TCP connections on taking over, so when TCP fills the table, it would fail
+the same way. Full means the kernel dropped
 packets it couldn't track since the last round while the table was at least
 90% full.
 
@@ -170,7 +171,8 @@ old release. See [operations](operations.md#upgrade) for the steps.
   answers on worker ports and silence for the rest. Forwarded traffic
   doesn't pass through the firewall.
 - **Untracked connections.** These skip the connection table, both ways:
-  TCP on the NAT's own ephemeral ports (32768 to 60999), UDP between those
+  traffic within the NAT, on its loopback interface, such as DNS through a
+  local stub resolver; TCP on the NAT's own ephemeral ports (32768 to 60999), UDP between those
   ports and the VPC, the peer's copies to port 3780, and UDP with Amazon Time
   Sync (169.254.169.123, port 123) and the Route 53 Resolver
   (169.254.169.253, port 53). Without state, the firewall accepts only their
@@ -185,8 +187,8 @@ old release. See [operations](operations.md#upgrade) for the steps.
     ephemeral ports. Nothing outside the instance can send from a
     link-local address.
   - ICMP fragmentation-needed, host-unreachable, port-unreachable and
-    time-exceeded messages to the NAT's own address, limited to 50 a
-    second. Errors about tracked connections are accepted as before.
+    time-exceeded messages to the NAT's own address, at most 50 a second
+    of each type. Errors about tracked connections are accepted as before.
   The NAT's own sockets keep to the ephemeral range, and the own-path probes
   use ports 61000 to 65535, which stay tracked.
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
