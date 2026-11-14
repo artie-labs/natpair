@@ -174,14 +174,38 @@ standby can't move itself back, so replace it.
 A NAT you put in maintenance by hand isn't upgraded until you run
 `natpair resume`.
 
+An upgrade doesn't change the NATs' Amazon Linux image or kernel. New NATs
+boot the newest image on the module's `kernel` line, 6.18 by default. To move
+a running pair to another line, or to a newer image on the same line,
+[replace the NATs](#replace-a-nat). AWS adds a new long-term support kernel
+line to Amazon Linux 2023 each year and supports each for four years, though
+not past Amazon Linux 2023's own end of life on June 30, 2029
+([kernel lifecycle](https://docs.aws.amazon.com/linux/al2023/ug/kernel-lifecycle.html)).
+So plan to move `kernel` forward about once a year. A new line first needs a
+module release that adds it to the values `kernel` accepts.
+
+6.12 and 6.18 need a daemon that turns on threaded NAPI, as every release from
+this module's version on does. So keep `release` on the module's version, or
+set `kernel = "6.1"`. On a 6.12 or 6.18 pair, roll back only to such a
+release. On an older one, a NAT whose forwarding fills its CPU times out its
+lease renewals and DNS lookups again. Before this module version, the image
+lookup could already put NATs on 6.12 or 6.18, so check `uname -r` on each
+NAT of a pair that runs an older release. If one runs 6.12 or 6.18, upgrade
+`release`, or set `kernel = "6.1"` and replace that NAT.
+
+Move off a line before its support ends. AWS then stops publishing images for
+it, and each image is deprecated 90 days after its release. Once the last one
+is deprecated, the image lookup finds none, and every `terraform plan` for the
+pair fails, even though running NATs keep their image.
+
 ## Replace a NAT
 
 Running NATs keep the image, configuration and boot script they launched
 with. These changes need new NATs:
 
 - `worker_cidrs`, `max_connections`, `release_url`,
-  `datadog_api_key_secret_arn` and `datadog_site`, and a new CIDR on the VPC
-  when `worker_cidrs` is left at its default
+  `datadog_api_key_secret_arn`, `datadog_site` and `kernel`, and a new CIDR
+  on the VPC when `worker_cidrs` is left at its default
 - a newer Amazon Linux image
 - a module upgrade whose changelog says so
 

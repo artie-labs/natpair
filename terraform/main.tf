@@ -22,13 +22,16 @@ data "aws_vpc" "this" {
   id = data.aws_subnet.public.vpc_id
 }
 
+# The newest Amazon Linux 2023 image on the chosen kernel line. Without the
+# line in the name, most_recent picked whichever line AWS published last, so
+# new NATs booted 6.1, 6.12 or 6.18 depending on the day.
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["al2023-ami-2023.*-kernel-*-arm64"]
+    values = ["al2023-ami-2023.*-kernel-${var.kernel}-arm64"]
   }
 }
 

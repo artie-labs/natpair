@@ -46,6 +46,18 @@ variable "instance_type" {
   type        = string
 }
 
+variable "kernel" {
+  description = "Amazon Linux 2023 kernel line the NATs boot: 6.1, 6.12 or 6.18. New NATs use the newest image on that line. 6.18 is the newest long-term support kernel AWS offers for Amazon Linux 2023, with the longest support ahead of it. Running NATs keep their image, so a new line applies when you replace the NATs. 6.12 and 6.18 need a release that turns on threaded NAPI, the one from this module version or later. With an older release, use 6.1."
+  type        = string
+  default     = "6.18"
+  nullable    = false
+
+  validation {
+    condition     = contains(["6.1", "6.12", "6.18"], var.kernel)
+    error_message = "kernel must be one of the Amazon Linux 2023 kernel lines: 6.1, 6.12 or 6.18."
+  }
+}
+
 variable "max_connections" {
   description = "Most connections each NAT tracks and copies to its peer, a power of two from 65,536 to 4,194,304. Null uses natpair's default, 262,144. A full table costs about 80 MB per 262,144 connections in the kernel, and as much again in conntrackd. NATs read it at first boot, so changing it needs new NATs."
   type        = number
