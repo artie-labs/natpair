@@ -90,7 +90,7 @@ func bootstrap(ctx context.Context, args []string) error {
 	if err := network.New(cfg, f, network.SystemRunner{}).Bootstrap(ctx); err != nil {
 		return err
 	}
-	spreadInterrupts("")
+	spreadInterrupts("", irq.Spread)
 	return writeBootedRelease(config.BootedReleasePath, release)
 }
 
@@ -296,16 +296,17 @@ func keepInterruptsSpread(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		lastErr = spreadInterrupts(lastErr)
+		lastErr = spreadInterrupts(lastErr, irq.Spread)
 	}
 }
 
-// spreadInterrupts puts queue n of each ENI on CPU n. A failure only costs
-// forwarding capacity, so it is logged, and only when it differs from
-// lastErr, the previous pass's failure, so a lasting one isn't logged every
-// 5 s. It returns this pass's failure, or "" if there was none.
-func spreadInterrupts(lastErr string) string {
-	moved, err := irq.Spread()
+// spreadInterrupts runs spread, normally [irq.Spread], which puts queue n of
+// each ENI on CPU n. A failure only costs forwarding capacity, so it is
+// logged, and only when it differs from lastErr, the previous pass's failure,
+// so a lasting one isn't logged every 5 s. It returns this pass's failure, or
+// "" if there was none.
+func spreadInterrupts(lastErr string, spread func() (int, error)) string {
+	moved, err := spread()
 	if moved > 0 {
 		slog.Info("spread network queue interrupts across the CPUs", slog.Int("moved", moved))
 	}

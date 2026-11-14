@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 )
@@ -26,17 +25,18 @@ var queuePattern = regexp.MustCompile(`-Tx-Rx-(\d+)$`)
 // Spread moves each ENA queue interrupt to its CPU from [plan], writing only
 // those that are elsewhere. It returns how many it moved. Finding no queue
 // interrupts is an error, since irqbalance is off and nothing else places
-// them.
+// them. An interrupt that goes away while Spread runs, as when the shared ENI
+// detaches, is skipped.
 func Spread() (int, error) {
-	return spread("/proc", runtime.NumCPU())
+	return spread("/proc")
 }
 
-func spread(proc string, cpus int) (int, error) {
+func spread(proc string) (int, error) {
 	interrupts, err := os.ReadFile(filepath.Join(proc, "interrupts"))
 	if err != nil {
 		return 0, fmt.Errorf("failed to read interrupts: %w", err)
 	}
-	placements := plan(string(interrupts), cpus)
+	placements := plan(string(interrupts))
 	if len(placements) == 0 {
 		return 0, errors.New("found no ENA queue interrupts in /proc/interrupts")
 	}
@@ -46,8 +46,6 @@ func spread(proc string, cpus int) (int, error) {
 		path := filepath.Join(proc, "irq", strconv.Itoa(p.irq), "smp_affinity_list")
 		current, err := os.ReadFile(path)
 		if errors.Is(err, fs.ErrNotExist) {
-			// The interrupt went away after /proc/interrupts was read, as
-			// when the shared ENI detaches.
 			continue
 		}
 		if err != nil {
@@ -58,7 +56,11 @@ func spread(proc string, cpus int) (int, error) {
 		if strings.TrimSpace(string(current)) == cpu {
 			continue
 		}
-		if err := os.WriteFile(path, []byte(cpu), 0o644); err != nil {
+		err = os.WriteFile(path, []byte(cpu), 0o644)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to move interrupt %d to CPU %s: %w", p.irq, cpu, err))
 			continue
 		}
@@ -74,13 +76,21 @@ type placement struct {
 }
 
 // plan returns where each ENA queue interrupt in interrupts, the contents of
-// /proc/interrupts, should run: queue n on CPU n modulo cpus.
-func plan(interrupts string, cpus int) []placement {
-	if cpus < 1 {
+// /proc/interrupts, should run: queue n on the nth online CPU, wrapping
+// around. The header line names the online CPUs, such as "CPU0 CPU1".
+func plan(interrupts string) []placement {
+	header, rows, _ := strings.Cut(interrupts, "\n")
+	var cpus []int
+	for _, field := range strings.Fields(header) {
+		if cpu, err := strconv.Atoi(strings.TrimPrefix(field, "CPU")); err == nil {
+			cpus = append(cpus, cpu)
+		}
+	}
+	if len(cpus) == 0 {
 		return nil
 	}
 	var placements []placement
-	for _, line := range strings.Split(interrupts, "\n") {
+	for _, line := range strings.Split(rows, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -97,7 +107,7 @@ func plan(interrupts string, cpus int) []placement {
 		if err != nil {
 			continue
 		}
-		placements = append(placements, placement{irq: irq, cpu: queue % cpus})
+		placements = append(placements, placement{irq: irq, cpu: cpus[queue%len(cpus)]})
 	}
 	return placements
 }

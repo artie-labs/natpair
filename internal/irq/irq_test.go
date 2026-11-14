@@ -27,14 +27,26 @@ func TestPlan(t *testing.T) {
 	{
 		// Each interface's queue n goes to CPU n. The management interrupts
 		// and the timer stay where they are.
-		assert.Equal(t, []placement{{59, 0}, {60, 1}, {63, 0}, {64, 1}}, plan(interrupts, 2))
+		assert.Equal(t, []placement{{59, 0}, {60, 1}, {63, 0}, {64, 1}}, plan(interrupts))
 	}
 	{
 		// More queues than CPUs wrap around
-		assert.Equal(t, []placement{{59, 0}, {60, 0}, {63, 0}, {64, 0}}, plan(interrupts, 1))
+		const oneCPU = `           CPU0
+ 59:   18376402   ITS-MSI 524289 Edge      ens5-Tx-Rx-0
+ 60:        305   ITS-MSI 524290 Edge      ens5-Tx-Rx-1
+`
+		assert.Equal(t, []placement{{59, 0}, {60, 0}}, plan(oneCPU))
 	}
 	{
-		assert.Empty(t, plan("           CPU0\n 10:  5  GICv3  27 Level  arch_timer\n", 2))
+		// The CPUs are the header's, so an offline CPU 1 is skipped
+		const offlineCPU = `           CPU0       CPU2
+ 59:   18376402        117   ITS-MSI 524289 Edge      ens5-Tx-Rx-0
+ 60:        305   20117385   ITS-MSI 524290 Edge      ens5-Tx-Rx-1
+`
+		assert.Equal(t, []placement{{59, 0}, {60, 2}}, plan(offlineCPU))
+	}
+	{
+		assert.Empty(t, plan("           CPU0\n 10:  5  GICv3  27 Level  arch_timer\n"))
 	}
 }
 
@@ -54,7 +66,7 @@ func TestSpread(t *testing.T) {
 		writeFile(t, filepath.Join(proc, "irq", irq, "smp_affinity_list"), cpus+"\n")
 	}
 
-	moved, err := spread(proc, 2)
+	moved, err := spread(proc)
 	assert.Equal(t, 1, moved)
 	assert.NoError(t, err)
 	assert.Equal(t, "0-1\n", readFile(t, filepath.Join(proc, "irq", "24", "smp_affinity_list")))
@@ -62,19 +74,31 @@ func TestSpread(t *testing.T) {
 	assert.Equal(t, "1", readFile(t, filepath.Join(proc, "irq", "26", "smp_affinity_list")))
 	{
 		// A second pass finds them in place and writes nothing
-		moved, _ := spread(proc, 2)
+		moved, err := spread(proc)
 		assert.Zero(t, moved)
+		assert.NoError(t, err)
+	}
+	{
+		// A failed read is reported, and the other interrupts still move
+		proc := t.TempDir()
+		writeFile(t, filepath.Join(proc, "interrupts"), amd64Interrupts)
+		require.NoError(t, os.MkdirAll(filepath.Join(proc, "irq", "25", "smp_affinity_list"), 0o755))
+		writeFile(t, filepath.Join(proc, "irq", "26", "smp_affinity_list"), "0\n")
+		moved, err := spread(proc)
+		assert.Equal(t, 1, moved)
+		assert.ErrorContains(t, err, "failed to read interrupt 25's CPUs")
+		assert.Equal(t, "1", readFile(t, filepath.Join(proc, "irq", "26", "smp_affinity_list")))
 	}
 	{
 		// A non-ENA host, where irqbalance is off and nothing would place
 		// the queues
 		proc := t.TempDir()
 		writeFile(t, filepath.Join(proc, "interrupts"), "           CPU0\n 10:  5  GICv3  27 Level  arch_timer\n")
-		_, err := spread(proc, 2)
+		_, err := spread(proc)
 		assert.EqualError(t, err, "found no ENA queue interrupts in /proc/interrupts")
 	}
 	{
-		_, err := spread(t.TempDir(), 2)
+		_, err := spread(t.TempDir())
 		assert.ErrorIs(t, err, fs.ErrNotExist)
 	}
 }
