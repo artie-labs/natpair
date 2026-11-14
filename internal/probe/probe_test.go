@@ -310,7 +310,10 @@ func TestUploadTimeout(t *testing.T) {
 		assert.ErrorIs(t, err, ErrTimeout)
 	}
 	{
-		// A failure that came back in time isn't a timeout
+		// A wrong reply isn't a timeout, even if it's checked after the
+		// deadline, as by a starved CPU
+		t.Cleanup(func() { clock = time.Now })
+		clock = func() time.Time { return time.Now().Add(time.Hour) }
 		target := startReceiver(t, http.NotFoundHandler())
 		_, err := (&Client{}).Upload(t.Context(), target)
 		assert.EqualError(t, err, "probe receiver returned status 404 with 19 bytes")

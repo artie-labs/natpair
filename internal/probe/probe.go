@@ -151,8 +151,11 @@ func (e replyError) Error() string { return e.err.Error() }
 // ctx.Err can run after the I/O error comes back.
 func timedOut(ctx context.Context) bool {
 	deadline, ok := ctx.Deadline()
-	return ok && !time.Now().Before(deadline)
+	return ok && !clock().Before(deadline)
 }
+
+// clock tells the time for timedOut. Tests replace it.
+var clock = time.Now
 
 func (c *Client) upload(ctx context.Context, target Target) (Flow, error) {
 	address, err := parseURL(target.URL)
