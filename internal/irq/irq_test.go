@@ -103,6 +103,29 @@ func TestSpread(t *testing.T) {
 	}
 }
 
+func TestSpreadReportsAFailedWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write a read-only file")
+	}
+	// A failed write is reported, and the other interrupts still move
+	proc := t.TempDir()
+	writeFile(t, filepath.Join(proc, "interrupts"), `            CPU0       CPU1
+  25:    1830467          0  PCI-MSI-0000:00:05.0   1-edge      ens5-Tx-Rx-0
+  26:    1702931          0  PCI-MSI-0000:00:05.0   2-edge      ens5-Tx-Rx-1
+`)
+	readOnly := filepath.Join(proc, "irq", "25", "smp_affinity_list")
+	writeFile(t, readOnly, "1\n")
+	require.NoError(t, os.Chmod(readOnly, 0o444))
+	writeFile(t, filepath.Join(proc, "irq", "26", "smp_affinity_list"), "0\n")
+
+	moved, err := spread(proc)
+	assert.Equal(t, 1, moved)
+	assert.ErrorIs(t, err, fs.ErrPermission)
+	assert.ErrorContains(t, err, "failed to move interrupt 25 to CPU 0")
+	assert.Equal(t, "1\n", readFile(t, readOnly))
+	assert.Equal(t, "1", readFile(t, filepath.Join(proc, "irq", "26", "smp_affinity_list")))
+}
+
 func writeFile(t *testing.T, path, contents string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))

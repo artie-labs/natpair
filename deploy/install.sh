@@ -31,6 +31,6 @@ systemctl disable --now sshd.service
 # natpair spreads the network queues' interrupts across the CPUs itself.
 # irqbalance can move them all onto one CPU, which then forwards alone.
 if systemctl cat irqbalance.service >/dev/null 2>&1; then
-  systemctl disable --now irqbalance.service
+  systemctl disable irqbalance.service
 fi
 echo "Installed for the next boot. No services were started."
