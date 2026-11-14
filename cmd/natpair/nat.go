@@ -23,6 +23,7 @@ import (
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/irq"
+	"github.com/artie-labs/natpair/internal/napi"
 	"github.com/artie-labs/natpair/internal/network"
 	"github.com/artie-labs/natpair/internal/probe"
 	"github.com/artie-labs/natpair/internal/update"
@@ -256,6 +257,10 @@ func runNAT(ctx context.Context, args []string) error {
 		return nil
 	})
 	group.Go(func() error {
+		keepReceiveThreaded(ctx)
+		return nil
+	})
+	group.Go(func() error {
 		updater.Run(ctx)
 		return nil
 	})
@@ -312,6 +317,44 @@ func spreadInterrupts() {
 	}
 }
 
+// keepReceiveThreaded turns on threaded NAPI now and every 5 s. That catches
+// an ENI that wasn't up on the previous pass, and undoes anything else that
+// turned it off.
+func keepReceiveThreaded(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	lastErr := threadReceive("", napi.Enable)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		lastErr = threadReceive(lastErr, napi.Enable)
+	}
+}
+
+// threadReceive runs enable, normally [napi.Enable], which moves each ENI's
+// receive processing into kernel threads. Without them, on Linux 6.5 and
+// later, a NAT whose forwarding fills the CPU does that forwarding inside its
+// daemon's system calls, and the lease renewals time out. A failure is
+// logged, and only when it differs from lastErr, the previous pass's
+// failure, so a lasting one isn't logged every 5 s. It returns this pass's
+// failure, or "" if there was none.
+func threadReceive(lastErr string, enable func() (int, error)) string {
+	enabled, err := enable()
+	if enabled > 0 {
+		slog.Info("turned on threaded receive processing", slog.Int("interfaces", enabled))
+	}
+	if err == nil {
+		return ""
+	}
+	if err.Error() != lastErr {
+		slog.Warn("failed to turn on threaded receive processing", slog.Any("err", err))
+	}
+	return err.Error()
+}
+
 // localSteps performs the takeover steps on this host.
 type localSteps struct {
 	network   *network.Network
@@ -336,8 +379,15 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 	return s.network.ClaimShared(ctx, mac)
 }
 
+// ActivateShared configures the shared ENI, then turns on threaded NAPI for
+// it before forwarding opens. The attached ENI is a new network device that
+// starts with threaded NAPI off.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
-	return s.network.ActivateShared(ctx, mac)
+	if err := s.network.ActivateShared(ctx, mac); err != nil {
+		return err
+	}
+	threadReceive("", napi.Enable)
+	return nil
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {

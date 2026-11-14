@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
   second. NATs set this at boot.
+- On Linux 6.5 and later, such as the Amazon Linux 2023 6.18 kernel, a NAT
+  whose forwarding filled its CPU did that forwarding inside its daemon's
+  system calls, so its lease renewals and DNS lookups timed out. The daemon
+  now turns on threaded NAPI for every ENI, so receive processing runs in
+  kernel threads that the scheduler shares with the daemon. It does this at
+  start, when the shared ENI comes up during a takeover, and every 5 s.
 
 ### Security
 
