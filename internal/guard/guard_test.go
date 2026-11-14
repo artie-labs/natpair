@@ -247,3 +247,10 @@ func TestControllerLowersTheBudgetWhileTheNICStillDrops(t *testing.T) {
 	require.Len(t, decisions, 1)
 	assert.Equal(t, Unlimited, decisions[0].Mode)
 }
+
+func TestNilGuardEnsureIsANoOp(t *testing.T) {
+	// Callers built without a guard, such as tests of the takeover steps,
+	// pass a nil one
+	var g *Guard
+	g.Ensure(t.Context())
+}

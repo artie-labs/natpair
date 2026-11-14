@@ -90,8 +90,11 @@ func New(cfg Config) *Guard {
 // switch exists. A takeover runs it right after the shared ENI is
 // configured, so a flood that follows the shared ENI is caught at once.
 // Failures are logged, never returned: without the guard the NAT forwards
-// as before.
+// as before. A nil guard does nothing.
 func (g *Guard) Ensure(ctx context.Context) {
+	if g == nil {
+		return
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	report(&g.ensureErr, g.ensure(ctx))
