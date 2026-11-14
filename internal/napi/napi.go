@@ -90,7 +90,7 @@ func setThreaded(path string) (bool, error) {
 // device unlists it before it deletes the device's sysfs files, and in
 // between those files fail: a read with EINVAL, a write by writing nothing
 // (unregister_netdevice_many_notify in net/core/dev.c, and threaded_show and
-// netdev_store in net/core/net-sysfs.c).
+// threaded_store in net/core/net-sysfs.c, from 6.1 to 6.18).
 // If the list can't be read, it reports true, so the failure is reported.
 func listed(name string) bool {
 	interfaces, err := net.Interfaces()

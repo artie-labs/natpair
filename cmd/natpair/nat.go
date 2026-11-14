@@ -343,9 +343,9 @@ const takeoverPassTimeout = 2 * time.Second
 // timeout or when ctx ends. The pass can wait for the loop's pass, and in the
 // kernel, since reading or writing a threaded file doesn't return until the
 // kernel gets a lock on the device, such as the RTNL lock, which a device
-// reset can hold. A pass left running finishes on its own, and the 5 s loop
-// covers the shared ENI if it didn't. Running out of timeout is only logged,
-// but ctx ending is returned, so a takeover past its deadline doesn't go on.
+// reset can hold. A pass left running still turns on the shared ENI once the
+// kernel lets it. Running out of timeout is only logged, but ctx ending is
+// returned, so a takeover past its deadline doesn't go on.
 func (r *receiveThreading) turnOnWithin(ctx context.Context, timeout time.Duration) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
