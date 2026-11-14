@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nice -10. Once the flood fits, the program comes off again. It logs
   `overload guard engaged` and `overload guard cleared`, and
   `/var/lib/natpair/overload-guard-off` turns it off. The shared canary's
-  TCP connections now take ports 61000 to 65535 on the shared address.
+  TCP connections now take ports 61000 to 65535 on the shared address. The
+  guard is on for every pair after the upgrade. It raises the ring with
+  `ethtool`, which the install script now installs. A NAT without it logs
+  `overload guard failed to raise the receive ring` and sheds floods with
+  its current ring.
 
 ## [0.1.1] - 2026-11-09
 
