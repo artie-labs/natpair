@@ -245,6 +245,17 @@ func TestRoundCongestedPath(t *testing.T) {
 		assert.Equal(t, 40, attempts)
 	}
 	{
+		// The report is as old as the end of the round, after the
+		// handshakes, so a slow check doesn't make it look stale
+		f := newOwner(t)
+		f.prober.HandshakesCalls(func(context.Context, probe.Target, int) (int, error) {
+			f.clock.now += health.StaleAfter(health.ServingInterval)
+			return 5, nil
+		})
+		f.rounds(t, 1)
+		assert.False(t, f.monitor.Latest().Stale)
+	}
+	{
 		// No handshake completes, so the path is dead
 		f := newOwner(t)
 		f.prober.HandshakesReturns(0, nil)
@@ -614,9 +625,16 @@ func TestCongestedPathWarning(t *testing.T) {
 	f.prober.HandshakesReturns(7, nil)
 	f.rounds(t, 61)
 	output := logs.String()
-	// Once a minute
+	// Once a minute, and so is the health round, like a healthy one's: an
+	// overload can last hours
 	assert.Equal(t, 2, strings.Count(output, `"msg":"the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure"`))
 	assert.Contains(t, output, `"handshakes":7,"attempts":40`)
-	assert.Equal(t, 61, strings.Count(output, `"congested":true`))
-	assert.Equal(t, 61, strings.Count(output, `"handshakes":7}`))
+	assert.Equal(t, 2, strings.Count(output, `"msg":"health round"`))
+	assert.Equal(t, 2, strings.Count(output, `"congested":true`))
+	assert.Equal(t, 2, strings.Count(output, `"handshakes":7}`))
+	// The end of the congestion is logged at once
+	logs.Reset()
+	f.prober.UploadReturns(probe.Flow{}, nil)
+	f.rounds(t, 1)
+	assert.Equal(t, 1, strings.Count(logs.String(), `"msg":"health round"`))
 }

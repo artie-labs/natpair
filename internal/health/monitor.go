@@ -211,7 +211,7 @@ type timedFlow struct {
 // roundState is the part of a round's result that is logged as soon as it
 // changes.
 type roundState struct {
-	healthy, tableFull, ready, serving, peerReady bool
+	healthy, tableFull, congested, ready, serving, peerReady bool
 }
 
 // Monitor runs health rounds and keeps the latest report.
@@ -353,6 +353,9 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	completed, checked := 0, false
 	if serving && !tableFull && errors.Is(probeErr, probe.ErrTimeout) {
 		completed, checked = m.handshakes(ctx, target, now)
+		// The check takes up to half a second, and the report should be as
+		// old as the round's end.
+		now = m.deps.Now()
 	}
 	congested := checked && completed > 0 && completed < handshakeAttempts
 
@@ -496,10 +499,11 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	// up almost all of natpair's logs, about 36,000 lines a day per owner.
 	// Failed rounds and changes are logged at once, and otherwise one round
 	// each logInterval.
-	state := roundState{healthy: healthy, tableFull: tableFull, ready: ready, serving: serving, peerReady: report.PeerReady}
+	state := roundState{healthy: healthy, tableFull: tableFull, congested: congested, ready: ready, serving: serving, peerReady: report.PeerReady}
 	// Each round that counts as failed is logged. Others, including failed
-	// rounds that don't count, such as with a full table, which can last
-	// hours, are logged when something changes and once a minute.
+	// rounds that don't count, such as with a full table or a congested
+	// path, which can last hours, are logged when something changes and
+	// once a minute.
 	if countedFailure || !m.hasLogged || state != m.logged || now-m.loggedAt >= logInterval {
 		m.logged, m.loggedAt, m.hasLogged = state, now, true
 		attrs := []any{
