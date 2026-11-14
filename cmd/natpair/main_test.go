@@ -119,10 +119,10 @@ func TestActivateSharedTurnsOnThreadedReceive(t *testing.T) {
 	}
 }
 
-func TestActivateSharedReturnsWhenTheTakeoverEnds(t *testing.T) {
+func TestActivateSharedStopsWaitingForAStuckPass(t *testing.T) {
 	// A write to a threaded file waits for the kernel's lock on the device,
-	// which a device reset can hold. The takeover still ends on time.
-	captureLogs(t)
+	// which a device reset can hold. The takeover goes on without it.
+	logs := captureLogs(t)
 	cfg, err := config.LoadNAT("../../internal/config/testdata/nat.json")
 	require.NoError(t, err)
 	runner := &mocks.FakeRunner{}
@@ -142,10 +142,10 @@ func TestActivateSharedReturnsWhenTheTakeoverEnds(t *testing.T) {
 		cancel(cause)
 	}()
 
-	err = steps.ActivateShared(ctx, "02:00:00:00:00:06")
-	assert.ErrorIs(t, err, cause)
-	assert.EqualError(t, err, "stopped waiting to turn on threaded receive processing: takeover timed out")
-	// The pass finishes once the kernel lets it, and the next one waits for it
+	require.NoError(t, steps.ActivateShared(ctx, "02:00:00:00:00:06"))
+	assert.Contains(t, logs.String(), `"msg":"stopped waiting to turn on threaded receive processing during the takeover","err":"takeover timed out"`)
+	// Let the stuck pass finish, and wait for it to release the lock before
+	// the test ends
 	close(release)
 	r.enable = func() (int, error) { return 0, nil }
 	r.turnOn()
