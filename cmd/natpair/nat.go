@@ -335,6 +335,26 @@ func (r *receiveThreading) turnOn() {
 	r.lastErr = err.Error()
 }
 
+// turnOnWithin runs a pass like turnOn, but returns when ctx ends, even if the
+// pass is still waiting. It can wait for the loop's pass, and in the kernel,
+// since a write to a threaded file waits for a lock on the device, such as
+// the RTNL lock, which a device reset can hold. The other takeover steps are
+// commands with a timeout, so without this a stuck write would hold the
+// takeover past its deadline. A pass left running finishes on its own.
+func (r *receiveThreading) turnOnWithin(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.turnOn()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("stopped waiting to turn on threaded receive processing: %w", context.Cause(ctx))
+	}
+}
+
 // localSteps performs the takeover steps on this host.
 type localSteps struct {
 	network   *network.Network
@@ -362,13 +382,13 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 
 // ActivateShared configures the shared ENI, then turns on threaded NAPI for
 // it before forwarding opens. The attached ENI is a new network device that
-// starts with threaded NAPI off.
+// starts with threaded NAPI off. Failing to turn it on is only logged, but
+// the takeover running out of time while it waits is returned.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
 	}
-	s.receive.turnOn()
-	return nil
+	return s.receive.turnOnWithin(ctx)
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {

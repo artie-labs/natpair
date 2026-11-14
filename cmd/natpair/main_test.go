@@ -118,3 +118,35 @@ func TestActivateSharedTurnsOnThreadedReceive(t *testing.T) {
 		assert.Equal(t, 2, calls)
 	}
 }
+
+func TestActivateSharedReturnsWhenTheTakeoverEnds(t *testing.T) {
+	// A write to a threaded file waits for the kernel's lock on the device,
+	// which a device reset can hold. The takeover still ends on time.
+	captureLogs(t)
+	cfg, err := config.LoadNAT("../../internal/config/testdata/nat.json")
+	require.NoError(t, err)
+	runner := &mocks.FakeRunner{}
+	runner.RunReturns(`[{"ifname":"ens6","address":"02:00:00:00:00:06"}]`, nil)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	r := &receiveThreading{enable: func() (int, error) {
+		close(entered)
+		<-release
+		return 0, nil
+	}}
+	steps := localSteps{network: network.New(cfg, &mocks.FakeNetworkFence{}, runner), receive: r}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := errors.New("takeover timed out")
+	go func() {
+		<-entered
+		cancel(cause)
+	}()
+
+	err = steps.ActivateShared(ctx, "02:00:00:00:00:06")
+	assert.ErrorIs(t, err, cause)
+	assert.EqualError(t, err, "stopped waiting to turn on threaded receive processing: takeover timed out")
+	// The pass finishes once the kernel lets it, and the next one waits for it
+	close(release)
+	r.enable = func() (int, error) { return 0, nil }
+	r.turnOn()
+}
