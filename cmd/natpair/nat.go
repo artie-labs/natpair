@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +23,7 @@ import (
 	"github.com/artie-labs/natpair/internal/fence"
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
+	"github.com/artie-labs/natpair/internal/napi"
 	"github.com/artie-labs/natpair/internal/network"
 	"github.com/artie-labs/natpair/internal/probe"
 	"github.com/artie-labs/natpair/internal/update"
@@ -198,7 +200,8 @@ func runNAT(ctx context.Context, args []string) error {
 	// The instance role signs uploads to a receiver that requires IAM
 	// authentication.
 	prober := &probe.Client{Credentials: awsConfig.Credentials}
-	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe()}
+	receive := &receiveThreading{enable: napi.Enable}
+	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe(), receive: receive}
 
 	var ctrl *controller.Controller
 	monitor := health.New(health.Config{
@@ -249,6 +252,10 @@ func runNAT(ctx context.Context, args []string) error {
 		return nil
 	})
 	group.Go(func() error {
+		keepReceiveThreaded(ctx, receive)
+		return nil
+	})
+	group.Go(func() error {
 		updater.Run(ctx)
 		return nil
 	})
@@ -277,12 +284,95 @@ func keepForwardingEnabled(ctx context.Context, n *network.Network) {
 	}
 }
 
+// keepReceiveThreaded turns on threaded NAPI now and every 5 s. That catches
+// an ENI that wasn't up on the previous pass, and undoes anything else that
+// turned it off.
+func keepReceiveThreaded(ctx context.Context, r *receiveThreading) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	r.turnOn()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		r.turnOn()
+	}
+}
+
+// receiveThreading moves each ENI's receive processing into kernel threads,
+// from the 5 s loop and from each takeover. Without them, on Linux 6.5 and
+// later, a NAT whose forwarding fills the CPU does that forwarding inside its
+// daemon's system calls, and the lease renewals time out.
+type receiveThreading struct {
+	// enable is normally [napi.Enable].
+	enable func() (int, error)
+
+	// mu makes the loop and a takeover take turns, so an interface is counted
+	// as turned on once, and lastErr is shared between them.
+	mu sync.Mutex
+	// lastErr is the previous pass's failure, or "" if it had none. A failure
+	// is logged only when it differs, so a lasting one isn't logged every 5 s
+	// or again by a takeover.
+	lastErr string
+}
+
+func (r *receiveThreading) turnOn() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	enabled, err := r.enable()
+	if enabled > 0 {
+		slog.Info("turned on threaded receive processing", slog.Int("interfaces", enabled))
+	}
+	if err == nil {
+		r.lastErr = ""
+		return
+	}
+	if err.Error() != r.lastErr {
+		slog.Warn("failed to turn on threaded receive processing", slog.Any("err", err))
+	}
+	r.lastErr = err.Error()
+}
+
+// takeoverPassTimeout bounds a takeover's wait for its pass, as the timeout
+// of each command bounds the other takeover steps.
+const takeoverPassTimeout = 2 * time.Second
+
+// turnOnWithin runs a pass like turnOn, but stops waiting for it after
+// timeout or when ctx ends. The pass can wait for the loop's pass, and in the
+// kernel, since reading or writing a threaded file doesn't return until the
+// kernel gets a lock on the device, such as the RTNL lock, which a device
+// reset can hold. A pass left running still turns on the shared ENI once the
+// kernel lets it. Running out of timeout is only logged, but ctx ending is
+// returned, so a takeover past its deadline doesn't go on.
+func (r *receiveThreading) turnOnWithin(ctx context.Context, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.turnOn()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-waitCtx.Done():
+	}
+	if err := context.Cause(ctx); err != nil {
+		return fmt.Errorf("takeover ended while turning on threaded receive processing: %w", err)
+	}
+	slog.Warn("stopped waiting to turn on threaded receive processing during the takeover", slog.Duration("timeout", timeout))
+	return nil
+}
+
 // localSteps performs the takeover steps on this host.
 type localSteps struct {
 	network   *network.Network
 	conntrack conntrackd.Client
 	prober    *probe.Client
 	target    probe.Target
+	receive   *receiveThreading
 }
 
 func (s localSteps) PrepareNetwork(ctx context.Context) error {
@@ -301,8 +391,15 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 	return s.network.ClaimShared(ctx, mac)
 }
 
+// ActivateShared configures the shared ENI, then turns on threaded NAPI for
+// it before forwarding opens. The attached ENI is a new network device that
+// starts with threaded NAPI off. Failing to turn it on, or waiting longer
+// than takeoverPassTimeout, is only logged.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
-	return s.network.ActivateShared(ctx, mac)
+	if err := s.network.ActivateShared(ctx, mac); err != nil {
+		return err
+	}
+	return s.receive.turnOnWithin(ctx, takeoverPassTimeout)
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {

@@ -111,6 +111,41 @@ compares it with the release it runs.
 A release that never gets ready stays on the standby, so traffic stays on the
 old release. See [operations](operations.md#upgrade) for the steps.
 
+## Forwarding at full load
+
+Linux processes received packets in softirq context, kernel work that the
+scheduler doesn't manage like a process. How that work shares the CPU with the
+daemon depends on the kernel:
+
+- Linux 6.1 runs softirq work in the ksoftirqd threads once there is more than
+  it can finish at once. The scheduler shares the CPU between those threads
+  and the daemon, so a NAT whose forwarding fills the CPU still renews its
+  lease.
+- Linux 6.5 and later run pending softirq work in whatever task re-enables
+  bottom halves, which the daemon does in many of its own system calls.
+  Upstream made this change in commit
+  [d15121be7485](https://git.kernel.org/torvalds/c/d15121be7485655129101f3960ae6add40204463)
+  ("Revert "softirq: Let ksoftirqd do its job""), which names threaded NAPI
+  as the way to keep receive work under the scheduler. On a c7gn.large on
+  Linux 6.18 with both CPUs full of forwarding, 96.7% of the daemon's CPU
+  samples were forwarding work. It used 31.5% of a CPU, and in a 60 s run its
+  lease renewals timed out 11 times and its DNS lookups and probes 35 times.
+
+NAPI is how Linux polls a network device's receive queues. So the daemon turns
+on threaded NAPI (writes 1 to `/sys/class/net/<interface>/threaded`) for every
+ENI: when it starts, right after the shared ENI comes up during a takeover,
+and every 5 s, which also catches an ENI that wasn't up yet. Each receive
+queue is then polled by a kernel thread named `napi/<interface>-<id>`, at the
+default priority, and the scheduler shares the CPU between those threads and
+the daemon as it did with ksoftirqd on 6.1. On the same 6.18 NAT and load with
+threaded NAPI on, the daemon used about 1% of a CPU, with no lease or DNS
+timeouts, and the NAT forwarded 4 to 6% less.
+
+The daemon leaves interfaces without a device, such as `lo`, alone, and
+leaves any value other than 0 in `threaded`, such as 2 for busy polling on
+newer kernels. If something else writes 0, the daemon writes 1 again within
+5 s.
+
 ## Network details
 
 - Both NATs and the shared ENI must be in one availability zone, because an
@@ -139,6 +174,12 @@ old release. See [operations](operations.md#upgrade) for the steps.
   records and move only its own pair's shared ENI.
   [The module reference](../terraform/README.md#what-the-nats-may-do) lists
   every permission.
+- **Receive threads.** The daemon turns on threaded NAPI for the ENIs, as in
+  [Forwarding at full load](#forwarding-at-full-load). It needs no new
+  permission: it already runs as root. The receive threads run at the
+  default priority, so a flood of traffic to a NAT's own address competes for
+  the CPU as an equal of forwarding, not ahead of it. The host firewall still
+  drops it.
 - **Connection copies.** conntrackd sends connection state to the peer in
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.
