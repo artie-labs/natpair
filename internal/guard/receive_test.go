@@ -65,11 +65,13 @@ func TestReceiveThreads(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []int{44694, 44695}, pids)
 	{
-		// A kernel that cuts names at 15 characters
+		// Only the full name matches. Cut at 15 characters, it could be
+		// another interface's, such as enp39s0f1np0's.
 		addProcess(t, root, "500", "napi/enp39s0f1n", "2129984")
+		addProcess(t, root, "501", "napi/enp39s0f1np1-8194", "2129984")
 		pids, err := receiveThreads(root, "enp39s0f1np1")
 		require.NoError(t, err)
-		assert.Equal(t, []int{500}, pids)
+		assert.Equal(t, []int{501}, pids)
 	}
 	{
 		pids, err := receiveThreads(root, "ens7")
