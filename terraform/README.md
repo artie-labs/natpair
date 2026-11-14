@@ -56,7 +56,7 @@ See [`examples/`](../examples) for complete configurations.
 - a DynamoDB table, `<name>`, with on-demand billing, and the item that pins
   the release
 - an IAM role, instance profile and policy for the NATs, `<name>`, and a
-  second policy, `<name>-boot`, for what they need while booting
+  second policy, `<name>-boot`, for what they need from their first boot on
 - the probe receiver: a Lambda function, `<name>-receiver`, its IAM role and a
   function URL that requires IAM authentication
 

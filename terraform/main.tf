@@ -372,10 +372,11 @@ resource "aws_iam_role_policy" "nat" {
   depends_on = [aws_instance.nat]
 }
 
-# What a NAT needs while it boots, attached before the NATs launch: Session
-# Manager, the release download and the Datadog key. On a fresh apply, the SSM
-# agent that started without these permissions never came online, and the
-# Datadog install, which doesn't retry, failed.
+# What a NAT needs from its first boot on, attached before the NATs launch:
+# Session Manager, the release download, which self-updates also use, and the
+# Datadog key. On a fresh apply, the SSM agent that started without these
+# permissions never came online, and the Datadog install, which doesn't retry,
+# failed.
 resource "aws_iam_role_policy" "nat_boot" {
   name   = "${var.name}-boot"
   role   = aws_iam_role.nat.id
