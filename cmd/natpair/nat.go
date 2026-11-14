@@ -340,13 +340,14 @@ func (r *receiveThreading) turnOn() {
 const takeoverPassTimeout = 2 * time.Second
 
 // turnOnWithin runs a pass like turnOn, but stops waiting for it after
-// takeoverPassTimeout or when ctx ends. The pass can wait for the loop's
-// pass, and in the kernel, since reading or writing a threaded file can wait
-// for a lock on the device, such as the RTNL lock, which a device reset can
-// hold. A pass left running finishes on its own, and the 5 s loop covers the
-// shared ENI if it didn't.
-func (r *receiveThreading) turnOnWithin(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, takeoverPassTimeout)
+// timeout or when ctx ends. The pass can wait for the loop's pass, and in the
+// kernel, since reading or writing a threaded file doesn't return until the
+// kernel gets a lock on the device, such as the RTNL lock, which a device
+// reset can hold. A pass left running finishes on its own, and the 5 s loop
+// covers the shared ENI if it didn't. Running out of timeout is only logged,
+// but ctx ending is returned, so a takeover past its deadline doesn't go on.
+func (r *receiveThreading) turnOnWithin(ctx context.Context, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
@@ -355,9 +356,14 @@ func (r *receiveThreading) turnOnWithin(ctx context.Context) {
 	}()
 	select {
 	case <-done:
-	case <-ctx.Done():
-		slog.Warn("stopped waiting to turn on threaded receive processing during the takeover", slog.Any("err", context.Cause(ctx)))
+		return nil
+	case <-waitCtx.Done():
 	}
+	if err := context.Cause(ctx); err != nil {
+		return fmt.Errorf("takeover ended while turning on threaded receive processing: %w", err)
+	}
+	slog.Warn("stopped waiting to turn on threaded receive processing during the takeover", slog.Duration("timeout", timeout))
+	return nil
 }
 
 // localSteps performs the takeover steps on this host.
@@ -387,14 +393,13 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 
 // ActivateShared configures the shared ENI, then turns on threaded NAPI for
 // it before forwarding opens. The attached ENI is a new network device that
-// starts with threaded NAPI off. Failing to turn it on, or waiting too long,
-// is only logged.
+// starts with threaded NAPI off. Failing to turn it on, or waiting longer
+// than takeoverPassTimeout, is only logged.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
 	}
-	s.receive.turnOnWithin(ctx)
-	return nil
+	return s.receive.turnOnWithin(ctx, takeoverPassTimeout)
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {

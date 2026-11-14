@@ -119,34 +119,54 @@ func TestActivateSharedTurnsOnThreadedReceive(t *testing.T) {
 	}
 }
 
-func TestActivateSharedStopsWaitingForAStuckPass(t *testing.T) {
-	// A write to a threaded file waits for the kernel's lock on the device,
-	// which a device reset can hold. The takeover goes on without it.
-	logs := captureLogs(t)
-	cfg, err := config.LoadNAT("../../internal/config/testdata/nat.json")
-	require.NoError(t, err)
-	runner := &mocks.FakeRunner{}
-	runner.RunReturns(`[{"ifname":"ens6","address":"02:00:00:00:00:06"}]`, nil)
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	r := &receiveThreading{enable: func() (int, error) {
+// stuckReceive returns a receiveThreading whose pass waits until release is
+// closed, as a write to a threaded file waits while a device reset holds the
+// kernel's lock on the device. entered is closed once the pass is waiting.
+func stuckReceive() (r *receiveThreading, entered, release chan struct{}) {
+	entered, release = make(chan struct{}), make(chan struct{})
+	r = &receiveThreading{enable: func() (int, error) {
 		close(entered)
 		<-release
 		return 0, nil
 	}}
-	steps := localSteps{network: network.New(cfg, &mocks.FakeNetworkFence{}, runner), receive: r}
-	ctx, cancel := context.WithCancelCause(t.Context())
-	cause := errors.New("takeover timed out")
-	go func() {
-		<-entered
-		cancel(cause)
-	}()
+	return r, entered, release
+}
 
-	require.NoError(t, steps.ActivateShared(ctx, "02:00:00:00:00:06"))
-	assert.Contains(t, logs.String(), `"msg":"stopped waiting to turn on threaded receive processing during the takeover","err":"takeover timed out"`)
-	// Let the stuck pass finish, and wait for it to release the lock before
-	// the test ends
+// finish lets a stuck pass end and waits for it to give up the lock.
+func finish(r *receiveThreading, entered, release chan struct{}) {
+	<-entered
 	close(release)
-	r.enable = func() (int, error) { return 0, nil }
-	r.turnOn()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+}
+
+func TestActivateSharedStopsWaitingForAStuckPass(t *testing.T) {
+	logs := captureLogs(t)
+	{
+		// The takeover ending while the pass waits ends the step
+		cfg, err := config.LoadNAT("../../internal/config/testdata/nat.json")
+		require.NoError(t, err)
+		runner := &mocks.FakeRunner{}
+		runner.RunReturns(`[{"ifname":"ens6","address":"02:00:00:00:00:06"}]`, nil)
+		r, entered, release := stuckReceive()
+		steps := localSteps{network: network.New(cfg, &mocks.FakeNetworkFence{}, runner), receive: r}
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cause := errors.New("takeover timed out")
+		go func() {
+			<-entered
+			cancel(cause)
+		}()
+
+		err = steps.ActivateShared(ctx, "02:00:00:00:00:06")
+		assert.ErrorIs(t, err, cause)
+		assert.EqualError(t, err, "takeover ended while turning on threaded receive processing: takeover timed out")
+		finish(r, entered, release)
+	}
+	{
+		// Running out of its own timeout is logged, and the takeover goes on
+		r, entered, release := stuckReceive()
+		require.NoError(t, r.turnOnWithin(t.Context(), 0))
+		assert.Contains(t, logs.String(), `"msg":"stopped waiting to turn on threaded receive processing during the takeover","timeout":0`)
+		finish(r, entered, release)
+	}
 }

@@ -34,6 +34,12 @@ func TestSetThreaded(t *testing.T) {
 	run(t, "ethtool", "-K", "napi-test0", "gro", "on")
 	assert.True(t, listed("napi-test0"))
 	assert.False(t, listed("napi-test2"))
+	{
+		// Enable leaves a veth alone, because it has no device link
+		_, err := Enable()
+		require.NoError(t, err)
+		assert.Equal(t, "0\n", readThreaded(t, "/sys/class/net", "napi-test0"))
+	}
 
 	{
 		path := "/sys/class/net/napi-test0/threaded"
