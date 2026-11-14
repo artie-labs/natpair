@@ -210,6 +210,7 @@ func runNAT(ctx context.Context, args []string) error {
 	}, health.Dependencies{
 		Prober:    prober,
 		Conntrack: conntrack,
+		Table:     net,
 		Reports:   reports,
 		Serving:   func() bool { return ctrl.Serving() },
 		Inhibited: func() bool { return ctrl.Inhibited() },
