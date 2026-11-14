@@ -10,15 +10,18 @@
 // its probes and hand over in 6 of 6 runs, and the new owner then got the
 // same flood.
 //
-// An XDP program on the shared ENI runs before the kernel builds a packet
-// buffer. While its budget is 0 it passes everything after one map lookup.
-// When the busiest CPU stays full and the NIC drops packets, the daemon
-// gives it a per-CPU budget of packets per tick, and raises the priority of
-// the shared ENI's receive threads. Past the budget it drops
-// worker packets for about 100 ns each, where the kernel's path costs about
-// 1,450 ns, so the CPU keeps up again. It still passes everything that isn't
+// The daemon watches the busiest CPU and the shared ENI's counters. When the
+// busiest CPU stays full and the NIC drops packets, it attaches an XDP
+// program to the shared ENI, which runs before the kernel builds a packet
+// buffer, measures for two readings, and gives it a per-CPU budget of
+// packets per tick. It also raises the shared ENI's receive ring and the
+// priority of its receive threads. Past the budget the program drops worker
+// packets for about 100 ns each, where the kernel's path costs about 1,450
+// ns, so the CPU keeps up again. It still passes everything that isn't
 // IPv4, such as ARP, and a bounded number of replies to the shared canary's
-// TCP connections, which are the path probes.
+// TCP connections, which are the path probes. Once the flood fits the
+// budget, the daemon detaches the program, because any XDP program makes
+// ENA's receive path cost more.
 //
 // The guard only drops. It never decides ownership: the health checks still
 // do.
@@ -70,12 +73,24 @@ const (
 	dropReadings    = 10
 	// clearShedShare and clearReadings: the budget comes off once the
 	// program has dropped less than 5% of the packets it saw over the last
-	// second, so the budget hardly binds. The CPU can't tell: under a steady flood, the
+	// second, so the budget hardly binds, and the NIC less than
+	// engageDropShare. A budget the CPU can't reach sheds nothing while the
+	// NIC drops the rest: on AWS that took the budget off 2 s after it went
+	// on, at 100% CPU. The CPU can't tell: under a steady flood, the
 	// budget itself keeps the busiest CPU near 80%. On AWS, a rule of "below
 	// 80% for 1 s" took the budget off 2 s after it went on, and the flood
 	// filled the CPU again 1 s later.
 	clearShedShare = 0.05
 	clearReadings  = 10
+	// cutShare and cutFloor: while the NIC still drops at least
+	// engageDropShare of what arrives, the budget was too high for this
+	// flood, because the program's own drops also take CPU. The budget
+	// then falls to 90% of itself, at most once a second, and no lower than
+	// half the measured rate. On AWS, 1.2 million packets a second on a
+	// c7gn.medium still filled the CPU under a budget of 90% of the measured
+	// rate, and the probe failed 29 times in 60 s.
+	cutShare = 0.9
+	cutFloor = 0.5
 	// budgetShare is the share of the measured rate the budget lets through.
 	// The 10% it drops costs much less than forwarding it would, so the CPU
 	// has room again for the probe and the NAT's own work.
@@ -102,12 +117,11 @@ type Reading struct {
 	At time.Duration
 	// CPUs are each CPU's counters from /proc/stat.
 	CPUs []CPUTimes
-	// Received is the shared ENI's rx_packets, and Dropped the sum of its
-	// rx_over_errors and rx_dropped. ENA counts the packets its receive ring
-	// had no room for in rx_over_errors, and its other drops and the
-	// program's in rx_dropped. On AWS, a c7gn.medium that received about
-	// 550,000 of 800,000 small packets a second counted the rest in
-	// rx_over_errors, and none in rx_dropped.
+	// Received is the shared ENI's rx_packets, and Dropped its
+	// rx_over_errors: ENA counts there the packets its receive ring had no
+	// room for. On AWS, a c7gn.medium that received about 515,000 of 800,000
+	// small packets a second counted the rest in rx_over_errors, and none in
+	// rx_dropped, where ENA also counts the program's drops.
 	Received, Dropped uint64
 	// Passed and Shed are the program's per-CPU counters of packets it
 	// passed and dropped while it had a budget, nil while it isn't attached.
@@ -164,6 +178,10 @@ type Controller struct {
 	// the measured interval is in.
 	engagedBy Decision
 	measuring bool
+	// budget is the current budget and floor the lowest a cut goes, and
+	// cutAt is the value of since at the last cut.
+	budget, floor uint64
+	cutAt         int
 }
 
 // Mode returns what the program is doing.
@@ -193,7 +211,22 @@ func (c *Controller) Step(r Reading) Decision {
 		c.since++
 		busiest, _ := c.busiest(engageReadings)
 		share, full := c.shedShare()
-		if !full || share >= clearShedShare {
+		overflow, _ := c.dropShare()
+		if !full {
+			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
+		}
+		if overflow >= engageDropShare {
+			if c.since-c.cutAt < clearReadings {
+				return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
+			}
+			budget := max(c.floor, uint64(cutShare*float64(c.budget)))
+			if budget == c.budget {
+				return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
+			}
+			c.budget, c.cutAt = budget, c.since
+			return Decision{Mode: Limiting, Changed: true, Budget: budget, Busiest: busiest, DropShare: overflow}
+		}
+		if share >= clearShedShare {
 			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
 		}
 		shed := sumSince(c.from.Shed, r.Shed)
@@ -233,6 +266,7 @@ func (c *Controller) limit(r Reading) Decision {
 	c.mode, c.from, c.since = Limiting, r, 0
 	// A budget of 0 would mean no limit, so it lets at least one through.
 	budget := max(1, uint64(budgetShare*rate*tickSeconds))
+	c.budget, c.floor, c.cutAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), 0
 	return Decision{Mode: Limiting, Changed: true, Budget: budget, Rate: rate, Busiest: c.engagedBy.Busiest, DropShare: c.engagedBy.DropShare}
 }
 

@@ -379,6 +379,12 @@ func (g *Guard) step(ctx context.Context) error {
 		if err := g.prog.setBudget(decision.Budget); err != nil {
 			return errors.Join(err, g.detach(ctx))
 		}
+		if previous == Limiting {
+			slog.Info("overload guard lowered its budget, because the NIC still drops packets", slog.String("interface", g.name),
+				slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Float64("nic_drop_share", round(decision.DropShare)),
+				slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)))
+			return nil
+		}
 		slog.Warn("overload guard engaged: the CPU can't forward everything the shared ENI receives, so it drops worker packets past a budget",
 			slog.String("interface", g.name),
 			slog.Float64("busiest_cpu", round(decision.Busiest)),
@@ -411,13 +417,9 @@ func (g *Guard) read() (Reading, error) {
 	if err != nil {
 		return Reading{}, err
 	}
-	var dropped uint64
-	for _, counter := range []string{"rx_over_errors", "rx_dropped"} {
-		value, err := readCounter(g.name, counter)
-		if err != nil {
-			return Reading{}, err
-		}
-		dropped += value
+	dropped, err := readCounter(g.name, "rx_over_errors")
+	if err != nil {
+		return Reading{}, err
 	}
 	reading := Reading{At: time.Since(g.started), CPUs: ParseCPUTimes(string(stat)), Received: received, Dropped: dropped}
 	if g.attached != nil {

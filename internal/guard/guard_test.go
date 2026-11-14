@@ -218,3 +218,32 @@ func TestControllerForgetsReadingsAcrossANICReset(t *testing.T) {
 	assert.Empty(t, changed(steps(&c, &n, flood, 10)))
 	assert.Len(t, changed(steps(&c, &n, flood, 1)), 1)
 }
+
+func TestControllerLowersTheBudgetWhileTheNICStillDrops(t *testing.T) {
+	var c Controller
+	var n nat
+	steps(&c, &n, flood, 12)
+	limit := c.Step(n.next(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{50_000, 10_000}}))
+	require.Equal(t, uint64(471), limit.Budget)
+
+	// The budget is too high for this flood: the program sheds 4% of what
+	// it sees, and the NIC still drops 20% because the CPU stays full. That
+	// doesn't clear it, and once a second the budget falls to 90% of itself,
+	// down to half the measured rate: 262 a tick
+	tooHigh := load{busyTicks: 10, received: 80_000, dropped: 20_000, passed: [2]uint64{48_000, 0}, shed: [2]uint64{2_000, 0}}
+	var budgets []uint64
+	for _, d := range steps(&c, &n, tooHigh, 80) {
+		if d.Changed {
+			require.Equal(t, Limiting, d.Mode)
+			budgets = append(budgets, d.Budget)
+		}
+	}
+	assert.Equal(t, []uint64{423, 380, 342, 307, 276, 262}, budgets)
+	{
+		// Once the NIC keeps up, it clears as before
+		quiet := load{busyTicks: 5, received: 40_000, passed: [2]uint64{40_000, 0}}
+		cleared := changed(steps(&c, &n, quiet, 10))
+		require.Len(t, cleared, 1)
+		assert.Equal(t, Unlimited, cleared[0].Mode)
+	}
+}
