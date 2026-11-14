@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/stretchr/testify/assert"
@@ -232,6 +233,15 @@ func TestHandshakes(t *testing.T) {
 		completed, err := (&Client{}).Handshakes(t.Context(), target, 40)
 		require.NoError(t, err)
 		assert.Equal(t, 40, completed)
+	}
+	{
+		// Attempts that run out of time count as lost, not as a failed check
+		target := startReceiver(t, probetest.Handler())
+		expired, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		defer cancel()
+		completed, err := (&Client{}).Handshakes(expired, target, 40)
+		require.NoError(t, err)
+		assert.Zero(t, completed)
 	}
 	{
 		// A refused attempt isn't a lost packet, so the check fails

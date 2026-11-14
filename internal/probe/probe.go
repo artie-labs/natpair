@@ -120,16 +120,28 @@ type Client struct {
 
 // Upload sends one verified upload to target and returns its connection. It
 // fails unless checkReply accepts the receiver's reply. A failure once the
-// upload's time is up wraps [ErrTimeout].
+// upload's time is up wraps [ErrTimeout], unless the receiver's reply came
+// back and was wrong.
 func (c *Client) Upload(ctx context.Context, target Target) (Flow, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	flow, err := c.upload(ctx, target)
-	if err != nil && timedOut(ctx) {
+	var wrong replyError
+	switch {
+	case errors.As(err, &wrong):
+		// The reply came back over the path, so no packets were lost, even
+		// if a starved CPU checked it after the deadline.
+		return Flow{}, wrong.err
+	case err != nil && timedOut(ctx):
 		return Flow{}, fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	return flow, err
 }
+
+// replyError marks a reply that came back but was wrong.
+type replyError struct{ err error }
+
+func (e replyError) Error() string { return e.err.Error() }
 
 // timedOut reports whether ctx's deadline has passed. A failed connection
 // attempt or upload decides by the clock, not by its error, because the cause
@@ -203,10 +215,10 @@ func (c *Client) upload(ctx context.Context, target Target) (Flow, error) {
 		return Flow{}, fmt.Errorf("failed to read probe reply: %w", err)
 	}
 	if response.StatusCode != http.StatusOK || len(body) > maxReplyBytes {
-		return Flow{}, fmt.Errorf("probe receiver returned status %d with %d bytes", response.StatusCode, len(body))
+		return Flow{}, replyError{fmt.Errorf("probe receiver returned status %d with %d bytes", response.StatusCode, len(body))}
 	}
 	if err := checkReply(body, nonce, payload, target.ExpectedIP); err != nil {
-		return Flow{}, err
+		return Flow{}, replyError{err}
 	}
 	return flow, nil
 }
