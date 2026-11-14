@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/artie-labs/natpair/internal/config"
+	"github.com/artie-labs/natpair/internal/guard"
 	"github.com/artie-labs/natpair/internal/mocks"
 	"github.com/artie-labs/natpair/internal/network"
 )
@@ -121,7 +123,7 @@ func TestActivateSharedTurnsOnThreadedReceive(t *testing.T) {
 		commandsBefore = runner.RunCallCount()
 		return 0, errors.New("failed to write 1 to /sys/class/net/ens6/threaded: invalid argument")
 	}}
-	steps := localSteps{network: network.New(cfg, &mocks.FakeNetworkFence{}, runner), receive: r}
+	steps := localSteps{network: network.New(cfg, &mocks.FakeNetworkFence{}, runner), receive: r, guard: offGuard(t)}
 	{
 		// A failure the 5 s loop already logged isn't logged again, and it
 		// doesn't fail the takeover
@@ -139,6 +141,14 @@ func TestActivateSharedTurnsOnThreadedReceive(t *testing.T) {
 		assert.EqualError(t, steps.ActivateShared(t.Context(), "not-a-mac"), `invalid shared ENI MAC "not-a-mac"`)
 		assert.Equal(t, 2, calls)
 	}
+}
+
+// offGuard returns an overload guard whose off switch exists, so a takeover's
+// guard step only notes that it is off and touches no interface.
+func offGuard(t *testing.T) *guard.Guard {
+	off := filepath.Join(t.TempDir(), "overload-guard-off")
+	require.NoError(t, os.WriteFile(off, nil, 0o600))
+	return guard.New(guard.Config{OffPath: off})
 }
 
 // stuckReceive returns a receiveThreading whose pass waits until release is
@@ -171,7 +181,7 @@ func TestActivateSharedStopsWaitingForAStuckPass(t *testing.T) {
 		runner := &mocks.FakeRunner{}
 		runner.RunReturns(`[{"ifname":"ens6","address":"02:00:00:00:00:06"}]`, nil)
 		r, entered, release := stuckReceive()
-		steps := localSteps{network: network.New(cfg, &mocks.FakeNetworkFence{}, runner), receive: r}
+		steps := localSteps{network: network.New(cfg, &mocks.FakeNetworkFence{}, runner), receive: r, guard: offGuard(t)}
 		ctx, cancel := context.WithCancelCause(t.Context())
 		cause := errors.New("takeover timed out")
 		go func() {

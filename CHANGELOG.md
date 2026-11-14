@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An overload guard on the shared ENI. When workers send more packets than
+  the owner's CPU forwards, so the NIC drops them at random, the owner
+  attaches an XDP program that drops a tenth of the worker traffic instead,
+  and more while the NIC still drops, before the kernel spends time on it.
+  It always passes replies to its path probe, so the owner no longer hands
+  over just because a flood filled its CPU. While it drops, the shared
+  ENI's receive ring is at its largest size and its receive threads run at
+  nice -10. Once the flood fits, the program comes off again. It logs
+  `overload guard engaged` and `overload guard cleared`, and
+  `/var/lib/natpair/overload-guard-off` turns it off. The shared canary's
+  TCP connections now take ports 61000 to 65535 on the shared address. The
+  guard is on for every pair after the upgrade. It raises the ring with
+  `ethtool`, which the install script now installs. A NAT without it logs
+  `overload guard failed to raise the receive ring` and sheds floods with
+  its current ring.
+
 ### Changed
 
 - natpair spreads the ENA queue interrupts across the CPUs, queue n on the

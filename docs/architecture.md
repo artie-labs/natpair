@@ -130,6 +130,70 @@ flows, so its standby can't show it copied them. So while the owner is
 congested, it hands over to a standby that has proven its own path, without waiting for the standby to verify its copied connections. Connections the standby hasn't
 copied may reset. Upgrades still wait for a ready standby.
 
+## Shedding a flood: the overload guard
+
+Workers can send more small packets than the owner's CPU forwards. On a 1-vCPU
+c7gn.medium, 64-byte UDP at 800,000 packets a second or more fills the CPU.
+The shared ENI's receive ring then overflows, and the NIC drops packets at
+random, including the replies to the owner's own probe, which leaves through
+the shared Elastic IP like worker traffic. The probe fails, the owner hands
+over, and the new owner gets the same flood.
+
+So the owner sheds the excess with a small XDP program on the shared ENI. XDP
+runs in the driver, before the kernel builds a packet buffer, and dropping a
+packet there costs about 100 ns, against about 1,450 ns for the kernel's path.
+
+- **Normally nothing is attached.** The daemon reads the busiest CPU and the
+  shared ENI's counters every 100 ms. With any XDP program attached, ENA's
+  receive path costs more: full-rate TCP through a c7gn.medium cost about 15%
+  more CPU a packet, and fell from 8.9 to 7.7 Gbps.
+- **It engages** when the busiest CPU has been at least 95% busy for 300 ms
+  and the NIC dropped at least 5% of what reached the shared ENI in the last
+  second because its receive ring was full (ENA's `rx_over_errors`). A full
+  CPU alone isn't enough: TCP as fast as it goes also fills a small NAT's CPU,
+  but TCP senders slow down at the first losses, so the NIC drops about 2% and
+  the probe gets through.
+- **It attaches the program and measures for 200 ms**, then gives each CPU a
+  budget of 90% of the packets the busiest CPU passed, per 1 ms tick. Past the
+  budget the program drops worker packets. Dropping is cheap, so the CPU has
+  room again.
+- **It lowers the budget** to 90% of itself, once a second and down to half
+  the measured rate, while the CPU stays full and the NIC still drops at least
+  5%. The program's own drops take CPU too, so a bigger flood needs a smaller
+  budget: at 1.2 million packets a second, a c7gn.medium stayed full under
+  90%.
+- **It raises the shared ENI's receive ring and receive threads.** Right
+  after attaching, the daemon raises the receive ring to the most the NIC
+  allows, 2,048 packets on a c7gn.medium against ENA's default of 1,024.
+  While it limits, the receive threads that threaded NAPI gives each receive
+  queue run at nice -10. On a 1-vCPU NAT those threads share the CPU with the
+  daemon, and each health round's own work held the CPU for longer than the
+  ring lasts, so the NIC dropped the probe's replies even with the budget on.
+  The budget bounds what the threads do, so they can't take the whole CPU.
+- **It always passes** anything that isn't IPv4, such as ARP, and replies to
+  the probes: TCP from the probe receiver's port to the shared address on
+  ports 61000 to 65535, which only the shared canary's connections use. Past
+  the budget, each CPU passes at most 128 such replies every 16.8 ms.
+- **It clears** once the program drops less than 5% of what it sees over the
+  last second, unless the CPU is still full and the NIC still drops. The
+  daemon then detaches the program, puts the ring and the threads back, and
+  waits at least 1 s before it can engage again.
+
+On AWS, a c7gn.medium under 64-byte UDP at 800,000 and 1.2 million packets a
+second kept its owner in all 6 runs, and failed 0 to 2 probes a run against 23
+to 38 without the guard. It forwarded 22 to 30% fewer packets than without it,
+which is the price of keeping the CPU below full.
+
+Attaching the program, and changing the ring, each restart an ENA interface,
+which loses a few milliseconds of packets in the middle of a flood. The daemon
+watches only the interface that holds the shared address, and never the NAT's
+own interface, where its lease renewals, DNS lookups and conntrackd copies
+arrive. The program goes away when the daemon stops.
+
+The guard only drops packets. It never decides who owns the pair: the probes
+and the lease still do, so a broken owner fails over as before. To turn it
+off, see [operations](operations.md#turn-the-overload-guard-off).
+
 ## Taking over
 
 When the standby takes the lease, it:
@@ -305,6 +369,21 @@ newer kernels. If something else writes 0, the daemon writes 1 again within
   one that matches can abort it, and the caller tries again. A forged
   port-unreachable that matches a DNS lookup's random port fails that
   lookup, which is retried. The rate limit bounds all of it.
+- **Overload guard.** Anyone on the internet can flood the shared address and
+  engage the guard, which then drops worker packets with the flood's. Without
+  the guard the NIC drops them at random, and the owner hands over as well.
+  Anyone can also send packets that match its exemption, TCP from the
+  receiver's port to the shared address's probe ports. Each costs what it
+  would without the guard, and past the budget each CPU passes at most 128 of
+  them every 16.8 ms, about 1.5% of a CPU, and drops the rest, so forged
+  replies can't buy more CPU than they could without the guard. What they can
+  do is crowd out real probe replies while the guard is engaged, which fails
+  the probe. A flood big enough to engage the guard does that anyway without
+  it. The guard never sees the NAT's own interface, so it can't drop lease
+  renewals, DNS answers or conntrackd copies, and it only drops, so it can't
+  keep a broken owner serving. It raises the priority only of kernel threads
+  named for the shared ENI, checked by the kernel's own kernel-thread flag, so
+  a process that names itself like one gets nothing.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs
