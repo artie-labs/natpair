@@ -421,16 +421,17 @@ func TestCongestedOwnerHandsOver(t *testing.T) {
 		assert.Contains(t, logs.String(), "connections the peer hasn't copied may reset")
 	}
 	{
-		// So does a handover request
+		// A handover request, which only upgrades make, still waits for a
+		// ready peer
 		f := newFixture(t)
 		f.start(t)
 		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
 		report := congested
 		report.PeerCanTakeover = true
 		f.setReport(report)
-		stepDowns := f.stepDownCount()
 		f.controller.SetHandover(true)
-		require.Eventually(t, func() bool { return f.stepDownCount() > stepDowns }, waitFor, 10*time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving(), "the peer is not ready")
 	}
 	{
 		// An owner that isn't congested still waits for a ready peer

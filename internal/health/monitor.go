@@ -384,8 +384,10 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// forwarding more UDP than its CPU could process stepped down, the
 		// new owner did too seconds later, and the pair moved 2 to 4 times
 		// a minute, each move pausing forwarding for about 10 s. So this
-		// round ends any run of failures, but doesn't count as a success.
-		m.failures = 0
+		// round ends any run of failures. It ends any run of successes too,
+		// because no upload passed, so this NAT stops offering to take over
+		// and the peer's updater doesn't reboot the only NAT that could.
+		m.failures, m.successes = 0, 0
 		if m.congestedProbe.due(now) {
 			slog.Warn("the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure",
 				slog.Any("probe_error", probeErr), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts))

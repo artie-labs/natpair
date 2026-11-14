@@ -37,9 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `congested`. Loss on the owner's path alone, such as from a fault in its
   host, now also keeps the owner serving while some handshakes complete.
   Run `natpair maintenance` on it to hand over. While an owner is
-  congested, maintenance and handover requests hand over to a standby that
-  has proven its own path, without waiting for it to verify its copied
-  connections, so connections it hasn't copied may reset.
+  congested, maintenance hands over to a standby that has proven its own
+  path, without waiting for it to verify its copied connections, so
+  connections it hasn't copied may reset. Upgrades still wait for a ready
+  standby.
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
   second. The NAT may then give a closed connection's address and port to a

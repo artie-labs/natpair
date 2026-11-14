@@ -240,6 +240,20 @@ func TestRoundCongestedPath(t *testing.T) {
 		assert.False(t, report.PathHealthy)
 		assert.Zero(t, report.ConsecutiveFailures)
 		assert.False(t, controller.ShouldDemote(report))
+	}
+	{
+		// No upload passes while congested, so an owner that could take over
+		// stops offering to, and the standby's updater doesn't reboot the
+		// only NAT that could
+		f := newFixture(t)
+		f.serving = true
+		f.peer = &health.Report{CanTakeover: true}
+		require.True(t, f.rounds(t, 5).CanTakeover)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		report := f.rounds(t, 1)
+		assert.True(t, report.Congested)
+		assert.False(t, report.CanTakeover)
 		_, target, attempts := f.prober.HandshakesArgsForCall(0)
 		assert.Equal(t, "nat-shared", target.Namespace)
 		assert.Equal(t, 40, attempts)

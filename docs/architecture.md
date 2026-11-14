@@ -104,7 +104,8 @@ closes each one as soon as it connects:
   through the NAT. The standby would get the same traffic on taking over,
   and the pair used to move 2 to 4 times a minute, pausing forwarding each
   time. So the round doesn't count as failed, and it ends any run of failed
-  rounds.
+  rounds. No upload passed, so the owner stops offering to take over until
+  two pass again, so the standby's updater doesn't reboot the standby meanwhile.
 - **None complete.** The path is dead, and the round counts as failed.
 - **All complete.** Small packets got through, so lost packets may not be
   what failed the upload, as on a path that drops full-size packets. The
@@ -125,7 +126,7 @@ owner keeps serving while some handshakes complete. Run `natpair
 maintenance` on it to hand over. A congested owner publishes no probe
 flows, so its standby can't show it copied them. So while the owner is
 congested, it hands over to a standby that has proven its own path, without waiting for the standby to verify its copied connections. Connections the standby hasn't
-copied may reset. A handover request works the same way.
+copied may reset. Upgrades still wait for a ready standby.
 
 ## Taking over
 

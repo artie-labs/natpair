@@ -302,19 +302,19 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 			// passes its forwarding and copied-connection checks. A congested
 			// owner's uploads time out, so it publishes no probe flows, and its
 			// peer can never show it copied them. So while this NAT is
-			// congested, a peer that can take over is enough.
-			unverified := report.Congested && report.PeerCanTakeover && !report.PeerReady
-			if !report.Stale && (report.PeerReady || unverified) {
-				maintenance, handover := c.maintenanceRequested(), c.handover.Load()
-				if unverified && (maintenance || handover) {
-					slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
-				}
-				if maintenance {
+			// congested, maintenance needs only a peer that can take over.
+			// Handover requests come from upgrades, which wait for a ready
+			// peer.
+			if !report.Stale && report.PeerReady {
+				if c.maintenanceRequested() {
 					return errMaintenance
 				}
-				if handover {
+				if c.handover.Load() {
 					return errHandover
 				}
+			} else if !report.Stale && report.Congested && report.PeerCanTakeover && c.maintenanceRequested() {
+				slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
+				return errMaintenance
 			}
 			if !storeDown {
 				if _, err := l.Valid(); err != nil {
@@ -420,10 +420,9 @@ func (c *Controller) MaintenanceRequested() bool {
 
 // SetHandover sets whether this NAT, while it owns the lease, hands ownership
 // to its peer once the peer passes its forwarding and copied-connection
-// checks, or, while this NAT is congested, once the peer can take over. The
-// caller withdraws a request it no longer wants. Unlike maintenance, the
-// request lives in memory and the next acquired lease clears it, so it never
-// outlives a restart and never hands over a later session.
+// checks. The caller withdraws a request it no longer wants. Unlike
+// maintenance, the request lives in memory and the next acquired lease clears
+// it, so it never outlives a restart and never hands over a later session.
 func (c *Controller) SetHandover(want bool) {
 	c.handover.Store(want)
 }
