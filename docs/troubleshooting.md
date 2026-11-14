@@ -151,8 +151,10 @@ or move to an instance type with more CPUs, as in
 The daemon couldn't attach or run the overload guard, and the `err` field
 says why. The NAT forwards as it would without the guard. If `err` says
 `failed to attach the overload guard`, check that nothing else attached an
-XDP program to the shared ENI (`ip -d link show`), and that its MTU is at
-most 3,502 bytes, the most ENA allows with XDP. A refused attach leaves the
+XDP program to the shared ENI (`ip -d link show`), that its MTU is at most
+3,502 bytes, and that it uses at most half the queues it could
+(`ethtool -l`). ENA allows XDP only within both limits, and larger instance
+types may use all their queues by default. A refused attach leaves the
 interface as it was. The daemon tries again at the next overload, and logs
 the same failure once. `overload guard failed to raise the receive ring`
 means it sheds the flood with the ring's current size.

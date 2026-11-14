@@ -102,7 +102,7 @@ packet there costs about 100 ns, against about 1,450 ns for the kernel's path.
 - **Normally nothing is attached.** The daemon reads the busiest CPU and the
   shared ENI's counters every 100 ms. With any XDP program attached, ENA's
   receive path costs more: full-rate TCP through a c7gn.medium cost about 15%
-  more CPU a packet, and fell from 8.9 to 7.8 Gbps.
+  more CPU a packet, and fell from 8.9 to 7.7 Gbps.
 - **It engages** when the busiest CPU has been at least 95% busy for 300 ms
   and the NIC dropped at least 5% of what reached the shared ENI in the last
   second because its receive ring was full (ENA's `rx_over_errors`). A full
