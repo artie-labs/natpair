@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -199,7 +200,8 @@ func runNAT(ctx context.Context, args []string) error {
 	// The instance role signs uploads to a receiver that requires IAM
 	// authentication.
 	prober := &probe.Client{Credentials: awsConfig.Credentials}
-	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe()}
+	receive := &receiveThreading{enable: napi.Enable}
+	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe(), receive: receive}
 
 	var ctrl *controller.Controller
 	monitor := health.New(health.Config{
@@ -250,7 +252,7 @@ func runNAT(ctx context.Context, args []string) error {
 		return nil
 	})
 	group.Go(func() error {
-		keepReceiveThreaded(ctx)
+		keepReceiveThreaded(ctx, receive)
 		return nil
 	})
 	group.Go(func() error {
@@ -285,39 +287,52 @@ func keepForwardingEnabled(ctx context.Context, n *network.Network) {
 // keepReceiveThreaded turns on threaded NAPI now and every 5 s. That catches
 // an ENI that wasn't up on the previous pass, and undoes anything else that
 // turned it off.
-func keepReceiveThreaded(ctx context.Context) {
+func keepReceiveThreaded(ctx context.Context, r *receiveThreading) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	lastErr := threadReceive("", napi.Enable)
+	r.turnOn()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
-		lastErr = threadReceive(lastErr, napi.Enable)
+		r.turnOn()
 	}
 }
 
-// threadReceive runs enable, normally [napi.Enable], which moves each ENI's
-// receive processing into kernel threads. Without them, on Linux 6.5 and
+// receiveThreading moves each ENI's receive processing into kernel threads,
+// from the 5 s loop and from each takeover. Without them, on Linux 6.5 and
 // later, a NAT whose forwarding fills the CPU does that forwarding inside its
-// daemon's system calls, and the lease renewals time out. A failure is
-// logged, and only when it differs from lastErr, the previous pass's
-// failure, so a lasting one isn't logged every 5 s. It returns this pass's
-// failure, or "" if there was none.
-func threadReceive(lastErr string, enable func() (int, error)) string {
-	enabled, err := enable()
+// daemon's system calls, and the lease renewals time out.
+type receiveThreading struct {
+	// enable is normally [napi.Enable].
+	enable func() (int, error)
+
+	// mu makes the loop and a takeover take turns, so an interface is counted
+	// as turned on once, and lastErr is shared between them.
+	mu sync.Mutex
+	// lastErr is the previous pass's failure, or "" if it had none. A failure
+	// is logged only when it differs, so a lasting one isn't logged every 5 s
+	// or again by a takeover.
+	lastErr string
+}
+
+func (r *receiveThreading) turnOn() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	enabled, err := r.enable()
 	if enabled > 0 {
 		slog.Info("turned on threaded receive processing", slog.Int("interfaces", enabled))
 	}
 	if err == nil {
-		return ""
+		r.lastErr = ""
+		return
 	}
-	if err.Error() != lastErr {
+	if err.Error() != r.lastErr {
 		slog.Warn("failed to turn on threaded receive processing", slog.Any("err", err))
 	}
-	return err.Error()
+	r.lastErr = err.Error()
 }
 
 // localSteps performs the takeover steps on this host.
@@ -326,6 +341,7 @@ type localSteps struct {
 	conntrack conntrackd.Client
 	prober    *probe.Client
 	target    probe.Target
+	receive   *receiveThreading
 }
 
 func (s localSteps) PrepareNetwork(ctx context.Context) error {
@@ -351,7 +367,7 @@ func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
 	}
-	threadReceive("", napi.Enable)
+	s.receive.turnOn()
 	return nil
 }
 
