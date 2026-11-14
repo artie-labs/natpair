@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- On a fresh apply, the NATs' SSM agent never came online and the Datadog
+  agent install failed, because the NATs booted before their IAM policy was
+  attached. Session Manager, release download and Datadog permissions are now
+  in a `<name>-boot` policy attached before the NATs launch. NATs that already
+  booted without them keep running without the Datadog agent, and may stay
+  without Session Manager, until you
+  [replace them](docs/operations.md#replace-a-nat) one at a time.
+
 ## [0.1.1] - 2026-11-09
 
 ### Changed
