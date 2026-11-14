@@ -29,7 +29,7 @@ func ip(t *testing.T, args ...string) string {
 }
 
 func attached(t *testing.T) bool {
-	return regexp.MustCompile(`prog/xdp id \d+`).MatchString(ip(t, "-d", "link", "show", "guard-shared"))
+	return regexp.MustCompile(`prog/xdp id \d+`).MatchString(ip(t, "-d", "link", "show", "gs0"))
 }
 
 // pings sends count pings from the peer namespace to the shared address and
@@ -49,19 +49,19 @@ func pings(t *testing.T, count int) int {
 // the shared ENI does on an owner, and sends it pings from a namespace.
 func TestGuard(t *testing.T) {
 	ip(t, "netns", "add", "guard-peer")
-	ip(t, "link", "add", "guard-shared", "type", "veth", "peer", "name", "guard-peer0")
+	ip(t, "link", "add", "gs0", "type", "veth", "peer", "name", "gp0")
 	t.Cleanup(func() {
 		// t.Context is cancelled before cleanup runs.
 		ctx := context.WithoutCancel(t.Context())
-		_, err := command.Run(ctx, 5*time.Second, "ip", "link", "del", "guard-shared")
+		_, err := command.Run(ctx, 5*time.Second, "ip", "link", "del", "gs0")
 		assert.NoError(t, err)
 		_, err = command.Run(ctx, 5*time.Second, "ip", "netns", "del", "guard-peer")
 		assert.NoError(t, err)
 	})
-	ip(t, "link", "set", "guard-peer0", "netns", "guard-peer")
-	ip(t, "-n", "guard-peer", "addr", "add", "10.99.0.2/24", "dev", "guard-peer0")
-	ip(t, "-n", "guard-peer", "link", "set", "guard-peer0", "up")
-	ip(t, "link", "set", "guard-shared", "up")
+	ip(t, "link", "set", "gp0", "netns", "guard-peer")
+	ip(t, "-n", "guard-peer", "addr", "add", "10.99.0.2/24", "dev", "gp0")
+	ip(t, "-n", "guard-peer", "link", "set", "gp0", "up")
+	ip(t, "link", "set", "gs0", "up")
 
 	off := filepath.Join(t.TempDir(), "overload-guard-off")
 	g := New(Config{SharedAddress: netip.MustParseAddr("10.99.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: off})
@@ -73,9 +73,9 @@ func TestGuard(t *testing.T) {
 	require.NoError(t, g.ensure(t.Context()))
 	assert.Empty(t, g.name)
 
-	ip(t, "addr", "add", "10.99.0.1/24", "dev", "guard-shared")
+	ip(t, "addr", "add", "10.99.0.1/24", "dev", "gs0")
 	require.NoError(t, g.ensure(t.Context()))
-	assert.Equal(t, "guard-shared", g.name)
+	assert.Equal(t, "gs0", g.name)
 	// Watching attaches nothing: ENA's receive path costs more with any
 	// program attached
 	assert.False(t, attached(t))
@@ -93,8 +93,8 @@ func TestGuard(t *testing.T) {
 	{
 		// While limiting, the shared interface's threaded NAPI receive
 		// threads run at nice -10, and go back to 0 after
-		require.NoError(t, os.WriteFile("/sys/class/net/guard-shared/threaded", []byte("1"), 0o644))
-		pids, err := receiveThreads("/proc", "guard-shared")
+		require.NoError(t, os.WriteFile("/sys/class/net/gs0/threaded", []byte("1"), 0o644))
+		pids, err := receiveThreads("/proc", "gs0")
 		require.NoError(t, err)
 		require.NotEmpty(t, pids)
 		require.NoError(t, g.prioritize(receiveNice))
@@ -125,13 +125,13 @@ func TestGuard(t *testing.T) {
 		assert.Empty(t, g.name)
 		require.NoError(t, os.Remove(off))
 		require.NoError(t, g.ensure(t.Context()))
-		assert.Equal(t, "guard-shared", g.name)
+		assert.Equal(t, "gs0", g.name)
 	}
 	{
 		// It never watches the primary interface, even if that holds the
 		// shared address
-		g.cfg.PrimaryInterface = "guard-shared"
-		assert.EqualError(t, g.ensure(t.Context()), "the primary interface guard-shared holds the shared address 10.99.0.1, so the overload guard stays off it")
+		g.cfg.PrimaryInterface = "gs0"
+		assert.EqualError(t, g.ensure(t.Context()), "the primary interface gs0 holds the shared address 10.99.0.1, so the overload guard stays off it")
 		assert.Empty(t, g.name)
 		g.cfg.PrimaryInterface = "guard-primary"
 		require.NoError(t, g.ensure(t.Context()))
@@ -141,23 +141,23 @@ func TestGuard(t *testing.T) {
 		// handover: the next reading stops watching
 		_, err := g.attach(t.Context(), 1)
 		require.NoError(t, err)
-		ip(t, "link", "del", "guard-shared")
+		ip(t, "link", "del", "gs0")
 		require.NoError(t, g.step(t.Context()))
 		assert.Nil(t, g.attached)
 		assert.Empty(t, g.name)
 		// A new one comes back with the shared address
-		ip(t, "link", "add", "guard-shared", "type", "veth", "peer", "name", "guard-peer0")
-		ip(t, "link", "set", "guard-peer0", "netns", "guard-peer")
-		ip(t, "addr", "add", "10.99.0.1/24", "dev", "guard-shared")
-		ip(t, "link", "set", "guard-shared", "up")
+		ip(t, "link", "add", "gs0", "type", "veth", "peer", "name", "gp0")
+		ip(t, "link", "set", "gp0", "netns", "guard-peer")
+		ip(t, "addr", "add", "10.99.0.1/24", "dev", "gs0")
+		ip(t, "link", "set", "gs0", "up")
 		require.NoError(t, g.ensure(t.Context()))
-		assert.Equal(t, "guard-shared", g.name)
+		assert.Equal(t, "gs0", g.name)
 	}
 	{
 		// A handover takes the shared address away
 		_, err := g.attach(t.Context(), 1)
 		require.NoError(t, err)
-		ip(t, "addr", "del", "10.99.0.1/24", "dev", "guard-shared")
+		ip(t, "addr", "del", "10.99.0.1/24", "dev", "gs0")
 		require.NoError(t, g.ensure(t.Context()))
 		assert.False(t, attached(t))
 		assert.Empty(t, g.name)

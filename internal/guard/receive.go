@@ -13,9 +13,15 @@ import (
 // have this flag.
 const pfKthread = 0x00200000
 
+// commLength is how much of a name /proc/<pid>/stat shows on kernels that
+// cut it to TASK_COMM_LEN, 16 bytes with the terminating zero.
+const commLength = 15
+
 // receiveThreads returns the process IDs of the threaded NAPI receive
 // threads of iface, which the kernel names "napi/<iface>-<id>", from the
-// proc filesystem at root.
+// proc filesystem at root. Some kernels show only the first commLength
+// characters of a name, so a name cut there matches the start of the
+// prefix: "napi/enp39s0f1n" for interface enp39s0f1np1.
 func receiveThreads(root, iface string) ([]int, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -33,7 +39,9 @@ func receiveThreads(root, iface string) ([]int, error) {
 			// It exited.
 			continue
 		}
-		if comm, flags, ok := parseStat(string(stat)); ok && strings.HasPrefix(comm, prefix) && flags&pfKthread != 0 {
+		comm, flags, ok := parseStat(string(stat))
+		named := strings.HasPrefix(comm, prefix) || (len(comm) == commLength && strings.HasPrefix(prefix, comm))
+		if ok && named && flags&pfKthread != 0 {
 			pids = append(pids, pid)
 		}
 	}
