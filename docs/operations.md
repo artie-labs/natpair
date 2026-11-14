@@ -178,8 +178,16 @@ An upgrade doesn't change the NATs' Amazon Linux image or kernel. New NATs
 boot the newest image on the module's `kernel` line, 6.18 by default. To
 move a running pair to another line, or to a newer image on the same line,
 [replace the NATs](#replace-a-nat). AWS adds a new long-term support kernel
-line to Amazon Linux 2023 each year and supports each for four years, so
-plan to move `kernel` forward about once a year.
+line to Amazon Linux 2023 each year and supports each for four years, though
+not past Amazon Linux 2023's own end of life on June 30, 2029
+([kernel lifecycle](https://docs.aws.amazon.com/linux/al2023/ug/kernel-lifecycle.html)).
+So plan to move `kernel` forward about once a year. A new line first needs a
+module release that adds it to the values `kernel` accepts.
+
+Move off a line before its support ends. AWS then stops publishing images for
+it, and each image is deprecated 90 days after its release. Once the last one
+is deprecated, the image lookup finds none, and every `terraform plan` for the
+pair fails, even though running NATs keep their image.
 
 ## Replace a NAT
 
