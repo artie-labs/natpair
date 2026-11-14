@@ -124,6 +124,7 @@ an ENI.
 | The owner crashes or freezes | The standby takes over after the 6 s lease wait. | about 16 s |
 | The owner is stopped or terminated without a handover | EC2 lets go of the shared ENI only once the instance has stopped, so the standby forces it off. | 25 to 35 s |
 | The owner's internet path breaks | The owner hands over once the standby proves its own path works. | about 15 s |
+| The owner gets more traffic than it can forward | The owner keeps serving while its path still carries some packets, because the standby would get the same traffic. Packets beyond what it can forward are lost. | none |
 | The standby fails | Nothing moves. The pair has no standby until it recovers or you replace it. | none |
 | The internet path breaks for both NATs | Nothing moves, since moving wouldn't help. | none |
 | The probe receiver is down | Nothing moves. If the owner also crashes, the standby still takes over, about 2 s later than usual. | none |

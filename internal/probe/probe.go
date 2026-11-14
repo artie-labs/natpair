@@ -18,6 +18,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -50,8 +52,16 @@ const (
 	// address. VPC DNS answers in milliseconds, and uploads within the
 	// region take about 25 ms.
 	fallbackLookupTimeout = 250 * time.Millisecond
-	nonceHeader           = "X-Nat-Probe-Nonce"
+	// handshakeTimeout bounds [Client.Handshakes]. Within a region a
+	// handshake with the receiver takes a few milliseconds, and Linux resends
+	// an unanswered SYN only after 1 s, so each attempt sends one SYN.
+	handshakeTimeout = 500 * time.Millisecond
+	nonceHeader      = "X-Nat-Probe-Nonce"
 )
+
+// ErrTimeout marks an upload that failed because it ran out of time, as
+// when the path loses or delays its packets.
+var ErrTimeout = errors.New("probe upload timed out")
 
 // Target describes one upload check.
 type Target struct {
@@ -108,35 +118,37 @@ type Client struct {
 }
 
 // Upload sends one verified upload to target and returns its connection. It
-// fails unless checkReply accepts the receiver's reply.
+// fails unless checkReply accepts the receiver's reply. A failure once the
+// upload's time is up wraps [ErrTimeout].
 func (c *Client) Upload(ctx context.Context, target Target) (Flow, error) {
-	address, err := url.Parse(target.URL)
-	if err != nil {
-		return Flow{}, fmt.Errorf("failed to parse probe URL %q: %w", target.URL, err)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	flow, err := c.upload(ctx, target)
+	// The cause doesn't always survive on the way up: net/http reports a
+	// write that hit the connection's deadline without wrapping the
+	// deadline error. So the upload's own deadline decides.
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return Flow{}, fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
-	if address.Scheme != "https" || address.Hostname() == "" || address.User != nil || address.Fragment != "" {
-		return Flow{}, fmt.Errorf("probe URL %q must be a plain HTTPS URL", target.URL)
+	return flow, err
+}
+
+func (c *Client) upload(ctx context.Context, target Target) (Flow, error) {
+	address, err := parseURL(target.URL)
+	if err != nil {
+		return Flow{}, err
 	}
 	tlsConfig := &tls.Config{ServerName: address.Hostname(), MinVersion: tls.VersionTLS12}
 	if rootCAs != nil {
 		tlsConfig.RootCAs = rootCAs
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	// Resolve outside the namespace, then dial a literal address so the socket
 	// is created on the namespace's thread.
 	remote, err := c.resolve(ctx, address)
 	if err != nil {
 		return Flow{}, err
 	}
-	var conn net.Conn
-	err = netns.Do(target.Namespace, func() error {
-		dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: target.Source.AsSlice()}}
-		var dialErr error
-		conn, dialErr = dialer.DialContext(ctx, "tcp4", remote.String())
-		return dialErr
-	})
+	conn, err := dial(ctx, target, remote)
 	if err != nil {
 		return Flow{}, fmt.Errorf("failed to connect to probe receiver %s: %w", remote, err)
 	}
@@ -188,6 +200,71 @@ func (c *Client) Upload(ctx context.Context, target Target) (Flow, error) {
 		return Flow{}, err
 	}
 	return flow, nil
+}
+
+// Handshakes opens attempts TCP connections to target's receiver at once and
+// returns how many connected. Each starts like [Client.Upload]'s, from the
+// same namespace and source address, so it takes the same route and address
+// translation. Each closes with a reset as soon as it connects, without TLS,
+// so it leaves no socket behind. It fails only if the receiver's address is
+// unknown.
+//
+// A completed handshake shows the path delivers packets both ways, because
+// the answer must acknowledge the random sequence number the kernel chose
+// for the SYN, which only a host that saw the SYN knows.
+func (c *Client) Handshakes(ctx context.Context, target Target, attempts int) (int, error) {
+	address, err := parseURL(target.URL)
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	remote, err := c.resolve(ctx, address)
+	if err != nil {
+		return 0, err
+	}
+	var completed atomic.Int64
+	var wg sync.WaitGroup
+	for range attempts {
+		wg.Go(func() {
+			conn, err := dial(ctx, target, remote)
+			if err != nil {
+				return
+			}
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
+			_ = conn.Close()
+			completed.Add(1)
+		})
+	}
+	wg.Wait()
+	return int(completed.Load()), nil
+}
+
+// parseURL parses a receiver's URL, which must be a plain HTTPS URL.
+func parseURL(raw string) (*url.URL, error) {
+	address, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse probe URL %q: %w", raw, err)
+	}
+	if address.Scheme != "https" || address.Hostname() == "" || address.User != nil || address.Fragment != "" {
+		return nil, fmt.Errorf("probe URL %q must be a plain HTTPS URL", raw)
+	}
+	return address, nil
+}
+
+// dial opens a TCP connection to remote from target's namespace and source
+// address. The socket is created on the namespace's thread.
+func dial(ctx context.Context, target Target, remote netip.AddrPort) (net.Conn, error) {
+	var conn net.Conn
+	err := netns.Do(target.Namespace, func() error {
+		dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: target.Source.AsSlice()}}
+		var dialErr error
+		conn, dialErr = dialer.DialContext(ctx, "tcp4", remote.String())
+		return dialErr
+	})
+	return conn, err
 }
 
 // checkReply returns an error unless a receiver's reply confirms the nonce,
