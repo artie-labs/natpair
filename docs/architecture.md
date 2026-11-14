@@ -111,9 +111,16 @@ closes each one as soon as it connects:
   and the round counts as failed.
 
 The check runs only for an owner whose upload timed out while its
-connection table wasn't full. A failure that
-came back over the path, such as a reply showing the wrong source address,
-always counts.
+connection table wasn't full. A failure that came back over the path, such
+as a reply showing the wrong source address, always counts. Only an attempt
+that runs out of time counts as lost. If one fails any other way, such as
+a refused connection or one the NAT couldn't start, the check fails and the
+round counts as failed.
+
+The check can't tell why the path loses packets. Loss on the owner's path
+alone, such as from a fault in its host, also counts as congested, so the
+owner keeps serving while some handshakes complete. Run `natpair
+maintenance` on it to hand over.
 
 ## Taking over
 
@@ -217,13 +224,14 @@ old release. See [operations](operations.md#upgrade) for the steps.
   in place unless its path still carries some packets. A completed
   handshake can't be forged from off the path: the answer must acknowledge
   the random 32-bit sequence number the kernel chose for that SYN, and
-  reach the port address translation chose for it. Flooding the NAT, from
+  reach the source port the kernel chose for it. Flooding the NAT, from
   workers or from the internet to the shared address, can only make
   handshakes fail, which counts toward failing over. The limit: a path
   that a fault leaves degraded but not dead, such as one losing 99% of
   packets, or one that drops only full-size packets while a flood loses
-  some small ones, counts as congested for as long as that lasts. An
-  attacker can't cause such a fault, only add a flood while it lasts.
+  some small ones, counts as congested for as long as that lasts, with no
+  time limit. An attacker can't cause such a fault, only add a flood while
+  it lasts.
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
   of its connections. Linux acts on one only if it matches a socket's
   addresses and ports. For TCP, its sequence number must also fall inside

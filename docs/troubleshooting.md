@@ -181,15 +181,19 @@ path works but loses packets, usually because more traffic arrives than the
 NAT can forward, so the owner keeps serving: the standby would get the same
 traffic. Its `health round` lines show `"congested":true`. Check the NAT's
 CPU with `top` (high `si` means the kernel is busy forwarding) and its
-[network limits](#the-nat-is-too-small). natpair logs this at most once a
-minute.
+[network limits](#the-nat-is-too-small). If neither is high, the loss is
+likely the owner's own, such as a fault in its host, so run `sudo natpair
+maintenance` on it to hand over. natpair logs this, and the `health round`
+line, at most once a minute.
 
 ### `failed to check whether the path is alive, so the failed probe counts`
 
-After an upload timed out, the owner couldn't try the handshakes, usually
-because it couldn't resolve the probe receiver's address. The failed round
-counts toward stepping down, as it would without the check. natpair logs
-this at most once a minute.
+After an upload timed out, the owner couldn't check its path: it couldn't
+resolve the probe receiver's address, or a handshake failed other than by
+running out of time, such as a refused connection or one the NAT couldn't
+start. The `err` field says which. The failed round counts toward stepping
+down, as it would without the check. natpair logs this at most once a
+minute.
 
 ### `failed to read the connection table, so a full table can't be told from a path failure`
 
