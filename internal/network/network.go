@@ -241,9 +241,10 @@ func (n *Network) createCanary(ctx context.Context, index int, canary config.Can
 
 // PrepareNetwork installs SNAT and routing rules for the shared ENI, and the
 // route to the peer. It is safe to run repeatedly, and before the shared ENI
-// is attached. Bootstrap and every takeover run it, so a takeover also puts
-// back a route the kernel dropped since boot, such as when the own interface
-// went down.
+// is attached. Bootstrap and every takeover run it, so a NAT that takes over
+// puts back a route to the peer that the kernel dropped since boot, such as
+// when the own interface went down. A NAT that keeps serving gets it back
+// only when it reboots or takes over again.
 //
 // Worker traffic and the shared canary are translated to the shared ENI's
 // private IP and routed out through the shared ENI, because the Internet
