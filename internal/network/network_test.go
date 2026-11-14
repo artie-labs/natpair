@@ -111,6 +111,9 @@ func TestBootstrap(t *testing.T) {
 		"-A NATPAIR_INPUT -j DROP\nCOMMIT\n", log.inputs[0])
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C INPUT -j NATPAIR_INPUT")
 	assert.Less(t, slices.Index(log.commands, "modprobe nf_conntrack"), conntrackSettings)
+	// conntrackd's copies to the peer leave through the own interface from
+	// the own address, never through the shared ENI.
+	assert.Contains(t, log.commands, "ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10")
 }
 
 func TestClaimShared(t *testing.T) {

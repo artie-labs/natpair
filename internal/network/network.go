@@ -89,6 +89,9 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	if err := n.protectHost(ctx); err != nil {
 		return err
 	}
+	if err := n.routePeer(ctx); err != nil {
+		return err
+	}
 	// The conntrack settings below exist only once this module is loaded. On
 	// a fresh boot nothing has loaded it yet. A container can't load modules,
 	// but its host may already have, as in natpair's own tests.
@@ -153,6 +156,23 @@ func (n *Network) protectHost(ctx context.Context) error {
 		return err
 	}
 	return n.ensureRule(ctx, "filter", "INPUT", "-j", inputChain)
+}
+
+// routePeer sends traffic to the peer, conntrackd's copies above all,
+// through this NAT's own interface from its own address. conntrackd sends
+// from an unbound socket, so the route decides. Once the shared ENI is
+// attached, its address adds a route to the same subnet that wins over the
+// own interface's, so the copies left through the shared ENI from the shared
+// address. Its MTU is 1500 and the own interface's 9001, so conntrackd's
+// datagrams of about 8.9 KB left as 7 fragments each, and they counted
+// against the shared ENI's packet allowance. On AWS, after a full resync
+// under connection churn, the shared ENI sent about 130,000 packets a second
+// while receiving 40,000, and AWS dropped about 90,000 a second. This host
+// route is more specific than either subnet route, so it always wins.
+func (n *Network) routePeer(ctx context.Context) error {
+	_, err := n.run.Run(ctx, commandTimeout, "ip", "route", "replace", netip.PrefixFrom(n.cfg.PeerIP, 32).String(),
+		"dev", n.cfg.Instance.Interface, "src", n.cfg.Instance.PrivateIP.String())
+	return err
 }
 
 // sizeConnectionTable matches the kernel's connection table to conntrackd's
