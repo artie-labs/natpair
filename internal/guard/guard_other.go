@@ -13,7 +13,7 @@ func New(Config) *Guard {
 }
 
 // Ensure does nothing off Linux.
-func (*Guard) Ensure() {}
+func (*Guard) Ensure(context.Context) {}
 
 // Run waits for ctx to end.
 func (*Guard) Run(ctx context.Context) {

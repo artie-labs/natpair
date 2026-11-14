@@ -323,7 +323,7 @@ func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
 	}
-	s.guard.Ensure()
+	s.guard.Ensure(ctx)
 	return nil
 }
 
