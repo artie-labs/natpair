@@ -32,6 +32,8 @@ func TestSetThreaded(t *testing.T) {
 	run(t, "ip", "link", "set", "napi-test0", "up")
 	run(t, "ip", "link", "set", "napi-test1", "up")
 	run(t, "ethtool", "-K", "napi-test0", "gro", "on")
+	assert.True(t, listed("napi-test0"))
+	assert.False(t, listed("napi-test2"))
 
 	{
 		path := "/sys/class/net/napi-test0/threaded"

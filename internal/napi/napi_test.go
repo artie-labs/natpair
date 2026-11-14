@@ -30,6 +30,10 @@ func readThreaded(t *testing.T, root, name string) string {
 	return string(contents)
 }
 
+// allListed stands in for the kernel's interface list when every interface in
+// the fake /sys/class/net still exists.
+func allListed(string) bool { return true }
+
 func TestEnable(t *testing.T) {
 	// A NAT that owns the shared ENI (ens6), with lo, Docker's bridge and a
 	// probe veth beside its ENIs.
@@ -45,7 +49,7 @@ func TestEnable(t *testing.T) {
 	// kernel without threaded NAPI
 	addInterface(t, root, "ens8", true, "")
 
-	enabled, err := enable(root)
+	enabled, err := enable(root, allListed)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, enabled)
 	assert.Equal(t, "1", readThreaded(t, root, "ens5"))
@@ -57,7 +61,7 @@ func TestEnable(t *testing.T) {
 	assert.Equal(t, "2\n", readThreaded(t, root, "ens7"))
 	{
 		// A second pass finds them on and writes nothing
-		enabled, err := enable(root)
+		enabled, err := enable(root, allListed)
 		assert.NoError(t, err)
 		assert.Zero(t, enabled)
 	}
@@ -71,10 +75,32 @@ func TestEnableKeepsGoingAfterAFailure(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(root, "ens5", "threaded"), 0o755))
 	addInterface(t, root, "ens6", true, "0\n")
 
-	enabled, err := enable(root)
+	enabled, err := enable(root, allListed)
 	assert.ErrorIs(t, err, syscall.EISDIR)
 	path := filepath.Join(root, "ens5", "threaded")
 	assert.EqualError(t, err, "failed to read "+path+": read "+path+": is a directory")
 	assert.Equal(t, 1, enabled)
 	assert.Equal(t, "1", readThreaded(t, root, "ens6"))
+}
+
+func TestEnableSkipsAnInterfaceBeingRemoved(t *testing.T) {
+	// While the kernel removes a device, such as the old owner's shared ENI
+	// after a takeover, the device is no longer listed but its sysfs files
+	// are still there and fail. Here the failure is a read of a directory.
+	root := t.TempDir()
+	addInterface(t, root, "ens5", true, "0\n")
+	addInterface(t, root, "ens6", true, "")
+	require.NoError(t, os.Mkdir(filepath.Join(root, "ens6", "threaded"), 0o755))
+	var checked []string
+	listed := func(name string) bool {
+		checked = append(checked, name)
+		return name != "ens6"
+	}
+
+	enabled, err := enable(root, listed)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, enabled)
+	assert.Equal(t, "1", readThreaded(t, root, "ens5"))
+	// Only a failed interface is looked up
+	assert.Equal(t, []string{"ens6"}, checked)
 }
