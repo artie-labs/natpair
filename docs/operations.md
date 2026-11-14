@@ -13,6 +13,7 @@ match yours.
 - [Upgrade](#upgrade)
 - [Replace a NAT](#replace-a-nat)
 - [Monitoring](#monitoring)
+- [Turn the overload guard off](#turn-the-overload-guard-off)
 - [Download releases from your own S3 bucket](#download-releases-from-your-own-s3-bucket)
 - [Remove a pair](#remove-a-pair)
 
@@ -237,6 +238,7 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `forced the stuck shared ENI detach. Stop and start the NAT it was attached to before it serves again.` is logged | That NAT needs a stop and start. See [troubleshooting](troubleshooting.md#forced-the-stuck-shared-eni-detach). |
 | `update` lines continue for more than an hour | An upgrade is stuck. The `reason` field says why. |
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |
+| `overload guard engaged` is logged | Workers send more packets than the owner's CPU forwards, and the owner is dropping some of them. See [troubleshooting](troubleshooting.md#overload-guard-engaged). |
 
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.
 It ships the logs of `natpair.service`, `natpair-bootstrap.service` and
@@ -252,6 +254,20 @@ plus host metrics. Two metrics are worth watching:
 
 Without Datadog, ship the same journald units with your own agent. The
 network counters are in `sudo ethtool -S <interface> | grep allowance`.
+
+## Turn the overload guard off
+
+The [overload guard](architecture.md#shedding-a-flood-the-overload-guard)
+is on by default. To turn it off on one NAT, for example to compare a NAT's
+forwarding with and without it, create its off switch:
+
+```sh
+sudo touch /var/lib/natpair/overload-guard-off
+```
+
+Within 5 s the daemon logs `overload guard switched` with `"on":false`, and
+detaches the program if it was shedding a flood. Remove the file to turn it
+back on. The file lasts across restarts and reboots until you remove it.
 
 ## Download releases from your own S3 bucket
 

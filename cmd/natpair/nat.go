@@ -20,6 +20,7 @@ import (
 	"github.com/artie-labs/natpair/internal/controller"
 	"github.com/artie-labs/natpair/internal/dynamo"
 	"github.com/artie-labs/natpair/internal/fence"
+	"github.com/artie-labs/natpair/internal/guard"
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/network"
@@ -198,7 +199,15 @@ func runNAT(ctx context.Context, args []string) error {
 	// The instance role signs uploads to a receiver that requires IAM
 	// authentication.
 	prober := &probe.Client{Credentials: awsConfig.Credentials}
-	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe()}
+	overload := guard.New(guard.Config{
+		SharedAddress:    cfg.SharedAddress.Addr(),
+		PrimaryInterface: cfg.Instance.Interface,
+		ReceiverPort:     cfg.ReceiverPort(),
+		FirstProbePort:   config.SharedProbePortFirst,
+		LastProbePort:    config.SharedProbePortLast,
+		OffPath:          config.OverloadGuardOffPath,
+	})
+	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe(), guard: overload}
 
 	var ctrl *controller.Controller
 	monitor := health.New(health.Config{
@@ -249,6 +258,10 @@ func runNAT(ctx context.Context, args []string) error {
 		return nil
 	})
 	group.Go(func() error {
+		overload.Run(ctx)
+		return nil
+	})
+	group.Go(func() error {
 		updater.Run(ctx)
 		return nil
 	})
@@ -283,6 +296,7 @@ type localSteps struct {
 	conntrack conntrackd.Client
 	prober    *probe.Client
 	target    probe.Target
+	guard     *guard.Guard
 }
 
 func (s localSteps) PrepareNetwork(ctx context.Context) error {
@@ -301,8 +315,14 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 	return s.network.ClaimShared(ctx, mac)
 }
 
+// ActivateShared configures the shared ENI, then has the overload guard
+// watch it, so a flood that follows the shared ENI here is caught at once.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
-	return s.network.ActivateShared(ctx, mac)
+	if err := s.network.ActivateShared(ctx, mac); err != nil {
+		return err
+	}
+	s.guard.Ensure(ctx)
+	return nil
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {
