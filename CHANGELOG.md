@@ -23,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe that fails while the kernel drops packets for lack of room, with the
   table at least 90% full, no longer counts as a path failure. NATs log `the
   connection table is full` and `the health probe failed because this NAT's
-  connection table is full`.
+  connection table is full`. A takeover still needs its own probe to pass,
+  so a NAT whose table fills while it loads the copies fails the takeover
+  and tries again.
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
   second. The NAT may then give a closed connection's address and port to a

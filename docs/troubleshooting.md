@@ -163,7 +163,7 @@ connections when it takes over, so when TCP fills the table, it would fail
 the same way. Its `health round` lines show `"table_full":true`. Fix
 the table as for
 [`the connection table is full`](#the-connection-table-is-full). natpair
-logs this at most once a minute.
+logs this, and the `health round` line, at most once a minute.
 
 ### `failed to read the connection table, so a full table can't be told from a path failure`
 

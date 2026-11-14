@@ -495,7 +495,10 @@ func TestConnectionTableWarnings(t *testing.T) {
 		assert.Equal(t, 1, strings.Count(output, `"msg":"the connection table is full, so the kernel drops new connections.`))
 		assert.Equal(t, 1, strings.Count(output, `"msg":"the health probe failed because this NAT's connection table is full, so it doesn't count as a path failure"`))
 		assert.Contains(t, output, `"connections":262133,"max_connections":262144,"dropped":40`)
-		assert.Equal(t, 60, strings.Count(output, `"table_full":true`))
+		// The health round too, like a healthy one's, because a full table
+		// can last hours
+		assert.Equal(t, 1, strings.Count(output, `"msg":"health round"`))
+		assert.Equal(t, 1, strings.Count(output, `"table_full":true`))
 		assert.Zero(t, logged("the connection table is nearly full"))
 	}
 }
