@@ -223,3 +223,56 @@ func TestSign(t *testing.T) {
 		assert.ErrorContains(t, (&Client{}).sign(t.Context(), newRequest(), digest, "us-east-2"), "requires AWS credentials")
 	}
 }
+
+func TestHandshakes(t *testing.T) {
+	{
+		// Every attempt connects to a listening receiver, without TLS
+		target := startReceiver(t, probetest.Handler())
+		completed, err := (&Client{}).Handshakes(t.Context(), target, 40)
+		require.NoError(t, err)
+		assert.Equal(t, 40, completed)
+	}
+	{
+		// None connects where nothing listens
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		require.NoError(t, err)
+		require.NoError(t, listener.Close())
+		target := Target{URL: "https://" + listener.Addr().String() + "/nat", Source: netip.MustParseAddr("127.0.0.1")}
+		completed, err := (&Client{}).Handshakes(t.Context(), target, 40)
+		require.NoError(t, err)
+		assert.Zero(t, completed)
+	}
+	{
+		_, err := (&Client{}).Handshakes(t.Context(), Target{URL: "http://127.0.0.1/nat"}, 40)
+		assert.EqualError(t, err, `probe URL "http://127.0.0.1/nat" must be a plain HTTPS URL`)
+	}
+}
+
+func TestUploadTimeout(t *testing.T) {
+	{
+		// A receiver that never answers runs the upload out of time, and
+		// net/http's write error alone wouldn't show it
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = listener.Close() })
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				t.Cleanup(func() { _ = conn.Close() })
+			}
+		}()
+		target := Target{URL: "https://" + listener.Addr().String() + "/nat", Source: netip.MustParseAddr("127.0.0.1")}
+		_, err = (&Client{}).Upload(t.Context(), target)
+		assert.ErrorIs(t, err, ErrTimeout)
+	}
+	{
+		// A failure that came back in time isn't a timeout
+		target := startReceiver(t, http.NotFoundHandler())
+		_, err := (&Client{}).Upload(t.Context(), target)
+		assert.EqualError(t, err, "probe receiver returned status 404 with 19 bytes")
+		assert.NotErrorIs(t, err, ErrTimeout)
+	}
+}

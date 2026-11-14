@@ -245,6 +245,7 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `update` lines continue for more than an hour | An upgrade is stuck. The `reason` field says why. |
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |
 | `the connection table is full` is logged | The kernel is dropping new worker connections. `the connection table is nearly full` warns earlier, at 90%. See [troubleshooting](troubleshooting.md#the-connection-table-is-full). |
+| `the health probe failed, but the path is alive` is logged | The owner loses packets, usually because more traffic arrives than it can forward, so it stays the owner instead of stepping down. See [troubleshooting](troubleshooting.md#the-health-probe-failed-but-the-path-is-alive). |
 | `the health probe failed because this NAT's connection table is full` is logged | The owner's uploads fail because of the full table, not its path, so it stays the owner instead of stepping down. Workers' new connections fail the same way. See [troubleshooting](troubleshooting.md#the-health-probe-failed-because-this-nats-connection-table-is-full). |
 
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.
