@@ -10,6 +10,7 @@ package irq
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,7 +24,9 @@ import (
 var queuePattern = regexp.MustCompile(`-Tx-Rx-(\d+)$`)
 
 // Spread moves each ENA queue interrupt to its CPU from [plan], writing only
-// those that are elsewhere. It returns how many it moved.
+// those that are elsewhere. It returns how many it moved. Finding no queue
+// interrupts is an error, since irqbalance is off and nothing else places
+// them.
 func Spread() (int, error) {
 	return spread("/proc", runtime.NumCPU())
 }
@@ -33,11 +36,20 @@ func spread(proc string, cpus int) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to read interrupts: %w", err)
 	}
+	placements := plan(string(interrupts), cpus)
+	if len(placements) == 0 {
+		return 0, errors.New("found no ENA queue interrupts in /proc/interrupts")
+	}
 	moved := 0
 	var errs []error
-	for _, p := range plan(string(interrupts), cpus) {
+	for _, p := range placements {
 		path := filepath.Join(proc, "irq", strconv.Itoa(p.irq), "smp_affinity_list")
 		current, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			// The interrupt went away after /proc/interrupts was read, as
+			// when the shared ENI detaches.
+			continue
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to read interrupt %d's CPUs: %w", p.irq, err))
 			continue

@@ -40,7 +40,8 @@ func TestPlan(t *testing.T) {
 
 func TestSpread(t *testing.T) {
 	// /proc/interrupts on a two-CPU amd64 NAT, with both of ens5's queues on
-	// CPU 0 and interrupt 29 gone from /proc/irq.
+	// CPU 0. Interrupt 29 is gone from /proc/irq, as when the shared ENI
+	// detaches between the two reads.
 	const amd64Interrupts = `            CPU0       CPU1
   24:          0          0  PCI-MSI-0000:00:05.0   0-edge      ena-mgmnt@pci:0000:00:05.0
   25:    1830467          0  PCI-MSI-0000:00:05.0   1-edge      ens5-Tx-Rx-0
@@ -55,8 +56,7 @@ func TestSpread(t *testing.T) {
 
 	moved, err := spread(proc, 2)
 	assert.Equal(t, 1, moved)
-	assert.ErrorIs(t, err, fs.ErrNotExist)
-	assert.ErrorContains(t, err, "failed to read interrupt 29's CPUs")
+	assert.NoError(t, err)
 	assert.Equal(t, "0-1\n", readFile(t, filepath.Join(proc, "irq", "24", "smp_affinity_list")))
 	assert.Equal(t, "0\n", readFile(t, filepath.Join(proc, "irq", "25", "smp_affinity_list")))
 	assert.Equal(t, "1", readFile(t, filepath.Join(proc, "irq", "26", "smp_affinity_list")))
@@ -64,6 +64,14 @@ func TestSpread(t *testing.T) {
 		// A second pass finds them in place and writes nothing
 		moved, _ := spread(proc, 2)
 		assert.Zero(t, moved)
+	}
+	{
+		// A non-ENA host, where irqbalance is off and nothing would place
+		// the queues
+		proc := t.TempDir()
+		writeFile(t, filepath.Join(proc, "interrupts"), "           CPU0\n 10:  5  GICv3  27 Level  arch_timer\n")
+		_, err := spread(proc, 2)
+		assert.EqualError(t, err, "found no ENA queue interrupts in /proc/interrupts")
 	}
 	{
 		_, err := spread(t.TempDir(), 2)

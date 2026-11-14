@@ -90,7 +90,7 @@ func bootstrap(ctx context.Context, args []string) error {
 	if err := network.New(cfg, f, network.SystemRunner{}).Bootstrap(ctx); err != nil {
 		return err
 	}
-	spreadInterrupts()
+	spreadInterrupts("")
 	return writeBootedRelease(config.BootedReleasePath, release)
 }
 
@@ -289,26 +289,33 @@ func keepForwardingEnabled(ctx context.Context, n *network.Network) {
 func keepInterruptsSpread(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	var lastErr string
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
-		spreadInterrupts()
+		lastErr = spreadInterrupts(lastErr)
 	}
 }
 
-// spreadInterrupts puts each ENA queue's interrupt on its own CPU. A failure
-// only costs forwarding capacity, so it is logged.
-func spreadInterrupts() {
+// spreadInterrupts puts queue n of each ENI on CPU n. A failure only costs
+// forwarding capacity, so it is logged, and only when it differs from
+// lastErr, the previous pass's failure, so a lasting one isn't logged every
+// 5 s. It returns this pass's failure, or "" if there was none.
+func spreadInterrupts(lastErr string) string {
 	moved, err := irq.Spread()
-	if err != nil {
-		slog.Warn("failed to spread the network queues' interrupts across the CPUs", slog.Any("err", err))
-	}
 	if moved > 0 {
 		slog.Info("spread network queue interrupts across the CPUs", slog.Int("moved", moved))
 	}
+	if err == nil {
+		return ""
+	}
+	if err.Error() != lastErr {
+		slog.Warn("failed to spread the network queues' interrupts across the CPUs", slog.Any("err", err))
+	}
+	return err.Error()
 }
 
 // localSteps performs the takeover steps on this host.
