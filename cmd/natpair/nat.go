@@ -34,8 +34,8 @@ const prepareTimeout = 30 * time.Second
 const (
 	// peerRouteInterval is how often the daemon checks the route to the peer.
 	peerRouteInterval = 5 * time.Second
-	// peerRouteWarnInterval is the shortest time between warnings while the
-	// route to the peer keeps going missing or can't be checked.
+	// peerRouteWarnInterval is the shortest time between warnings that the
+	// route to the peer went missing or couldn't be checked.
 	peerRouteWarnInterval = time.Minute
 )
 
@@ -271,12 +271,10 @@ func runNAT(ctx context.Context, args []string) error {
 
 // keepPeerRoute checks the route to the peer at each tick and puts it back if
 // something removed or changed it, so conntrackd's copies don't fragment
-// again. It warns the first time, then at most once a minute while it keeps
-// happening.
+// again. It warns at most once a minute.
 func keepPeerRoute(ctx context.Context, n *network.Network, ticks <-chan time.Time) {
-	// failing means the last check found the route missing or wrong, or
-	// failed. failures counts such checks since the last warning.
-	var failing bool
+	// failures counts the checks since the last warning that found the route
+	// missing or wrong, or failed.
 	var failures int
 	var warnedAt time.Time
 	for {
@@ -288,11 +286,10 @@ func keepPeerRoute(ctx context.Context, n *network.Network, ticks <-chan time.Ti
 		}
 		restored, err := n.EnsurePeerRoute(ctx)
 		if err == nil && !restored {
-			failing = false
 			continue
 		}
 		failures++
-		if failing && now.Sub(warnedAt) < peerRouteWarnInterval {
+		if !warnedAt.IsZero() && now.Sub(warnedAt) < peerRouteWarnInterval {
 			continue
 		}
 		if err != nil {
@@ -300,7 +297,7 @@ func keepPeerRoute(ctx context.Context, n *network.Network, ticks <-chan time.Ti
 		} else {
 			slog.Warn("the route to the peer was missing or wrong and has been restored", slog.Int("checks", failures))
 		}
-		failing, warnedAt, failures = true, now, 0
+		warnedAt, failures = now, 0
 	}
 }
 

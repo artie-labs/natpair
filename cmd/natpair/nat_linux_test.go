@@ -60,7 +60,8 @@ func TestKeepPeerRouteRestoresRoute(t *testing.T) {
 
 	// check runs keepPeerRoute until its first check has finished. The channel
 	// is unbuffered, so the second tick is taken only once the first check is
-	// done. The second check finds the route as the first left it.
+	// done. The second check may run after cancel, which the assertions don't
+	// depend on.
 	check := func() {
 		ctx, cancel := context.WithCancel(t.Context())
 		ticks := make(chan time.Time)

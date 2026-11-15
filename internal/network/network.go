@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
 	"regexp"
@@ -295,9 +296,6 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 	if err := n.ensureSharedRules(ctx); err != nil {
 		return err
 	}
-	if err := n.routePeer(ctx); err != nil {
-		return err
-	}
 	for _, prefix := range cfg.ProtectedCIDRs {
 		if err := n.ensureRule(ctx, "filter", "FORWARD", "-s", prefix.String(), "-m", "conntrack", "--ctstate", "NEW,ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
 			return err
@@ -312,6 +310,12 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 		if err := n.ensureRule(ctx, "filter", "FORWARD", "-s", prefix.String(), "-p", "tcp", "-m", "conntrack", "--ctstate", "INVALID", "-j", "REJECT", "--reject-with", "tcp-reset"); err != nil {
 			return err
 		}
+	}
+	// The route only keeps conntrackd's copies from fragmenting, and the
+	// daemon's 5 s check sets it again, so a failure here doesn't stop a
+	// takeover.
+	if err := n.routePeer(ctx); err != nil {
+		slog.Warn("failed to set the route to the peer, the 5 s check will try again", slog.Any("err", err))
 	}
 	return nil
 }

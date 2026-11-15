@@ -105,16 +105,15 @@ func TestKeepPeerRoute(t *testing.T) {
 	}
 	{
 		// While something keeps removing the route, the warning repeats at most
-		// once a minute and counts the checks that found it gone. A correct
-		// route in between ends the run, so the next removal warns at once.
+		// once a minute and counts the checks that found it gone since the last
+		// one. Good checks in between don't reset the limit.
 		commands, warnings := runKeepPeerRoute(t,
-			[]string{"[]", "[]", "[]", "[]", correct, "[]"},
-			[]time.Time{start, start.Add(5 * time.Second), start.Add(55 * time.Second), start.Add(time.Minute), start.Add(65 * time.Second), start.Add(70 * time.Second)})
-		assert.Len(t, commands, 11)
+			[]string{"[]", "[]", correct, "[]", correct, "[]"},
+			[]time.Time{start, start.Add(5 * time.Second), start.Add(10 * time.Second), start.Add(30 * time.Second), start.Add(35 * time.Second), start.Add(time.Minute)})
+		assert.Len(t, commands, 10)
 		assert.Equal(t, []string{
 			`level=WARN msg="the route to the peer was missing or wrong and has been restored" checks=1`,
 			`level=WARN msg="the route to the peer was missing or wrong and has been restored" checks=3`,
-			`level=WARN msg="the route to the peer was missing or wrong and has been restored" checks=1`,
 		}, warnings)
 	}
 	{
