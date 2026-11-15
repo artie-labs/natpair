@@ -238,14 +238,24 @@ func (c *Client) sign(ctx context.Context, request *http.Request, payloadDigest 
 
 // resolve returns the receiver's address, or the host's last resolved
 // address if the lookup fails.
+// Port returns the receiver's port in address, or 443 when it names none.
+// The overload guard matches the probe's replies by this port.
+func Port(address *url.URL) (uint16, error) {
+	value := address.Port()
+	if value == "" {
+		return 443, nil
+	}
+	port, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("invalid probe port %q: %w", value, err)
+	}
+	return uint16(port), nil
+}
+
 func (c *Client) resolve(ctx context.Context, address *url.URL) (netip.AddrPort, error) {
-	port := uint16(443)
-	if value := address.Port(); value != "" {
-		parsed, err := strconv.ParseUint(value, 10, 16)
-		if err != nil {
-			return netip.AddrPort{}, fmt.Errorf("invalid probe port %q: %w", value, err)
-		}
-		port = uint16(parsed)
+	port, err := Port(address)
+	if err != nil {
+		return netip.AddrPort{}, err
 	}
 	if ip, err := netip.ParseAddr(address.Hostname()); err == nil {
 		return netip.AddrPortFrom(ip.Unmap(), port), nil
