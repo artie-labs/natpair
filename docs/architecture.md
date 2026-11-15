@@ -109,10 +109,11 @@ packet there costs about 100 ns, against about 1,450 ns for the kernel's path.
   CPU alone isn't enough: TCP as fast as it goes also fills a small NAT's CPU,
   but TCP senders slow down at the first losses, so the NIC drops about 2% and
   the probe gets through.
-- **It attaches the program and measures for 200 ms**, then gives each CPU a
-  budget of 90% of the packets the busiest CPU passed, per 1 ms tick. Past the
-  budget the program drops worker packets. Dropping is cheap, so the CPU has
-  room again.
+- **It attaches the program and measures for 100 ms**, starting one reading
+  after the attach, because attaching restarts an ENA interface. It then
+  gives each CPU a budget of 90% of the packets the busiest CPU passed, per
+  1 ms tick. Past the budget the program drops worker packets. Dropping is
+  cheap, so the CPU has room again.
 - **It lowers the budget** to 90% of itself, once a second and down to half
   the measured rate, while the CPU stays full and the NIC still drops at least
   5%. The program's own drops take CPU too, so a bigger flood needs a smaller
