@@ -136,7 +136,10 @@ the shared ENI receives, so it drops worker packets past a budget`. Workers
 send more packets than the owner's CPU forwards, so it drops about a tenth of
 them, and more if they keep coming faster, to keep its own path probe
 working. `busiest_cpu` and `nic_drop_share` show the overload it saw, and
-`budget_pps_per_cpu` how many packets a second each CPU now forwards. While
+`budget_pps_per_cpu` how many packets a second each CPU now forwards.
+`receive_threads` is how many of the shared ENI's receive threads it raised
+to nice -10. It's 0 when threaded NAPI is off, and then the probe's replies
+can still miss the ring while the daemon holds the CPU. While
 the NIC still drops packets, it logs `overload guard lowered its budget`
 once a second, down to half of `measured_pps_per_cpu`. It logs
 `overload guard cleared`, with how many packets it `dropped`, once the

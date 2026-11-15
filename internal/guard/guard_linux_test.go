@@ -103,14 +103,17 @@ func TestGuard(t *testing.T) {
 			// The NAT's daemon runs on the host.
 			t.Skip("no receive threads visible in this PID namespace")
 		}
-		require.NoError(t, prioritize("gs0", receiveNice))
+		threads, err := prioritize("gs0", receiveNice)
+		require.NoError(t, err)
+		assert.Equal(t, len(pids), threads)
 		for _, pid := range pids {
 			nice, err := unix.Getpriority(unix.PRIO_PROCESS, pid)
 			require.NoError(t, err)
 			// The raw value is 20 - nice
 			assert.Equal(t, 30, nice)
 		}
-		require.NoError(t, prioritize("gs0", 0))
+		_, err = prioritize("gs0", 0)
+		require.NoError(t, err)
 		for _, pid := range pids {
 			nice, err := unix.Getpriority(unix.PRIO_PROCESS, pid)
 			require.NoError(t, err)

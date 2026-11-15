@@ -174,7 +174,8 @@ func (g *Guard) ensure(ctx context.Context) error {
 	}
 	if g.ctrl.Mode() == Limiting {
 		// A NIC reset recreates the receive threads at nice 0.
-		return prioritize(g.name, receiveNice)
+		_, err := prioritize(g.name, receiveNice)
+		return err
 	}
 	return nil
 }
@@ -190,7 +191,8 @@ func (g *Guard) recover(ctx context.Context) error {
 		return errors.Join(append(errs, err)...)
 	}
 	if iface != nil && iface.Name != g.cfg.PrimaryInterface {
-		errs = append(errs, prioritize(iface.Name, 0))
+		_, err = prioritize(iface.Name, 0)
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }
@@ -308,12 +310,13 @@ func rings(ctx context.Context, iface string) (maximum, current int, err error) 
 	return parseRings(output)
 }
 
-// prioritize sets the nice value of the receive threads of iface. It does
-// nothing without threaded NAPI, which has no such threads.
-func prioritize(iface string, nice int) error {
+// prioritize sets the nice value of the receive threads of iface, and
+// returns how many it found. It finds none without threaded NAPI, which
+// creates them.
+func prioritize(iface string, nice int) (int, error) {
 	pids, err := receiveThreads("/proc", iface)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var errs []error
 	for _, pid := range pids {
@@ -321,7 +324,7 @@ func prioritize(iface string, nice int) error {
 			errs = append(errs, fmt.Errorf("failed to set the nice value of receive thread %d to %d: %w", pid, nice, err))
 		}
 	}
-	return errors.Join(errs...)
+	return len(pids), errors.Join(errs...)
 }
 
 // stillAttached asks the kernel whether the link is still on g.index. The
@@ -346,7 +349,8 @@ func (g *Guard) detach(ctx context.Context) error {
 	}
 	// Nice 0 is the kernel's default for the receive threads, and threaded
 	// NAPI leaves them at it.
-	errs := []error{prioritize(g.name, 0)}
+	_, err := prioritize(g.name, 0)
+	errs := []error{err}
 	if err := g.attached.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("failed to detach the overload guard from %s: %w", g.name, err))
 	}
@@ -497,13 +501,15 @@ func (g *Guard) apply(ctx context.Context, reading Reading) error {
 				slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)))
 			return nil
 		}
+		threads, err := prioritize(g.name, receiveNice)
 		slog.Warn("overload guard engaged: the CPU can't forward everything the shared ENI receives, so it drops worker packets past a budget",
 			slog.String("interface", g.name),
 			slog.Float64("busiest_cpu", round(decision.Busiest)),
 			slog.Float64("nic_drop_share", round(decision.DropShare)),
 			slog.Int64("measured_pps_per_cpu", int64(decision.Rate)),
-			slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)))
-		return prioritize(g.name, receiveNice)
+			slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)),
+			slog.Int("receive_threads", threads))
+		return err
 	case Unlimited:
 		if previous == Limiting {
 			slog.Info("overload guard cleared", slog.String("interface", g.name),
