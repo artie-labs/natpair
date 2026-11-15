@@ -55,13 +55,14 @@ See [`examples/`](../examples) for complete configurations.
   `create_dynamodb_endpoint` is false
 - a DynamoDB table, `<name>`, with on-demand billing, and the item that pins
   the release
-- an IAM role, instance profile and policy for the NATs, `<name>`
+- an IAM role, instance profile and policy for the NATs, `<name>`, and a
+  second policy, `<name>-boot`, for what they need from their first boot on
 - the probe receiver: a Lambda function, `<name>-receiver`, its IAM role and a
   function URL that requires IAM authentication
 
 ## What the NATs may do
 
-The NATs' IAM policy allows only:
+The NATs' two IAM policies allow only:
 
 | Permission | Scope | Why |
 | --- | --- | --- |
@@ -74,9 +75,11 @@ The NATs' IAM policy allows only:
 | `s3:GetObject` | The `release_url` prefix, only when it starts with `s3://` | Downloading releases from your bucket |
 | `secretsmanager:GetSecretValue` | `datadog_api_key_secret_arn`, only when set | The Datadog agent's API key |
 
-The policy is attached after the NATs are created, so it can rely on their
-tag. A NAT that boots before then logs `AccessDenied` errors and retries until
-the policy applies. They need no action.
+Session Manager, the release download from S3 and the Datadog key are in a
+second policy, `<name>-boot`, attached before the NATs launch, so they work at
+first boot. The rest is attached after the NATs are created, so it can rely on
+their tag. Until it applies, the daemon logs `AccessDenied` errors and
+retries. They need no action.
 
 ## Requirements
 
