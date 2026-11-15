@@ -46,6 +46,28 @@ func TestReportedRelease(t *testing.T) {
 	}
 }
 
+func TestSpreadInterruptsLogsALastingFailureOnce(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	writeFails := func() (int, error) { return 0, errors.New("write failed") }
+	readFails := func() (int, error) { return 0, errors.New("read failed") }
+	works := func() (int, error) { return 0, nil }
+
+	lastErr := spreadInterrupts("", writeFails)
+	lastErr = spreadInterrupts(lastErr, writeFails)
+	assert.Equal(t, 1, strings.Count(logs.String(), "write failed"))
+	// A different failure is logged
+	lastErr = spreadInterrupts(lastErr, readFails)
+	assert.Equal(t, 1, strings.Count(logs.String(), "read failed"))
+	// A pass that works resets it, so the same failure is logged again
+	lastErr = spreadInterrupts(lastErr, works)
+	assert.Empty(t, lastErr)
+	spreadInterrupts(lastErr, writeFails)
+	assert.Equal(t, 2, strings.Count(logs.String(), "write failed"))
+}
+
 // captureLogs sends the default logger's output to the returned buffer until
 // the test ends.
 func captureLogs(t *testing.T) *bytes.Buffer {

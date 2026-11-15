@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- natpair spreads the ENA queue interrupts across the CPUs, queue n on the
+  nth online CPU, and the install script turns irqbalance off from the next
+  boot. irqbalance could put all of an
+  interface's queues on one CPU, so a two-CPU NAT forwarded with one. On a
+  c7gn.large that was 9.6 Gbps instead of about 18.
+
 ### Fixed
 
 - On a fresh apply, the NATs' SSM agent never came online and the Datadog

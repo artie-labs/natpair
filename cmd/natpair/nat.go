@@ -23,6 +23,7 @@ import (
 	"github.com/artie-labs/natpair/internal/fence"
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
+	"github.com/artie-labs/natpair/internal/irq"
 	"github.com/artie-labs/natpair/internal/napi"
 	"github.com/artie-labs/natpair/internal/network"
 	"github.com/artie-labs/natpair/internal/probe"
@@ -91,6 +92,7 @@ func bootstrap(ctx context.Context, args []string) error {
 	if err := network.New(cfg, f, network.SystemRunner{}).Bootstrap(ctx); err != nil {
 		return err
 	}
+	spreadInterrupts("", irq.Spread)
 	return writeBootedRelease(config.BootedReleasePath, release)
 }
 
@@ -256,6 +258,10 @@ func runNAT(ctx context.Context, args []string) error {
 		return nil
 	})
 	group.Go(func() error {
+		keepInterruptsSpread(ctx)
+		return nil
+	})
+	group.Go(func() error {
 		updater.Run(ctx)
 		return nil
 	})
@@ -364,6 +370,42 @@ func (r *receiveThreading) turnOnWithin(ctx context.Context, timeout time.Durati
 	}
 	slog.Warn("stopped waiting to turn on threaded receive processing during the takeover", slog.Duration("timeout", timeout))
 	return nil
+}
+
+// keepInterruptsSpread spreads the ENA queue interrupts every 5 s. That
+// catches the shared ENI's interrupts within 5 s of a takeover, without
+// touching the takeover itself, and undoes anything else that moved them.
+func keepInterruptsSpread(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	var lastErr string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		lastErr = spreadInterrupts(lastErr, irq.Spread)
+	}
+}
+
+// spreadInterrupts runs spread, normally [irq.Spread], which puts queue n of
+// each ENI on CPU n. A failure only costs forwarding capacity, so it is
+// logged, and only when it differs from lastErr, the previous pass's failure,
+// so a lasting one isn't logged every 5 s. It returns this pass's failure, or
+// "" if there was none.
+func spreadInterrupts(lastErr string, spread func() (int, error)) string {
+	moved, err := spread()
+	if moved > 0 {
+		slog.Info("spread network queue interrupts across the CPUs", slog.Int("moved", moved))
+	}
+	if err == nil {
+		return ""
+	}
+	if err.Error() != lastErr {
+		slog.Warn("failed to spread the network queues' interrupts across the CPUs", slog.Any("err", err))
+	}
+	return err.Error()
 }
 
 // localSteps performs the takeover steps on this host.
