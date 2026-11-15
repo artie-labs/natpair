@@ -75,6 +75,13 @@ const (
 	// NIC dropped more than half.
 	engageDropShare = 0.05
 	dropReadings    = 10
+	// overflowReadings is the window of NIC drops that keeps the guard from
+	// clearing while the CPU is full: 1.5 s. A window of exactly the second
+	// ENA takes to refresh its drop counters can miss the refresh when a
+	// reading comes late, and then reads no drops in the middle of a flood.
+	// Engaging or cutting a second late costs little, so they keep the
+	// one-second window, which holds only drops since the last cut.
+	overflowReadings = 15
 	// clearShedShare and clearReadings: the budget comes off once the
 	// program has dropped less than 5% of the packets it saw over the last
 	// second, so the budget hardly binds, unless the CPU is full and the NIC
@@ -101,9 +108,13 @@ const (
 	// happens when a flood ends and steady traffic that doesn't slow down,
 	// such as UDP, stays above a budget that a cut lowered. Without a raise,
 	// the program would drop that traffic for as long as it lasts. The budget
-	// then rises to 110% of itself, at most once a second, and no higher than
-	// the budget it started with. The gap to cutting at a 95% busy CPU keeps
-	// one rise from undoing the last cut.
+	// then rises to 110% of itself, at most once a second, until the program
+	// drops under clearShedShare and the guard clears. It has no upper limit
+	// other than that: the rate measured at the attach can come in low, as
+	// when a health round held the CPU, and traffic just above a limit would
+	// be dropped for good. Under a flood, a rise that fills the CPU makes the
+	// NIC drop again and the cut rule lowers the budget. The gap to cutting
+	// at a 95% busy CPU keeps one rise from undoing the last cut.
 	raiseBusy  = 0.85
 	raiseShare = 1.1
 	// budgetShare is the share of the measured rate the budget lets through.
@@ -186,7 +197,7 @@ type Decision struct {
 type Controller struct {
 	mode Mode
 	// history holds the last readings, oldest first, at most
-	// dropReadings+1, so it spans dropReadings intervals.
+	// overflowReadings+1, so it spans overflowReadings intervals.
 	history []Reading
 	// from is the reading where measuring or limiting started, and since
 	// counts the readings after it.
@@ -197,11 +208,10 @@ type Controller struct {
 	// the measured interval is in.
 	engagedBy Decision
 	measuring bool
-	// budget is the current budget, floor the lowest a cut goes and ceiling
-	// the highest a raise goes. changedAt is the value of since at the last
-	// cut or raise.
-	budget, floor, ceiling uint64
-	changedAt              int
+	// budget is the current budget and floor the lowest a cut goes.
+	// changedAt is the value of since at the last cut or raise.
+	budget, floor uint64
+	changedAt     int
 }
 
 // Mode returns what the program is doing.
@@ -231,20 +241,24 @@ func (c *Controller) Step(r Reading) Decision {
 		c.since++
 		busiest, _ := c.busiest(engageReadings)
 		share, full := c.shedShare()
-		overflow, _ := c.dropShare()
+		recent, _ := c.dropShare(dropReadings)
+		overflow, _ := c.dropShare(overflowReadings)
 		if !full {
 			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
 		}
 		// ENA refreshes rx_over_errors once a second, so a flood that just
 		// ended can still show NIC drops against almost no traffic. Only a
 		// full CPU makes them the budget's fault.
-		if overflow >= engageDropShare && busiest >= engageBusy {
-			return c.change(max(c.floor, uint64(cutShare*float64(c.budget))), busiest, overflow)
+		if busiest >= engageBusy && recent >= engageDropShare {
+			return c.change(max(c.floor, uint64(cutShare*float64(c.budget))), busiest, recent)
+		}
+		if busiest >= engageBusy && overflow >= engageDropShare {
+			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
 		}
 		if share >= clearShedShare {
 			if calm, _ := c.busiest(clearReadings); calm < raiseBusy {
 				// At least 1 more, so a budget of a few packets can rise too.
-				return c.change(min(c.ceiling, max(c.budget+1, uint64(raiseShare*float64(c.budget)))), calm, share)
+				return c.change(max(c.budget+1, uint64(raiseShare*float64(c.budget))), calm, share)
 			}
 			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
 		}
@@ -256,7 +270,7 @@ func (c *Controller) Step(r Reading) Decision {
 		return Decision{Mode: Unlimited, Changed: true, Busiest: busiest, DropShare: share, Shed: shed}
 	}
 	busiest, hot := c.busiest(engageReadings)
-	share, full := c.dropShare()
+	share, full := c.dropShare(dropReadings)
 	if !hot || !full || busiest < engageBusy || share < engageDropShare {
 		return Decision{Mode: Unlimited, Busiest: busiest, DropShare: share}
 	}
@@ -285,7 +299,7 @@ func (c *Controller) limit(r Reading) Decision {
 	c.mode, c.from, c.since = Limiting, r, 0
 	// A budget of 0 would mean no limit, so it lets at least one through.
 	budget := max(1, uint64(budgetShare*rate*tickSeconds))
-	c.budget, c.floor, c.ceiling, c.changedAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), budget, 0
+	c.budget, c.floor, c.changedAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), 0
 	return Decision{Mode: Limiting, Changed: true, Budget: budget, Rate: rate, Busiest: c.engagedBy.Busiest, DropShare: c.engagedBy.DropShare}
 }
 
@@ -311,7 +325,7 @@ func (c *Controller) record(r Reading) {
 		}
 	}
 	c.history = append(c.history, r)
-	if len(c.history) > dropReadings+1 {
+	if len(c.history) > overflowReadings+1 {
 		c.history = c.history[1:]
 	}
 }
@@ -327,13 +341,13 @@ func (c *Controller) busiest(readings int) (float64, bool) {
 }
 
 // dropShare returns the share of packets the shared ENI dropped over the
-// last dropReadings intervals, and whether the history spans them.
-func (c *Controller) dropShare() (float64, bool) {
+// last readings intervals, and whether the history spans them.
+func (c *Controller) dropShare(readings int) (float64, bool) {
 	n := len(c.history)
-	if n <= dropReadings {
+	if n <= readings {
 		return 0, false
 	}
-	first, last := c.history[n-1-dropReadings], c.history[n-1]
+	first, last := c.history[n-1-readings], c.history[n-1]
 	dropped := float64(last.Dropped - first.Dropped)
 	total := dropped + float64(last.Received-first.Received)
 	if total == 0 {

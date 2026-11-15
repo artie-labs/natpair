@@ -119,12 +119,14 @@ packet there costs about 100 ns, against about 1,450 ns for the kernel's path.
   5%. The program's own drops take CPU too, so a bigger flood needs a smaller
   budget: at 1.2 million packets a second, a c7gn.medium stayed full under
   90%.
-- **It raises the budget** to 110% of itself, once a second and up to where
-  it started, while the program still drops at least 5% but the busiest CPU
-  was under 85% busy over the last second. Otherwise steady traffic that
-  doesn't slow down, left above a lowered budget after a flood ends, would
-  keep the program dropping it for as long as it lasts. Under a flood, a
-  raise that fills the CPU again is cut back by the rule above.
+- **It raises the budget** to 110% of itself, once a second, while the
+  program still drops at least 5% but the busiest CPU was under 85% busy
+  over the last second. Otherwise steady traffic that doesn't slow down,
+  left above the budget after a flood ends, would keep the program dropping
+  it for as long as it lasts. That includes traffic above the starting
+  budget, which comes in low when something else held the CPU while the
+  guard measured. Under a flood, a raise that fills the CPU again is cut
+  back by the rule above.
 - **It raises the shared ENI's receive ring and receive threads.** Right
   after attaching, the daemon raises the receive ring to the most the NIC
   allows, 2,048 packets on a c7gn.medium against ENA's default of 1,024.

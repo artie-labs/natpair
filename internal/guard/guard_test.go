@@ -127,17 +127,30 @@ func TestControllerEngagesAndClears(t *testing.T) {
 	limit := c.Step(n.next(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{50_000, 10_000}}))
 	assert.Equal(t, Decision{Mode: Limiting, Changed: true, Budget: 471, Rate: 500_000, Busiest: 1, DropShare: 0.5}, limit)
 
+	// raised returns the budgets of decisions that raised it, and fails on
+	// any other change.
+	raised := func(decisions []Decision) []uint64 {
+		var budgets []uint64
+		for _, d := range changed(decisions) {
+			require.Equal(t, Limiting, d.Mode)
+			require.True(t, d.Raised)
+			budgets = append(budgets, d.Budget)
+		}
+		return budgets
+	}
 	{
 		// The flood goes on, and the budget keeps the CPU at 70%, below
-		// where it engaged. It holds while it drops 47% of what it sees,
-		// which a rule based on the CPU alone took off after 2 s on AWS.
+		// where it engaged. It stays on while it drops 47% of what it sees,
+		// which a rule based on the CPU alone took off after 2 s on AWS. The
+		// CPU has room, so the budget rises once a second. This simulated
+		// flood doesn't fill the CPU as it would.
 		flooding := load{busyTicks: 7, received: 95_000, passed: [2]uint64{45_000, 5_000}, shed: [2]uint64{45_000, 0}}
-		assert.Empty(t, changed(steps(&c, &n, flooding, 30)))
+		assert.Equal(t, []uint64{518, 569, 625}, raised(steps(&c, &n, flooding, 30)))
 		assert.Equal(t, Limiting, c.Mode())
 	}
-	// The flood eases. Dropping 7.5% of what it sees still holds the budget
+	// The flood eases. Dropping 7.5% of what it sees keeps it on
 	tail := load{busyTicks: 5, received: 40_000, passed: [2]uint64{37_000, 0}, shed: [2]uint64{3_000, 0}}
-	assert.Empty(t, changed(steps(&c, &n, tail, 20)))
+	assert.Equal(t, []uint64{687, 755}, raised(steps(&c, &n, tail, 20)))
 	// It stops. The share over the last second falls below 5% at the fourth
 	// quiet reading: 6 readings shedding 3,000 and 4 shedding 10, of 400,000.
 	// At the third it is 5.3%.
@@ -316,6 +329,23 @@ func TestControllerRaisesTheBudgetOnceTheFloodEnds(t *testing.T) {
 	assert.Zero(t, dropped)
 }
 
+func TestControllerRaisesPastALowMeasurement(t *testing.T) {
+	// A health round held CPU 0 while the guard measured, so it passed
+	// only 30,000 packets in 100 ms, and the budget starts at 283 a tick
+	var s sim
+	steps(&s.c, &s.n, flood, 12)
+	limit := s.c.Step(s.n.next(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{30_000, 0}}))
+	require.Equal(t, uint64(283), limit.Budget)
+	s.attached, s.budget = true, limit.Budget
+	// The flood ends, and 290,000 packets a second stay, 7% over the budget
+	// it started with. The CPU forwards them at 58%, so the budget rises
+	// past where it started, and the guard clears
+	budgets, dropped := s.run(29_000, 30)
+	assert.Equal(t, []uint64{311}, budgets)
+	assert.Equal(t, Unlimited, s.c.Mode())
+	assert.Zero(t, dropped)
+}
+
 func TestControllerHoldsAFloodWithinABand(t *testing.T) {
 	for _, offered := range []float64{120_000, 240_000} {
 		// After it settles, the budget keeps the CPU from overflowing and
@@ -329,6 +359,25 @@ func TestControllerHoldsAFloodWithinABand(t *testing.T) {
 		assert.Equal(t, Limiting, s.c.Mode())
 		assert.Less(t, dropped, engageDropShare, offered)
 		assert.Equal(t, settled, s.budget)
+	}
+}
+
+func TestControllerHoldsWhenENARefreshesLate(t *testing.T) {
+	var c Controller
+	var n nat
+	steps(&c, &n, flood, 12)
+	c.Step(n.next(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{50_000, 10_000}}))
+	require.Equal(t, Limiting, c.Mode())
+	// The flood goes on with the CPU full and the program shedding only 4%.
+	// ENA counts a second of NIC drops at once, but each count comes 1.1 s
+	// after the last, so some one-second windows hold none. It must not
+	// clear in the middle of the flood
+	for i := range 60 {
+		l := load{busyTicks: 10, received: 80_000, passed: [2]uint64{48_000, 0}, shed: [2]uint64{2_000, 0}}
+		if i%11 == 0 {
+			l.dropped = 200_000
+		}
+		require.NotEqual(t, Unlimited, c.Step(n.next(l)).Mode, i)
 	}
 }
 
