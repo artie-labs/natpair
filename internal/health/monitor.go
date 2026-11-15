@@ -85,7 +85,12 @@ func StaleAfter(interval time.Duration) time.Duration {
 // [Reports].
 type Report struct {
 	// PathHealthy is true when this round's upload passed.
-	PathHealthy         bool `json:"path_healthy"`
+	PathHealthy bool `json:"path_healthy"`
+	// TableFull means this round's upload failed because this NAT's
+	// connection table was full, so the failure says nothing about the path.
+	// The round counts neither as failed nor as healthy. Only this NAT reads
+	// it, so it isn't sent to the peer.
+	TableFull           bool `json:"-"`
 	ConsecutiveFailures int  `json:"consecutive_failures"`
 	// TrackedConnections is the number of connections conntrackd tracks on
 	// this NAT, which the peer should hold copies of.
@@ -416,6 +421,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	ready := canForward && recent && !inhibited
 	report := Report{
 		PathHealthy:            healthy,
+		TableFull:              !healthy && tableFull,
 		ConsecutiveFailures:    m.failures,
 		TrackedConnections:     tracked,
 		Oldest:                 m.oldest,

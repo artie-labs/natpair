@@ -92,7 +92,8 @@ it drops new worker connections. The standby loads copies of the owner's
 TCP connections on taking over, so when TCP fills the table, it would fail
 the same way. Full means the kernel dropped
 packets it couldn't track since the last round while the table was at least
-90% full.
+90% full. A NAT taking over doesn't stop for such a round either, because
+the copies it loads can fill its table.
 
 ## Taking over
 

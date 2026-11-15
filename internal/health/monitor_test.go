@@ -174,6 +174,21 @@ func TestRoundFullConnectionTable(t *testing.T) {
 		assert.True(t, controller.ShouldDemote(f.rounds(t, 1)))
 	}
 	{
+		// A standby whose table fills while it takes over marks the failure as
+		// the table's, so the takeover doesn't fail for it
+		f := newFixture(t)
+		f.rounds(t, 2)
+		f.prober.UploadReturns(probe.Flow{}, errors.New("dial tcp 192.0.2.1:443: i/o timeout"))
+		f.tableReadings(262133, 262144, 40)
+		report := f.rounds(t, 1)
+		assert.False(t, report.PathHealthy)
+		assert.True(t, report.TableFull)
+		assert.True(t, report.CanForward)
+		// A failure the table doesn't explain is the path's
+		f.tableReadings(1200, 262144, 0)
+		assert.False(t, f.rounds(t, 1).TableFull)
+	}
+	{
 		// Exactly 90% full counts as full
 		f := newOwner(t)
 		f.tableReadings(900, 1000, 1)
