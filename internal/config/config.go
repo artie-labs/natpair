@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/artie-labs/natpair/internal/instance"
@@ -204,18 +203,19 @@ func (c NAT) SharedProbe() probe.Target {
 	return c.target(c.SharedCanary(), c.SharedPublicIP)
 }
 
-// ReceiverPort returns the probe receiver's port: the one in ProbeURL, or
-// 443. Validate has already checked that ProbeURL parses.
+// ReceiverPort returns the port the probe connects to: the one in ProbeURL,
+// or 443. It is 0, which matches no reply, when ProbeURL is invalid, and the
+// probe then fails too. Validate has already rejected such a ProbeURL.
 func (c NAT) ReceiverPort() uint16 {
 	parsed, err := url.Parse(c.ProbeURL)
 	if err != nil {
-		return 443
+		return 0
 	}
-	port, err := strconv.ParseUint(parsed.Port(), 10, 16)
-	if err != nil || port == 0 {
-		return 443
+	port, err := probe.Port(parsed)
+	if err != nil {
+		return 0
 	}
-	return uint16(port)
+	return port
 }
 
 func (c NAT) target(canary Canary, expected netip.Addr) probe.Target {
