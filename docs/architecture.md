@@ -190,9 +190,13 @@ old release. See [operations](operations.md#upgrade) for the steps.
     link-local address.
   - ICMP fragmentation-needed, host-unreachable, port-unreachable and
     time-exceeded messages to the NAT's own address, at most 50 a second
-    of each type. Errors about tracked connections are accepted as before.
+    of each type after a burst of 100. Errors about tracked connections are
+    accepted as before.
   The NAT's own sockets keep to the ephemeral range, and the own-path probes
-  use ports 61000 to 65535, which stay tracked.
+  use ports 61000 to 65535, which stay tracked. UDP to a DNS server outside
+  the VPC's address ranges, such as one reached through peering or on
+  premises and set in the VPC's DHCP options, stays tracked, so a full table
+  still breaks those lookups.
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
   of its connections. Linux acts on one only if it matches a socket's
   addresses and ports. For TCP, its sequence number must also fall inside
