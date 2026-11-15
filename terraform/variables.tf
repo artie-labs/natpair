@@ -47,7 +47,7 @@ variable "instance_type" {
 }
 
 variable "kernel" {
-  description = "Amazon Linux 2023 kernel line the NATs boot: 6.1, 6.12 or 6.18. New NATs use the newest image on that line. 6.18 is the newest long-term support kernel AWS offers for Amazon Linux 2023, with the longest support ahead of it. Running NATs keep their image, so a new line applies when you replace the NATs. 6.12 and 6.18 need a release that turns on threaded NAPI, the one from this module version or later. With an older release, use 6.1."
+  description = "Amazon Linux 2023 kernel line the NATs boot: 6.1, 6.12 or 6.18. New NATs use the newest image on that line. 6.18 is the newest long-term support kernel AWS offers for Amazon Linux 2023, with the longest support ahead of it. Running NATs keep their image, so a new line applies when you replace the NATs. 6.12 and 6.18 need a release that turns on threaded NAPI, any after v0.1.1. With v0.1.0 or v0.1.1, use 6.1, or the plan fails."
   type        = string
   default     = "6.18"
   nullable    = false

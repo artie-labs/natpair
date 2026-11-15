@@ -305,6 +305,18 @@ resource "aws_instance" "nat" {
     # Changing the root volume replaces the NAT, so existing NATs keep theirs
     # until they're replaced on purpose.
     ignore_changes = [ami, user_data, source_dest_check, root_block_device]
+
+    # On Linux 6.5 and later, so 6.12 and 6.18, a task runs pending softirq
+    # work inline. On a saturated NAT, that makes the daemon forward packets
+    # inside its own system calls, and it times out lease renewals and DNS
+    # lookups. Releases after v0.1.1 turn on threaded NAPI, which moves that
+    # work to kernel threads. v0.1.0 and v0.1.1 are the only releases without
+    # it. The check runs on every plan, so it also stops a running 6.12 or 6.18
+    # pair from rolling release back to one of them.
+    precondition {
+      condition     = var.kernel == "6.1" || !contains(["v0.1.0", "v0.1.1"], var.release)
+      error_message = "kernel ${var.kernel} needs a natpair release with threaded NAPI, and ${var.release} doesn't have it. Set release to a version after v0.1.1, or set kernel = \"6.1\"."
+    }
   }
 }
 

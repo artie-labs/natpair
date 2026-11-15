@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published last, so new NATs booted 6.1, 6.12 or 6.18 depending on the day.
   Running NATs keep their image. Replaced NATs boot the pinned line. Linux
   6.5 and later, so 6.12 and 6.18, need a `release` from this version or
-  later, which turns on threaded NAPI. A pair that keeps an older `release`
-  should set `kernel = "6.1"`.
+  later, which turns on threaded NAPI. A pair that keeps `release` at v0.1.0
+  or v0.1.1 must set `kernel = "6.1"`, or `terraform plan` fails.
 
 ### Fixed
 

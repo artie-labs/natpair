@@ -188,10 +188,12 @@ module release that adds it to the values `kernel` accepts.
 this module's version on does. So keep `release` on the module's version, or
 set `kernel = "6.1"`. On a 6.12 or 6.18 pair, roll back only to such a
 release. On an older one, a NAT whose forwarding fills its CPU times out its
-lease renewals and DNS lookups again. Before this module version, the image
-lookup could already put NATs on 6.12 or 6.18, so check `uname -r` on each
-NAT of a pair that runs an older release. If one runs 6.12 or 6.18, upgrade
-`release`, or set `kernel = "6.1"` and replace that NAT.
+lease renewals and DNS lookups again. `terraform plan` fails when `kernel` is
+6.12 or 6.18 and `release` is v0.1.0 or v0.1.1, the two releases without
+threaded NAPI. Before this module version, the image lookup could already
+put NATs on 6.12 or 6.18, so check `uname -r` on each NAT of a pair that runs
+an older release. If one runs 6.12 or 6.18, upgrade `release`, or set
+`kernel = "6.1"` and replace that NAT.
 
 Move off a line before its support ends. AWS then stops publishing images for
 it, and each image is deprecated 90 days after its release. Once the last one
