@@ -92,7 +92,9 @@ type NAT struct {
 	ProbeURL string `json:"probe_url"`
 
 	// PeerIP is the other NAT's primary private IP, which conntrackd copies
-	// connections to.
+	// connections to. It must be in this NAT's own subnet, because the NAT
+	// routes to it directly, without a gateway. The Terraform module puts both
+	// NATs in one subnet.
 	PeerIP netip.Addr `json:"peer_ip"`
 
 	// MaxConnections is the most connections conntrackd copies and the
