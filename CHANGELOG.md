@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection table is full` and `the health probe failed because this NAT's
   connection table is full`. Such a probe no longer fails a takeover either,
   so a NAT whose table fills while it loads the copies still opens
-  forwarding once its upload through the shared Elastic IP passes.
+  forwarding once its upload through the shared Elastic IP passes. Two
+  failed rounds count as in a row only if at most two such rounds came
+  between them.
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
   second. The NAT may then give a closed connection's address and port to a

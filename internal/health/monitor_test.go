@@ -174,6 +174,33 @@ func TestRoundFullConnectionTable(t *testing.T) {
 		assert.True(t, controller.ShouldDemote(f.rounds(t, 1)))
 	}
 	{
+		// One failure, an hour of full table, then one more failure aren't two
+		// in a row
+		f := newOwner(t)
+		f.tableReadings(1200, 262144, 0)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+		f.tableReadings(262133, 262144, 40)
+		assert.Zero(t, f.rounds(t, 3600).ConsecutiveFailures)
+		f.tableReadings(1200, 262144, 0)
+		report := f.rounds(t, 1)
+		assert.Equal(t, 1, report.ConsecutiveFailures)
+		assert.False(t, controller.ShouldDemote(report))
+	}
+	{
+		// Two full rounds between failures still leave them in a row, and a
+		// third ends the run
+		f := newOwner(t)
+		f.tableReadings(1200, 262144, 0)
+		f.rounds(t, 1)
+		f.tableReadings(262133, 262144, 40)
+		assert.Equal(t, 1, f.rounds(t, 2).ConsecutiveFailures)
+		f.tableReadings(1200, 262144, 0)
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 1)))
+		f.tableReadings(262133, 262144, 40)
+		assert.Equal(t, 2, f.rounds(t, 2).ConsecutiveFailures)
+		assert.Zero(t, f.rounds(t, 1).ConsecutiveFailures)
+	}
+	{
 		// A standby whose table fills while it takes over marks the failure as
 		// the table's, so the takeover doesn't fail for it
 		f := newFixture(t)
