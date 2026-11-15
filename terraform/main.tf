@@ -311,8 +311,12 @@ resource "aws_instance" "nat" {
     # inside its own system calls, and it times out lease renewals and DNS
     # lookups. Releases after v0.1.1 turn on threaded NAPI, which moves that
     # work to kernel threads. v0.1.0 and v0.1.1 are the only releases without
-    # it. The check runs on every plan, so it also stops a running 6.12 or 6.18
-    # pair from rolling release back to one of them.
+    # it. A later release without it, such as a fix on the v0.1.1 line, must
+    # be added to the list. The check runs on every plan, so it also blocks
+    # rolling release back to one of them while kernel is 6.12 or 6.18. It
+    # reads kernel, not the image a running NAT booted, since ami is ignored,
+    # so docs/operations.md says to check uname -r on NATs of a pair that ran
+    # an older release.
     precondition {
       condition     = var.kernel == "6.1" || !contains(["v0.1.0", "v0.1.1"], var.release)
       error_message = "kernel ${var.kernel} needs a natpair release with threaded NAPI, and ${var.release} doesn't have it. Set release to a version after v0.1.1, or set kernel = \"6.1\"."
