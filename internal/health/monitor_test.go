@@ -242,6 +242,24 @@ func TestRoundFullConnectionTable(t *testing.T) {
 		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
 	}
 	{
+		// One failed reading doesn't blind the next one: drops count from the
+		// last good reading
+		f := newOwner(t)
+		var drops uint64
+		f.table.ReadConnectionTableCalls(func(context.Context) (network.ConnectionTable, error) {
+			drops += 40
+			if f.table.ReadConnectionTableCallCount() == 3 {
+				return network.ConnectionTable{}, errors.New("conntrack timed out")
+			}
+			return network.ConnectionTable{Connections: 262133, Max: 262144, Drops: drops}, nil
+		})
+		assert.Zero(t, f.rounds(t, 1).ConsecutiveFailures)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+		report := f.rounds(t, 1)
+		assert.True(t, report.TableFull)
+		assert.False(t, controller.ShouldDemote(report))
+	}
+	{
 		// Without a reading, a failure counts as before
 		f := newOwner(t)
 		f.table.ReadConnectionTableReturns(network.ConnectionTable{}, errors.New("conntrack failed"))
@@ -498,8 +516,24 @@ func TestRoundLogging(t *testing.T) {
 		assert.Equal(t, 0, loggedRounds())
 	}
 	{
+		// A table at its limit that drops in some rounds and not others
+		// doesn't log every healthy round
+		full := false
+		f.table.ReadConnectionTableCalls(func(context.Context) (network.ConnectionTable, error) {
+			full = !full
+			drops := uint64(0)
+			if full {
+				drops = 40
+			}
+			return network.ConnectionTable{Connections: 262133, Max: 262144, Drops: drops}, nil
+		})
+		f.rounds(t, 10)
+		assert.Equal(t, 0, loggedRounds())
+	}
+	{
 		// Every failed round is logged, with its probe error
 		f.prober.UploadReturns(probe.Flow{}, errors.New("upload timed out"))
+		f.table.ReadConnectionTableReturns(network.ConnectionTable{Connections: 1200, Max: 262144}, nil)
 		f.rounds(t, 3)
 		assert.Equal(t, 3, strings.Count(logs.String(), `"probe_error":"upload timed out"`))
 		assert.Equal(t, 3, loggedRounds())
