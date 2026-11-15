@@ -384,7 +384,8 @@ func (g *Guard) restoreRing(ctx context.Context) error {
 	if iface != "" {
 		_, current, err := rings(ctx, iface)
 		if err != nil {
-			// The record stays, so the next detach or start tries again.
+			// The record stays for the next start, or the next detach after
+			// the guard attaches again.
 			return err
 		}
 		if current == record.Raised {

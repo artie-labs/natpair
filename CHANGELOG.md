@@ -11,8 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - An overload guard on the shared ENI. When workers send more packets than
   the owner's CPU forwards, so the NIC drops them at random, the owner
-  attaches an XDP program that drops a tenth of the worker traffic instead,
-  and more while the NIC still drops, before the kernel spends time on it.
+  attaches an XDP program that drops worker traffic past 90% of what the CPU
+  forwarded at full load, and more while the NIC still drops, before the
+  kernel spends time on it. During a large flood, it drops most of what
+  arrives.
   It always passes replies to its path probe, so the owner no longer hands
   over just because a flood filled its CPU. While it drops, the shared
   ENI's receive ring is at its largest size and its receive threads run at
