@@ -78,19 +78,19 @@ const (
 	// clearShedShare and clearReadings: the budget comes off once the
 	// program has dropped less than 5% of the packets it saw over the last
 	// second, so the budget hardly binds, unless the CPU is full and the NIC
-	// drops at least engageDropShare. A budget the CPU can't reach sheds
-	// nothing while the NIC drops the rest: on AWS that took the budget off
-	// 2 s after it went on, at 100% CPU. The CPU can't tell: under a steady flood, the
-	// budget itself keeps the busiest CPU near 80%. On AWS, a rule of "below
-	// 80% for 1 s" took the budget off 2 s after it went on, and the flood
-	// filled the CPU again 1 s later.
+	// drops at least engageDropShare. Without that exception, a budget the
+	// CPU can't reach sheds nothing while the NIC drops the rest, and on AWS
+	// the budget came off at 100% CPU. The CPU alone can't decide either:
+	// under a steady flood the budget itself keeps the busiest CPU near 80%.
+	// On AWS, a rule of "below 80% for 1 s" took the budget off 2 s after it
+	// went on, and the flood filled the CPU again 1 s later.
 	clearShedShare = 0.05
 	clearReadings  = 10
 	// cutShare and cutFloor: while the CPU stays full and the NIC still
 	// drops at least engageDropShare of what arrives, the budget was too
-	// high for this flood, because the program's own drops also take CPU. The budget
-	// then falls to 90% of itself, at most once a second, and no lower than
-	// half the measured rate. On AWS, 1.2 million packets a second on a
+	// high for this flood, because the program's own drops also take CPU.
+	// The budget then falls to 90% of itself, at most once a second, and no
+	// lower than half the measured rate. On AWS, 1.2 million packets a second on a
 	// c7gn.medium still filled the CPU under a budget of 90% of the measured
 	// rate, and the probe failed 29 times in 60 s.
 	cutShare = 0.9
