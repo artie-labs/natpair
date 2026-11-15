@@ -2,6 +2,7 @@ package guard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -58,10 +59,7 @@ type Guard struct {
 	name     string
 	index    int
 	attached link.Link
-	// ringBefore is the receive ring size the guard raised from, to restore
-	// on detach, or 0 if it didn't change it.
-	ringBefore int
-	ctrl       Controller
+	ctrl     Controller
 	// off is set while the off switch exists.
 	off bool
 	// ensureErr and stepErr are the last failures logged by each loop, so
@@ -104,16 +102,13 @@ func (g *Guard) Ensure(ctx context.Context) {
 // shared ENI's counters every Interval to attach, limit and detach the
 // program. It detaches the program when ctx ends.
 func (g *Guard) Run(ctx context.Context) {
-	// Detaching restores the ring after ctx ends, so it gets its own.
+	// Detaching and recovering restore the ring even if ctx has ended, so
+	// they get their own.
 	defer g.close(context.WithoutCancel(ctx))
-	g.Ensure(ctx)
 	g.mu.Lock()
-	if g.name != "" {
-		// A daemon killed while limiting left the receive threads at nice
-		// -10, with no budget to bound them. This one starts unlimited.
-		report(&g.ensureErr, g.prioritize(0))
-	}
+	report(&g.ensureErr, g.recover(context.WithoutCancel(ctx)))
 	g.mu.Unlock()
+	g.Ensure(ctx)
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
 	for readings := 1; ; readings++ {
@@ -179,9 +174,25 @@ func (g *Guard) ensure(ctx context.Context) error {
 	}
 	if g.ctrl.Mode() == Limiting {
 		// A NIC reset recreates the receive threads at nice 0.
-		return g.prioritize(receiveNice)
+		return prioritize(g.name, receiveNice)
 	}
 	return nil
+}
+
+// recover undoes what a daemon killed while it limited left on the shared
+// ENI: the receive ring at its largest, and the receive threads at nice -10
+// with no budget to bound them. It runs whether or not the off switch
+// exists, because an operator may well create it after the guard misbehaved.
+func (g *Guard) recover(ctx context.Context) error {
+	errs := []error{g.restoreRing(ctx)}
+	iface, err := g.sharedInterface()
+	if err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	if iface != nil && iface.Name != g.cfg.PrimaryInterface {
+		errs = append(errs, prioritize(iface.Name, 0))
+	}
+	return errors.Join(errs...)
 }
 
 // forget stops watching, detaching the program if it's attached.
@@ -230,51 +241,77 @@ func (g *Guard) attach(ctx context.Context, budget uint64) (time.Duration, error
 	return time.Since(started), nil
 }
 
+// ringRecord is what Config.RingPath holds while the guard has raised a
+// receive ring.
+type ringRecord struct {
+	// MAC is the interface's hardware address. An ENI keeps its MAC on
+	// whichever NAT it is attached to, while its name and index can change.
+	MAC string `json:"mac"`
+	// Before is the size the guard raised the ring from, and Raised the size
+	// it raised it to.
+	Before int `json:"before"`
+	Raised int `json:"raised"`
+}
+
 // raiseRing sets the receive ring of iface to its largest size, so it holds
 // packets for longer while the receive threads wait for the CPU. At 800,000
 // packets a second, ENA's default of 1,024 slots lasts 1.3 ms, and on a
 // c7gn.medium its maximum of 2,048 lasts 2.6 ms. It records the size to
-// restore.
+// restore in Config.RingPath first, so a daemon killed right after the
+// change leaves the record for the next one.
 func (g *Guard) raiseRing(ctx context.Context, iface string) error {
-	output, err := command.Run(ctx, commandTimeout, "ethtool", "-g", iface)
+	maximum, current, err := rings(ctx, iface)
 	if err != nil && strings.Contains(err.Error(), "Operation not supported") {
 		// Its ring has no size to change, as on a veth.
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("failed to read the receive ring size of %s: %w", iface, err)
-	}
-	maximum, current, err := parseRings(output)
 	if err != nil {
 		return err
 	}
 	if current >= maximum {
 		return nil
 	}
+	found, err := net.InterfaceByName(iface)
+	if err != nil {
+		return fmt.Errorf("failed to read the hardware address of %s: %w", iface, err)
+	}
+	record, err := json.Marshal(ringRecord{MAC: found.HardwareAddr.String(), Before: current, Raised: maximum})
+	if err != nil {
+		return fmt.Errorf("failed to encode the receive ring record: %w", err)
+	}
+	if err := os.WriteFile(g.cfg.RingPath, record, 0o600); err != nil {
+		return fmt.Errorf("failed to record the receive ring size of %s: %w", iface, err)
+	}
+	// On a failure the record stays, and restoreRing removes it when it
+	// finds the ring wasn't raised.
 	if _, err := command.Run(ctx, commandTimeout, "ethtool", "-G", iface, "rx", strconv.Itoa(maximum)); err != nil {
 		return fmt.Errorf("failed to raise the receive ring of %s to %d: %w", iface, maximum, err)
 	}
-	g.ringBefore = current
 	return nil
 }
 
 // ringNow returns the receive ring size of iface, or 0 if ethtool can't say.
-func (g *Guard) ringNow(ctx context.Context, iface string) int {
-	output, err := command.Run(ctx, commandTimeout, "ethtool", "-g", iface)
-	if err != nil {
-		return 0
-	}
-	_, current, err := parseRings(output)
+func ringNow(ctx context.Context, iface string) int {
+	_, current, err := rings(ctx, iface)
 	if err != nil {
 		return 0
 	}
 	return current
 }
 
-// prioritize sets the nice value of the guarded interface's receive
-// threads. It does nothing without threaded NAPI, which has no such threads.
-func (g *Guard) prioritize(nice int) error {
-	pids, err := receiveThreads("/proc", g.name)
+// rings returns the receive ring's maximum and current size of iface.
+func rings(ctx context.Context, iface string) (maximum, current int, err error) {
+	output, err := command.Run(ctx, commandTimeout, "ethtool", "-g", iface)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read the receive ring size of %s: %w", iface, err)
+	}
+	return parseRings(output)
+}
+
+// prioritize sets the nice value of the receive threads of iface. It does
+// nothing without threaded NAPI, which has no such threads.
+func prioritize(iface string, nice int) error {
+	pids, err := receiveThreads("/proc", iface)
 	if err != nil {
 		return err
 	}
@@ -309,7 +346,7 @@ func (g *Guard) detach(ctx context.Context) error {
 	}
 	// Nice 0 is the kernel's default for the receive threads, and threaded
 	// NAPI leaves them at it.
-	errs := []error{g.prioritize(0)}
+	errs := []error{prioritize(g.name, 0)}
 	if err := g.attached.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("failed to detach the overload guard from %s: %w", g.name, err))
 	}
@@ -318,21 +355,66 @@ func (g *Guard) detach(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// restoreRing puts the receive ring back to the size raiseRing raised it
-// from, unless the interface is gone.
+// restoreRing puts back the receive ring that Config.RingPath records, then
+// removes the record. It changes only the interface with the recorded MAC,
+// and only while its ring is still at the size the guard raised it to. An
+// ENI that moved to the other NAT took its ring with it, one that came back
+// starts at the driver's default, and any other size was set by someone
+// else.
 func (g *Guard) restoreRing(ctx context.Context) error {
-	if g.ringBefore == 0 {
+	contents, err := os.ReadFile(g.cfg.RingPath)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	before := g.ringBefore
-	g.ringBefore = 0
-	if _, err := os.Stat(filepath.Join("/sys/class/net", g.name)); err != nil {
-		return nil
+	if err != nil {
+		return fmt.Errorf("failed to read the receive ring record: %w", err)
 	}
-	if _, err := command.Run(ctx, commandTimeout, "ethtool", "-G", g.name, "rx", strconv.Itoa(before)); err != nil {
-		return fmt.Errorf("failed to restore the receive ring of %s to %d: %w", g.name, before, err)
+	var record ringRecord
+	if err := json.Unmarshal(contents, &record); err != nil {
+		return errors.Join(fmt.Errorf("failed to parse the receive ring record %q: %w", contents, err), g.removeRingRecord())
+	}
+	iface, err := interfaceWithMAC(record.MAC)
+	if err != nil {
+		return err
+	}
+	if iface != "" {
+		_, current, err := rings(ctx, iface)
+		if err != nil {
+			// The record stays, so the next detach or start tries again.
+			return err
+		}
+		if current == record.Raised {
+			if _, err := command.Run(ctx, commandTimeout, "ethtool", "-G", iface, "rx", strconv.Itoa(record.Before)); err != nil {
+				return fmt.Errorf("failed to restore the receive ring of %s to %d: %w", iface, record.Before, err)
+			}
+		}
+	}
+	return g.removeRingRecord()
+}
+
+func (g *Guard) removeRingRecord() error {
+	if err := os.Remove(g.cfg.RingPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("failed to remove the receive ring record: %w", err)
 	}
 	return nil
+}
+
+// interfaceWithMAC returns the name of the interface whose hardware address
+// is mac, or "" if none has it.
+func interfaceWithMAC(mac string) (string, error) {
+	if mac == "" {
+		return "", nil
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", fmt.Errorf("failed to list network interfaces: %w", err)
+	}
+	for _, iface := range ifaces {
+		if iface.HardwareAddr.String() == mac {
+			return iface.Name, nil
+		}
+	}
+	return "", nil
 }
 
 func (g *Guard) close(ctx context.Context) {
@@ -403,7 +485,7 @@ func (g *Guard) apply(ctx context.Context, reading Reading) error {
 		}
 		slog.Info("overload guard attached", slog.String("interface", g.name),
 			slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Float64("nic_drop_share", round(decision.DropShare)),
-			slog.Int("rx_ring", g.ringNow(ctx, g.name)), slog.Duration("duration", took))
+			slog.Int("rx_ring", ringNow(ctx, g.name)), slog.Duration("duration", took))
 	case Limiting:
 		if err := g.prog.setBudget(decision.Budget); err != nil {
 			g.ctrl.Reset()
@@ -421,7 +503,7 @@ func (g *Guard) apply(ctx context.Context, reading Reading) error {
 			slog.Float64("nic_drop_share", round(decision.DropShare)),
 			slog.Int64("measured_pps_per_cpu", int64(decision.Rate)),
 			slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)))
-		return g.prioritize(receiveNice)
+		return prioritize(g.name, receiveNice)
 	case Unlimited:
 		if previous == Limiting {
 			slog.Info("overload guard cleared", slog.String("interface", g.name),

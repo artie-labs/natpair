@@ -52,6 +52,10 @@ type Config struct {
 	FirstProbePort, LastProbePort uint16
 	// OffPath turns the guard off while it exists.
 	OffPath string
+	// RingPath records the shared ENI's receive ring size while the guard
+	// has raised it, so a daemon that restarts after a crash can put it
+	// back.
+	RingPath string
 }
 
 // The controller's tuning, in readings of Interval.

@@ -35,6 +35,9 @@ const (
 	DefaultMaxConnections = 262144
 	// OverloadGuardOffPath turns the overload guard off while it exists.
 	OverloadGuardOffPath = StateDir + "/overload-guard-off"
+	// OverloadGuardRingPath is where the overload guard records the shared
+	// ENI's receive ring size while it has raised it.
+	OverloadGuardRingPath = StateDir + "/overload-guard-ring"
 	// SharedProbePortFirst and SharedProbePortLast are the ports the shared
 	// canary's TCP connections take on the shared address. The overload
 	// guard lets replies to them through, so the owner's path probe works

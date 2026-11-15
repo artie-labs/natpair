@@ -206,6 +206,7 @@ func runNAT(ctx context.Context, args []string) error {
 		FirstProbePort:   config.SharedProbePortFirst,
 		LastProbePort:    config.SharedProbePortLast,
 		OffPath:          config.OverloadGuardOffPath,
+		RingPath:         config.OverloadGuardRingPath,
 	})
 	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe(), guard: overload}
 

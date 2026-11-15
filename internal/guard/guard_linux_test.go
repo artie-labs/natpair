@@ -103,14 +103,14 @@ func TestGuard(t *testing.T) {
 			// The NAT's daemon runs on the host.
 			t.Skip("no receive threads visible in this PID namespace")
 		}
-		require.NoError(t, g.prioritize(receiveNice))
+		require.NoError(t, prioritize("gs0", receiveNice))
 		for _, pid := range pids {
 			nice, err := unix.Getpriority(unix.PRIO_PROCESS, pid)
 			require.NoError(t, err)
 			// The raw value is 20 - nice
 			assert.Equal(t, 30, nice)
 		}
-		require.NoError(t, g.prioritize(0))
+		require.NoError(t, prioritize("gs0", 0))
 		for _, pid := range pids {
 			nice, err := unix.Getpriority(unix.PRIO_PROCESS, pid)
 			require.NoError(t, err)
@@ -200,6 +200,13 @@ func simulated(t *testing.T, id string) string {
 	return name
 }
 
+// simulatedConfig returns the guard's configuration for the interface that
+// simulated creates, with its files in a new directory.
+func simulatedConfig(t *testing.T) Config {
+	dir := t.TempDir()
+	return Config{SharedAddress: netip.MustParseAddr("10.98.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: filepath.Join(dir, "off"), RingPath: filepath.Join(dir, "ring")}
+}
+
 // ringSize returns the current receive ring size of iface.
 func ringSize(t *testing.T, iface string) int {
 	output, err := command.Run(t.Context(), 5*time.Second, "ethtool", "-g", iface)
@@ -253,7 +260,7 @@ func receiveNices(t *testing.T, iface string) []int {
 // whose names are longer than 15 characters.
 func TestGuardSheds(t *testing.T) {
 	name := simulated(t, "7317")
-	g := New(Config{SharedAddress: netip.MustParseAddr("10.98.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: filepath.Join(t.TempDir(), "off")})
+	g := New(simulatedConfig(t))
 	t.Cleanup(func() { g.close(context.WithoutCancel(t.Context())) })
 	require.NoError(t, g.ensure(t.Context()))
 	require.Equal(t, name, g.name)
@@ -306,7 +313,7 @@ func TestGuardRefusedLeavesTheRing(t *testing.T) {
 	name := simulated(t, "7318")
 	// netdevsim refuses XDP above an MTU of 4,000
 	ip(t, "link", "set", name, "mtu", "9000")
-	g := New(Config{SharedAddress: netip.MustParseAddr("10.98.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: filepath.Join(t.TempDir(), "off")})
+	g := New(simulatedConfig(t))
 	t.Cleanup(func() { g.close(context.WithoutCancel(t.Context())) })
 	require.NoError(t, g.ensure(t.Context()))
 
@@ -323,21 +330,76 @@ func TestGuardRefusedLeavesTheRing(t *testing.T) {
 	assert.Equal(t, 512, ringSize(t, name))
 }
 
-// TestGuardStartsAtDefaultPriority finds the receive threads at nice -10, as
-// a daemon killed while limiting leaves them, and puts them back when it
-// starts.
-func TestGuardStartsAtDefaultPriority(t *testing.T) {
-	name := simulated(t, "7319")
-	pids, err := receiveThreads("/proc", name)
-	require.NoError(t, err)
-	for _, pid := range pids {
-		require.NoError(t, unix.Setpriority(unix.PRIO_PROCESS, pid, -10))
+// crashWhileLimiting has a guard engage on the netdevsim interface name and
+// then die without cleaning up, as a killed daemon does. The kernel takes the
+// program off with the dead daemon's link, but the receive ring stays at its
+// largest and the receive threads at nice -10.
+func crashWhileLimiting(t *testing.T, cfg Config, name string) {
+	g := New(cfg)
+	require.NoError(t, g.ensure(t.Context()))
+	require.Equal(t, name, g.name)
+	var n nat
+	for range 12 {
+		require.NoError(t, g.apply(t.Context(), n.next(flood)))
 	}
-	require.Equal(t, []int{-10}, receiveNices(t, name))
-	g := New(Config{SharedAddress: netip.MustParseAddr("10.98.0.1"), PrimaryInterface: "guard-primary", ReceiverPort: 443, FirstProbePort: 61000, LastProbePort: 65535, OffPath: filepath.Join(t.TempDir(), "off")})
+	require.NoError(t, g.apply(t.Context(), n.next(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{50_000, 10_000}})))
+	require.Equal(t, Limiting, g.ctrl.Mode())
+	require.NoError(t, g.attached.Close())
+	require.NoError(t, g.prog.Close())
+	require.Equal(t, 4096, ringSize(t, name))
+}
+
+// startGuard starts a guard and stops it at its first wait, after it starts
+// watching.
+func startGuard(t *testing.T, cfg Config) {
 	ctx, cancel := context.WithCancel(t.Context())
-	// Run returns at its first wait, after it starts watching
 	cancel()
-	g.Run(ctx)
+	New(cfg).Run(ctx)
+}
+
+// TestGuardRecoversAfterACrash starts a guard after one was killed while it
+// limited. It puts the ring and the receive threads back even with the off
+// switch on, which is what an operator would set after the guard misbehaved.
+func TestGuardRecoversAfterACrash(t *testing.T) {
+	name := simulated(t, "7319")
+	cfg := simulatedConfig(t)
+	crashWhileLimiting(t, cfg, name)
+	assert.Equal(t, []int{-10}, receiveNices(t, name))
+	assert.FileExists(t, cfg.RingPath)
+	require.NoError(t, os.WriteFile(cfg.OffPath, nil, 0o600))
+
+	startGuard(t, cfg)
+	assert.Equal(t, 512, ringSize(t, name))
 	assert.Equal(t, []int{0}, receiveNices(t, name))
+	assert.NoFileExists(t, cfg.RingPath)
+}
+
+// TestGuardRecoversOnlyItsOwnRing starts a guard after a crash where the
+// ring it raised is no longer there to restore. It leaves the ring alone and
+// forgets the record.
+func TestGuardRecoversOnlyItsOwnRing(t *testing.T) {
+	name := simulated(t, "7320")
+	cfg := simulatedConfig(t)
+	{
+		// Another ENI now holds the shared address with a large ring, as
+		// when the shared ENI moved: a new MAC stands for a different ENI
+		crashWhileLimiting(t, cfg, name)
+		ip(t, "link", "set", name, "address", "02:00:00:00:73:20")
+		startGuard(t, cfg)
+		assert.Equal(t, 4096, ringSize(t, name))
+		assert.NoFileExists(t, cfg.RingPath)
+	}
+	{
+		// The ring is no longer at the size the guard set, as when the
+		// shared ENI moved to the other NAT and back, or someone else changed
+		// it
+		_, err := command.Run(t.Context(), 5*time.Second, "ethtool", "-G", name, "rx", "512")
+		require.NoError(t, err)
+		crashWhileLimiting(t, cfg, name)
+		_, err = command.Run(t.Context(), 5*time.Second, "ethtool", "-G", name, "rx", "1024")
+		require.NoError(t, err)
+		startGuard(t, cfg)
+		assert.Equal(t, 1024, ringSize(t, name))
+		assert.NoFileExists(t, cfg.RingPath)
+	}
 }

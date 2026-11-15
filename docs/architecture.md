@@ -144,7 +144,10 @@ Attaching the program, and changing the ring, each restart an ENA interface,
 which loses a few milliseconds of packets in the middle of a flood. The daemon
 watches only the interface that holds the shared address, and never the NAT's
 own interface, where its lease renewals, DNS lookups and conntrackd copies
-arrive. The program goes away when the daemon stops.
+arrive. The program goes away when the daemon stops. The daemon records the
+ring's size under `/var/lib/natpair` before raising it, so if it's killed
+while it limits, the next start puts the ring and the receive threads back,
+even with the off switch on.
 
 The guard only drops packets. It never decides who owns the pair: the probes
 and the lease still do, so a broken owner fails over as before. To turn it
