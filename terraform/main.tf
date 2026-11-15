@@ -291,8 +291,8 @@ resource "aws_instance" "nat" {
   tags = { Name = "${var.name}-nat-${each.key}", (local.pair_tag) = var.pair_id }
 
   # The NATs boot once the shared ENI has its address, so the first takeover
-  # doesn't wait for it.
-  depends_on = [aws_eip_association.shared]
+  # doesn't wait for it, and once they may use what they need while booting.
+  depends_on = [aws_eip_association.shared, aws_iam_role_policy.nat_boot]
 
   lifecycle {
     # source_dest_check belongs to the primary interface, which turns it off.
@@ -362,14 +362,25 @@ resource "aws_iam_role_policy" "nat" {
   role = aws_iam_role.nat.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = concat([local.table_access, local.release_record_access, local.receiver_access, local.session_access], local.release_access, local.datadog_access, [for statement in local.ec2_access : merge(statement, {
+    Statement = concat([local.table_access, local.release_record_access, local.receiver_access], [for statement in local.ec2_access : merge(statement, {
       Condition = { StringEquals = merge(statement.Condition.StringEquals, { "aws:RequestedRegion" = data.aws_region.current.region }) }
     })])
   })
 
   # Applied after the NATs, so they carry the pair tag before the policy relies
-  # on it. A NAT boots without the policy and retries until it applies.
+  # on it. The daemon retries until it applies.
   depends_on = [aws_instance.nat]
+}
+
+# What a NAT needs from its first boot on, attached before the NATs launch:
+# Session Manager, the release download, which self-updates also use, and the
+# Datadog key. On a fresh apply, the SSM agent that started without these
+# permissions never came online, and the Datadog install, which doesn't retry,
+# failed.
+resource "aws_iam_role_policy" "nat_boot" {
+  name   = "${var.name}-boot"
+  role   = aws_iam_role.nat.id
+  policy = jsonencode({ Version = "2012-10-17", Statement = concat([local.session_access], local.release_access, local.datadog_access) })
 }
 
 # The probe receiver is a Lambda function behind a function URL that requires

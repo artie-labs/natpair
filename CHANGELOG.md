@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second. The NAT may then give a closed connection's address and port to a
   new one sooner, so a connection to a server that closed the old one first
   can take about 1 s longer to open. NATs set this at boot.
+- On a fresh apply, the NATs' SSM agent never came online and the Datadog
+  agent install failed, because the NATs booted before their IAM policy was
+  attached. Session Manager, release download and Datadog permissions are now
+  in a `<name>-boot` policy attached before the NATs launch. NATs that already
+  booted without them keep running without the Datadog agent, and may stay
+  without Session Manager, until you
+  [replace them](docs/operations.md#replace-a-nat) one at a time.
 
 ### Security
 
