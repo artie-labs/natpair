@@ -224,9 +224,13 @@ old release. See [operations](operations.md#upgrade) for the steps.
     link-local address.
   - ICMP fragmentation-needed, host-unreachable, port-unreachable and
     time-exceeded messages to the NAT's own address, at most 50 a second
-    of each type. Errors about tracked connections are accepted as before.
+    of each type after a burst of 100. Errors about tracked connections are
+    accepted as before.
   The NAT's own sockets keep to the ephemeral range, and the own-path probes
-  use ports 61000 to 65535, which stay tracked.
+  use ports 61000 to 65535, which stay tracked. UDP to a DNS server outside
+  the VPC's address ranges, such as one reached through peering or on
+  premises and set in the VPC's DHCP options, stays tracked, so a full table
+  still breaks those lookups.
 - **Congested paths.** A failed upload that the handshake check calls
   congested keeps the owner serving, so traffic can't hold a broken owner
   in place unless its path still carries some packets. A completed

@@ -249,8 +249,9 @@ type Monitor struct {
 	// standby then checks its own path at the serving interval, so the owner
 	// learns quickly whether the failure is its own.
 	peerFailing bool
-	// table is the connection table's reading after the previous round's
-	// upload, if tableRead.
+	// table is the last good reading of the connection table, if tableRead.
+	// A failed reading keeps it, so the next good one still has drops to
+	// compare with. The drop counter only grows, so the comparison holds.
 	table     network.ConnectionTable
 	tableRead bool
 	// These limit how often each warning about the connection table repeats.
@@ -519,7 +520,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	// up almost all of natpair's logs, about 36,000 lines a day per owner.
 	// Failed rounds and changes are logged at once, and otherwise one round
 	// each logInterval.
-	state := roundState{healthy: healthy, tableFull: tableFull, congested: congested, ready: ready, serving: serving, peerReady: report.PeerReady}
+	state := roundState{healthy: healthy, tableFull: report.TableFull, congested: congested, ready: ready, serving: serving, peerReady: report.PeerReady}
 	// Each round that counts as failed is logged. Others, including failed
 	// rounds that don't count, such as with a full table or a congested
 	// path, which can last hours, are logged when something changes and
@@ -557,14 +558,14 @@ func (m *Monitor) Round(ctx context.Context) Report {
 // such as two packets racing to insert the same entry.
 func (m *Monitor) readTable(ctx context.Context, now time.Duration) bool {
 	table, err := m.deps.Table.ReadConnectionTable(ctx)
-	previous, hadPrevious := m.table, m.tableRead
-	m.table, m.tableRead = table, err == nil
 	if err != nil {
 		if m.tableUnread.due(now) {
 			slog.Warn("failed to read the connection table, so a full table can't be told from a path failure", slog.Any("err", err))
 		}
 		return false
 	}
+	previous, hadPrevious := m.table, m.tableRead
+	m.table, m.tableRead = table, true
 	nearlyFull := table.Max > 0 && table.Connections*100 >= table.Max*nearlyFullPercent
 	full := nearlyFull && hadPrevious && table.Drops > previous.Drops
 	switch {

@@ -149,6 +149,7 @@ func TestBootstrap(t *testing.T) {
 	assert.Contains(t, log.commands, "iptables -w 1 -t raw -C OUTPUT -j NATPAIR_UNTRACK_OUT")
 	assert.Contains(t, log.commands, "iptables -w 1 -t raw -C PREROUTING -j NATPAIR_UNTRACK_IN")
 	// The NAT's own sockets never pick the canary's ports.
+	require.Contains(t, log.commands, "sysctl -qw net.ipv4.ip_local_port_range=32768 60999")
 	assert.Less(t, slices.Index(log.commands, "sysctl -qw net.ipv4.ip_local_port_range=32768 60999"), restores[1])
 }
 
