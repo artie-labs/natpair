@@ -237,6 +237,23 @@ func TestRun(t *testing.T) {
 		assert.Zero(t, f.fence.ArmCallCount())
 	}
 	{
+		// A probe that fails because the copies filled the new owner's table
+		// doesn't end the takeover. With the peer dead, ending it would retry
+		// the takeover forever.
+		f := newFixture(t)
+		release := make(chan struct{})
+		f.preparer.PrepareCalls(func(context.Context) error {
+			<-release
+			return nil
+		})
+		f.start(t)
+		require.Eventually(t, func() bool { return f.preparer.PrepareCallCount() == 1 }, waitFor, 10*time.Millisecond)
+		f.setReport(health.Report{CanForward: true, PathHealthy: false, TableFull: true})
+		close(release)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		assert.Equal(t, 1, f.preparer.PrepareCallCount())
+	}
+	{
 		// A takeover keeps going through failed renewals while its grant lasts
 		f := newFixture(t)
 		release := make(chan struct{})

@@ -92,7 +92,9 @@ it drops new worker connections. The standby loads copies of the owner's
 TCP connections on taking over, so when TCP fills the table, it would fail
 the same way. Full means the kernel dropped
 packets it couldn't track since the last round while the table was at least
-90% full.
+90% full. Two failed rounds count as in a row only if at most two such
+rounds came between them. A NAT taking over also doesn't stop for such a
+round, because the copies it loads can fill its table.
 
 When the owner's upload times out, it then tries 40 TCP handshakes with the
 probe receiver at once, through the shared Elastic IP like the upload, and

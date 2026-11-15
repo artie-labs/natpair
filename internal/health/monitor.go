@@ -46,6 +46,11 @@ const (
 	// requiredSuccesses is the number of consecutive healthy rounds before
 	// this NAT counts as able to forward.
 	requiredSuccesses = 2
+	// failureGapRounds is how many rounds in a row that count neither way,
+	// such as with a full connection table, end a run of failed rounds. Without
+	// it, one failure, hours of full table, then one more failure would count
+	// as two in a row and make the owner step down.
+	failureGapRounds = 3
 	// oldestCount is how many of its longest-held connections a NAT publishes.
 	// The peer's copy counts as complete only when it holds all of them. A
 	// restarted conntrackd starts empty, and idle connections send no updates
@@ -95,7 +100,12 @@ func StaleAfter(interval time.Duration) time.Duration {
 // [Reports].
 type Report struct {
 	// PathHealthy is true when this round's upload passed.
-	PathHealthy         bool `json:"path_healthy"`
+	PathHealthy bool `json:"path_healthy"`
+	// TableFull means this round's upload failed because this NAT's
+	// connection table was full, so the failure says nothing about the path.
+	// The round counts neither as failed nor as healthy. Only this NAT reads
+	// it, so it isn't sent to the peer.
+	TableFull           bool `json:"-"`
 	ConsecutiveFailures int  `json:"consecutive_failures"`
 	// TrackedConnections is the number of connections conntrackd tracks on
 	// this NAT, which the peer should hold copies of.
@@ -221,8 +231,11 @@ type Monitor struct {
 
 	// State carried between rounds. Round and interval use it without a lock,
 	// so only one goroutine may call them.
-	failures        int
-	successes       int
+	failures  int
+	successes int
+	// uncounted is how many rounds counted neither way since the last failed
+	// round.
+	uncounted       int
 	flows           []timedFlow
 	lastReplication time.Duration
 	replicated      bool
@@ -371,6 +384,10 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// it would fail the same way. This round proves nothing about the
 		// path and counts neither way. On AWS, an owner whose table
 		// filled stepped down, and so did the NAT that took over from it.
+		m.uncounted++
+		if m.uncounted >= failureGapRounds {
+			m.failures = 0
+		}
 		if m.fullProbe.due(now) {
 			slog.Warn("the health probe failed because this NAT's connection table is full, so it doesn't count as a path failure",
 				slog.Any("probe_error", probeErr), slog.Int("connections", m.table.Connections), slog.Int("max_connections", m.table.Max))
@@ -393,7 +410,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 				slog.Any("probe_error", probeErr), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts))
 		}
 	default:
-		m.failures, m.successes = m.failures+1, 0
+		m.failures, m.successes, m.uncounted = m.failures+1, 0, 0
 		countedFailure = true
 	}
 	var flows []timedFlow
@@ -468,6 +485,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	ready := canForward && recent && !inhibited
 	report := Report{
 		PathHealthy:            healthy,
+		TableFull:              !healthy && tableFull,
 		ConsecutiveFailures:    m.failures,
 		TrackedConnections:     tracked,
 		Oldest:                 m.oldest,

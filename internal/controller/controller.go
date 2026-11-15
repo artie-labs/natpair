@@ -368,8 +368,12 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 						return fmt.Errorf("%w: %w", errTakeover, err)
 					}
 					// A last-resort takeover cannot prove its path, so only a
-					// stuck monitor stops it.
-					if report.Stale || (verified && !report.PathHealthy) {
+					// stuck monitor stops it. A probe that failed because this
+					// NAT's table is full doesn't stop it either: the copies it
+					// just loaded can fill the table, and the takeover's own
+					// uploads already proved the path. With the peer dead,
+					// stopping would retry the takeover with no NAT forwarding.
+					if report.Stale || (verified && !report.PathHealthy && !report.TableFull) {
 						return fmt.Errorf("%w: forwarding path failed during takeover", errTakeover)
 					}
 					prepared = true
