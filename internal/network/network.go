@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
 	"regexp"
@@ -155,6 +156,51 @@ func (n *Network) protectHost(ctx context.Context) error {
 	return n.ensureRule(ctx, "filter", "INPUT", "-j", inputChain)
 }
 
+// routePeer sends traffic to the peer, such as conntrackd's copies, through
+// this NAT's own interface from its own address. conntrackd sends from an
+// unbound socket, so the route picks both. Once the shared ENI is attached,
+// its address adds a route to the same subnet that wins over the own
+// interface's, and the copies left through the shared ENI from the shared
+// address. The shared ENI's MTU is 1500 and the own interface's 9001, so each
+// datagram of about 8.9 KB left as 7 fragments, all counted against the NAT's
+// packets-per-second allowance. On AWS, after a full resync under connection
+// churn, the shared ENI sent about 130,000 packets a second while receiving
+// 40,000, and AWS dropped about 90,000 a second. This host route is more
+// specific than either subnet route, so it always wins. The route has no
+// gateway, because the peer is in the own interface's subnet.
+func (n *Network) routePeer(ctx context.Context) error {
+	_, err := n.run.Run(ctx, commandTimeout, "ip", "route", "replace", netip.PrefixFrom(n.cfg.PeerIP, 32).String(),
+		"dev", n.cfg.Instance.Interface, "src", n.cfg.Instance.PrivateIP.String())
+	return err
+}
+
+// EnsurePeerRoute puts the route to the peer back if it's missing or no
+// longer uses the own interface and address. The kernel deletes it when the
+// own interface goes down or loses its address, and other network tools can
+// delete it when they reconfigure the interfaces. Without it, conntrackd's
+// copies fragment again. It reports whether the route had to be put back.
+func (n *Network) EnsurePeerRoute(ctx context.Context) (bool, error) {
+	output, err := n.run.Run(ctx, commandTimeout, "ip", "-j", "route", "show", netip.PrefixFrom(n.cfg.PeerIP, 32).String())
+	if err != nil {
+		return false, err
+	}
+	var routes []struct {
+		Dev     string `json:"dev"`
+		PrefSrc string `json:"prefsrc"`
+	}
+	if output != "" {
+		if err := json.Unmarshal([]byte(output), &routes); err != nil {
+			return false, fmt.Errorf("failed to parse the route to the peer: %w", err)
+		}
+	}
+	for _, route := range routes {
+		if route.Dev == n.cfg.Instance.Interface && route.PrefSrc == n.cfg.Instance.PrivateIP.String() {
+			return false, nil
+		}
+	}
+	return true, n.routePeer(ctx)
+}
+
 // sizeConnectionTable matches the kernel's connection table to conntrackd's
 // limit. The kernel sizes the table and its hash buckets from memory, 7,680 on
 // a t4g.micro. Closed connections stay in the table for 120 s, so about 1,000
@@ -221,8 +267,10 @@ func (n *Network) createCanary(ctx context.Context, index int, canary config.Can
 	return n.ensureRule(ctx, "filter", "FORWARD", "-d", guestHost, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 }
 
-// PrepareNetwork installs SNAT and routing rules for the shared ENI. It is
-// safe to run repeatedly, and before the shared ENI is attached.
+// PrepareNetwork installs SNAT and routing rules for the shared ENI, and the
+// route to the peer. It is safe to run repeatedly, and before the shared ENI
+// is attached. Bootstrap and every takeover run it. Between them, the daemon
+// checks the route to the peer every 5 s with [Network.EnsurePeerRoute].
 //
 // Worker traffic and the shared canary are translated to the shared ENI's
 // private IP and routed out through the shared ENI, because the Internet
@@ -262,6 +310,12 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 		if err := n.ensureRule(ctx, "filter", "FORWARD", "-s", prefix.String(), "-p", "tcp", "-m", "conntrack", "--ctstate", "INVALID", "-j", "REJECT", "--reject-with", "tcp-reset"); err != nil {
 			return err
 		}
+	}
+	// The route only keeps conntrackd's copies from fragmenting, and the
+	// daemon's 5 s check sets it again, so a failure here doesn't stop a
+	// takeover.
+	if err := n.routePeer(ctx); err != nil {
+		slog.Warn("failed to set the route to the peer, the 5 s check will try again", slog.Any("err", err))
 	}
 	return nil
 }
