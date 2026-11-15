@@ -24,6 +24,12 @@ func TestLoadNAT(t *testing.T) {
 	assert.Equal(t, probe.Target{URL: "https://probe.example.invalid/nat", ExpectedIP: netip.MustParseAddr("192.0.2.10"), Namespace: "natpair-own", Source: netip.MustParseAddr("198.18.0.2")}, cfg.OwnProbe())
 	assert.Equal(t, probe.Target{URL: "https://probe.example.invalid/nat", ExpectedIP: netip.MustParseAddr("192.0.2.100"), Namespace: "natpair-shared", Source: netip.MustParseAddr("198.18.0.6")}, cfg.SharedProbe())
 	assert.Equal(t, netip.MustParseAddr("198.18.0.5"), cfg.SharedCanary().Host())
+	assert.Equal(t, uint16(443), cfg.ReceiverPort())
+	{
+		// The overload guard matches replies from the receiver's own port
+		cfg.ProbeURL = "https://127.0.0.1:8443/nat"
+		assert.Equal(t, uint16(8443), cfg.ReceiverPort())
+	}
 }
 
 func TestLoadNATRejectsUnknownFields(t *testing.T) {

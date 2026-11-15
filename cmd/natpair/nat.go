@@ -21,6 +21,7 @@ import (
 	"github.com/artie-labs/natpair/internal/controller"
 	"github.com/artie-labs/natpair/internal/dynamo"
 	"github.com/artie-labs/natpair/internal/fence"
+	"github.com/artie-labs/natpair/internal/guard"
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/napi"
@@ -209,7 +210,16 @@ func runNAT(ctx context.Context, args []string) error {
 	// authentication.
 	prober := &probe.Client{Credentials: awsConfig.Credentials}
 	receive := &receiveThreading{enable: napi.Enable}
-	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe(), receive: receive}
+	overload := guard.New(guard.Config{
+		SharedAddress:    cfg.SharedAddress.Addr(),
+		PrimaryInterface: cfg.Instance.Interface,
+		ReceiverPort:     cfg.ReceiverPort(),
+		FirstProbePort:   config.SharedProbePortFirst,
+		LastProbePort:    config.SharedProbePortLast,
+		OffPath:          config.OverloadGuardOffPath,
+		RingPath:         config.OverloadGuardRingPath,
+	})
+	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe(), receive: receive, guard: overload}
 
 	var ctrl *controller.Controller
 	monitor := health.New(health.Config{
@@ -268,6 +278,10 @@ func runNAT(ctx context.Context, args []string) error {
 	})
 	group.Go(func() error {
 		keepReceiveThreaded(ctx, receive)
+		return nil
+	})
+	group.Go(func() error {
+		overload.Run(ctx)
 		return nil
 	})
 	group.Go(func() error {
@@ -420,6 +434,7 @@ type localSteps struct {
 	prober    *probe.Client
 	target    probe.Target
 	receive   *receiveThreading
+	guard     *guard.Guard
 }
 
 func (s localSteps) PrepareNetwork(ctx context.Context) error {
@@ -439,14 +454,19 @@ func (s localSteps) ClaimShared(ctx context.Context, mac string) error {
 }
 
 // ActivateShared configures the shared ENI, then turns on threaded NAPI for
-// it before forwarding opens. The attached ENI is a new network device that
-// starts with threaded NAPI off. Failing to turn it on, or waiting longer
-// than takeoverPassTimeout, is only logged.
+// it before forwarding opens, and has the overload guard watch it, so a
+// flood that follows the shared ENI here is caught at once. The attached ENI
+// is a new network device that starts with threaded NAPI off. Failing to
+// turn it on, or waiting longer than takeoverPassTimeout, is only logged.
 func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 	if err := s.network.ActivateShared(ctx, mac); err != nil {
 		return err
 	}
-	return s.receive.turnOnWithin(ctx, takeoverPassTimeout)
+	if err := s.receive.turnOnWithin(ctx, takeoverPassTimeout); err != nil {
+		return err
+	}
+	s.guard.Ensure(ctx)
+	return nil
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {

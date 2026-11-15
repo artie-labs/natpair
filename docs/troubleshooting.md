@@ -152,6 +152,42 @@ failed, so it hasn't opened forwarding yet. They're normal for up to about
 10 s while AWS moves the ENI. If they continue, check that the Elastic IP is still
 associated with the shared ENI.
 
+### `overload guard engaged`
+
+The full message is `overload guard engaged: the CPU can't forward everything
+the shared ENI receives, so it drops worker packets past a budget`. Workers
+send more packets than the owner's CPU forwards, so it forwards about 90% of
+what the CPU managed at full load, less if they keep coming faster, and
+drops the rest to keep its own path probe working. Under a flood that is
+most of what arrives. `busiest_cpu` and `nic_drop_share` show the overload it saw, and
+`budget_pps_per_cpu` how many packets a second each CPU now forwards.
+`receive_threads` is how many of the shared ENI's receive threads it raised
+to nice -10. When it's 0, threaded NAPI is off, the daemon also logs
+`overload guard found no receive threads to raise`, and the probe's replies
+can still miss the ring while the daemon holds the CPU. While the NIC still
+drops packets, it logs `overload guard lowered its budget` once a second,
+down to half of `measured_pps_per_cpu`. While it still drops packets but the
+CPU has room, it logs `overload guard raised its budget` once a second. It
+logs `overload guard cleared`, with how many packets
+it `dropped`, once the traffic fits the budget again.
+
+Find the worker sending the most packets, often small UDP, and slow it down,
+or move to an instance type with more CPUs, as in
+[Replace a NAT](operations.md#replace-a-nat).
+
+### `overload guard failed`
+
+The daemon couldn't attach or run the overload guard, and the `err` field
+says why. The NAT forwards as it would without the guard. If `err` says
+`failed to attach the overload guard`, check that nothing else attached an
+XDP program to the shared ENI (`ip -d link show`), that its MTU is at most
+3,502 bytes, and that it uses at most half the queues it could
+(`ethtool -l`). ENA allows XDP only within both limits, and larger instance
+types may use all their queues by default. A refused attach leaves the
+interface as it was. The daemon tries again at the next overload, and logs
+the same failure once. `overload guard failed to raise the receive ring`
+means it sheds the flood with the ring's current size.
+
 ### `this boot was prepared by another release, so this NAT reports none until it reboots`
 
 This NAT took over while it was installing a release, so it runs a binary it

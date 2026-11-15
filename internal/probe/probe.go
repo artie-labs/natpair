@@ -288,7 +288,7 @@ func (c *Client) lastResolved(ctx context.Context, address *url.URL) (netip.Addr
 	if !known {
 		return c.resolve(ctx, address)
 	}
-	port, err := receiverPort(address)
+	port, err := Port(address)
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
@@ -366,8 +366,9 @@ func (c *Client) sign(ctx context.Context, request *http.Request, payloadDigest 
 	return nil
 }
 
-// receiverPort returns the receiver's port, 443 unless its URL names one.
-func receiverPort(address *url.URL) (uint16, error) {
+// Port returns the receiver's port in address, or 443 when it names none.
+// The overload guard matches the probe's replies by this port.
+func Port(address *url.URL) (uint16, error) {
 	value := address.Port()
 	if value == "" {
 		return 443, nil
@@ -382,7 +383,7 @@ func receiverPort(address *url.URL) (uint16, error) {
 // resolve returns the receiver's address, or the host's last resolved
 // address if the lookup fails.
 func (c *Client) resolve(ctx context.Context, address *url.URL) (netip.AddrPort, error) {
-	port, err := receiverPort(address)
+	port, err := Port(address)
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
