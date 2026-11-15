@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a fresh apply, the NATs' SSM agent never came online and the Datadog
+  agent install failed, because the NATs booted before their IAM policy was
+  attached. Session Manager, release download and Datadog permissions are now
+  in a `<name>-boot` policy attached before the NATs launch. NATs that already
+  booted without them keep running without the Datadog agent, and may stay
+  without Session Manager, until you
+  [replace them](docs/operations.md#replace-a-nat) one at a time.
 - conntrackd's copies to the peer left through the shared ENI, from the
   shared address, once that ENI was attached. Its MTU is 1500, so each copy
   of about 8.9 KB went out as 7 fragments, which counted against the NAT's
