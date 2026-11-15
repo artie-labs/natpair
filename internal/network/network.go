@@ -173,6 +173,33 @@ func (n *Network) routePeer(ctx context.Context) error {
 	return err
 }
 
+// EnsurePeerRoute puts the route to the peer back if it's missing or no
+// longer uses the own interface and address. The kernel deletes it when the
+// own interface goes down or loses its address, and other network tools can
+// delete it when they reconfigure the interfaces. Without it, conntrackd's
+// copies fragment again. It reports whether the route had to be put back.
+func (n *Network) EnsurePeerRoute(ctx context.Context) (bool, error) {
+	output, err := n.run.Run(ctx, commandTimeout, "ip", "-j", "route", "show", netip.PrefixFrom(n.cfg.PeerIP, 32).String())
+	if err != nil {
+		return false, err
+	}
+	var routes []struct {
+		Dev     string `json:"dev"`
+		PrefSrc string `json:"prefsrc"`
+	}
+	if output != "" {
+		if err := json.Unmarshal([]byte(output), &routes); err != nil {
+			return false, fmt.Errorf("failed to parse the route to the peer: %w", err)
+		}
+	}
+	for _, route := range routes {
+		if route.Dev == n.cfg.Instance.Interface && route.PrefSrc == n.cfg.Instance.PrivateIP.String() {
+			return false, nil
+		}
+	}
+	return true, n.routePeer(ctx)
+}
+
 // sizeConnectionTable matches the kernel's connection table to conntrackd's
 // limit. The kernel sizes the table and its hash buckets from memory, 7,680 on
 // a t4g.micro. Closed connections stay in the table for 120 s, so about 1,000
@@ -241,10 +268,8 @@ func (n *Network) createCanary(ctx context.Context, index int, canary config.Can
 
 // PrepareNetwork installs SNAT and routing rules for the shared ENI, and the
 // route to the peer. It is safe to run repeatedly, and before the shared ENI
-// is attached. Bootstrap and every takeover run it, so a NAT that takes over
-// puts back a route to the peer that the kernel dropped since boot, such as
-// when the own interface went down. A NAT that keeps serving gets it back
-// only when it reboots or takes over again.
+// is attached. Bootstrap and every takeover run it. Between them, the daemon
+// checks the route to the peer every 5 s with [Network.EnsurePeerRoute].
 //
 // Worker traffic and the shared canary are translated to the shared ENI's
 // private IP and routed out through the shared ENI, because the Internet

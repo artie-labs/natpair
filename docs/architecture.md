@@ -62,7 +62,9 @@ standby as connections open and close. When the standby takes over, it loads
 those copies, so established TCP connections keep their source address and
 port and carry on. Only TCP over IPv4 is copied. The copies always travel
 between the NATs' own interfaces and addresses, never through the shared
-ENI.
+ENI, where they would fragment. A host route to the peer keeps them there.
+Each NAT sets it at boot and at every takeover, checks it every 5 s, and puts
+it back if something removed or changed it.
 
 A connection the new owner doesn't know gets a TCP reset instead of silence,
 so the client reconnects at once rather than waiting for its own timeout.
