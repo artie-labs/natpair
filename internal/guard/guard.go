@@ -95,6 +95,17 @@ const (
 	// rate, and the probe failed 29 times in 60 s.
 	cutShare = 0.9
 	cutFloor = 0.5
+	// raiseBusy and raiseShare: while the program still drops at least
+	// clearShedShare of what it sees, but the busiest CPU was less than 85%
+	// busy over the last second, the budget is lower than the CPU needs. That
+	// happens when a flood ends and steady traffic that doesn't slow down,
+	// such as UDP, stays above a budget that a cut lowered. Without a raise,
+	// the program would drop that traffic for as long as it lasts. The budget
+	// then rises to 110% of itself, at most once a second, and no higher than
+	// the budget it started with. The gap to cutting at a 95% busy CPU keeps
+	// one rise from undoing the last cut.
+	raiseBusy  = 0.85
+	raiseShare = 1.1
 	// budgetShare is the share of the measured rate the budget lets through.
 	// The 10% it drops costs much less than forwarding it would, so the CPU
 	// has room again for the probe and the NAT's own work.
@@ -165,6 +176,9 @@ type Decision struct {
 	// Shed is how many packets the program dropped while limiting, on the
 	// way back to Unlimited.
 	Shed uint64
+	// Raised is set when a Limiting decision raises the budget instead of
+	// lowering it.
+	Raised bool
 }
 
 // Controller decides the program's budget from readings. It is a pure
@@ -183,10 +197,11 @@ type Controller struct {
 	// the measured interval is in.
 	engagedBy Decision
 	measuring bool
-	// budget is the current budget and floor the lowest a cut goes, and
-	// cutAt is the value of since at the last cut.
-	budget, floor uint64
-	cutAt         int
+	// budget is the current budget, floor the lowest a cut goes and ceiling
+	// the highest a raise goes. changedAt is the value of since at the last
+	// cut or raise.
+	budget, floor, ceiling uint64
+	changedAt              int
 }
 
 // Mode returns what the program is doing.
@@ -224,17 +239,13 @@ func (c *Controller) Step(r Reading) Decision {
 		// ended can still show NIC drops against almost no traffic. Only a
 		// full CPU makes them the budget's fault.
 		if overflow >= engageDropShare && busiest >= engageBusy {
-			if c.since-c.cutAt < clearReadings {
-				return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
-			}
-			budget := max(c.floor, uint64(cutShare*float64(c.budget)))
-			if budget == c.budget {
-				return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
-			}
-			c.budget, c.cutAt = budget, c.since
-			return Decision{Mode: Limiting, Changed: true, Budget: budget, Busiest: busiest, DropShare: overflow}
+			return c.change(max(c.floor, uint64(cutShare*float64(c.budget))), busiest, overflow)
 		}
 		if share >= clearShedShare {
+			if calm, _ := c.busiest(clearReadings); calm < raiseBusy {
+				// At least 1 more, so a budget of a few packets can rise too.
+				return c.change(min(c.ceiling, max(c.budget+1, uint64(raiseShare*float64(c.budget)))), calm, share)
+			}
 			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
 		}
 		shed := sumSince(c.from.Shed, r.Shed)
@@ -274,8 +285,20 @@ func (c *Controller) limit(r Reading) Decision {
 	c.mode, c.from, c.since = Limiting, r, 0
 	// A budget of 0 would mean no limit, so it lets at least one through.
 	budget := max(1, uint64(budgetShare*rate*tickSeconds))
-	c.budget, c.floor, c.cutAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), 0
+	c.budget, c.floor, c.ceiling, c.changedAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), budget, 0
 	return Decision{Mode: Limiting, Changed: true, Budget: budget, Rate: rate, Busiest: c.engagedBy.Busiest, DropShare: c.engagedBy.DropShare}
+}
+
+// change sets the budget to budget, at most once every clearReadings
+// readings, and reports the busiest CPU and the drop share that called for
+// it.
+func (c *Controller) change(budget uint64, busiest, share float64) Decision {
+	if budget == c.budget || c.since-c.changedAt < clearReadings {
+		return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
+	}
+	raised := budget > c.budget
+	c.budget, c.changedAt = budget, c.since
+	return Decision{Mode: Limiting, Changed: true, Budget: budget, Busiest: busiest, DropShare: share, Raised: raised}
 }
 
 // record adds a reading. Counters that went backwards, as when the NIC

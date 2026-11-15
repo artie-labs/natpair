@@ -495,6 +495,12 @@ func (g *Guard) apply(ctx context.Context, reading Reading) error {
 			g.ctrl.Reset()
 			return errors.Join(err, g.detach(ctx))
 		}
+		if previous == Limiting && decision.Raised {
+			slog.Info("overload guard raised its budget, because the CPU has room and it still drops packets", slog.String("interface", g.name),
+				slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Float64("shed_share", round(decision.DropShare)),
+				slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)))
+			return nil
+		}
 		if previous == Limiting {
 			slog.Info("overload guard lowered its budget, because the NIC still drops packets", slog.String("interface", g.name),
 				slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Float64("nic_drop_share", round(decision.DropShare)),
@@ -509,6 +515,10 @@ func (g *Guard) apply(ctx context.Context, reading Reading) error {
 			slog.Int64("measured_pps_per_cpu", int64(decision.Rate)),
 			slog.Int64("budget_pps_per_cpu", int64(float64(decision.Budget)/tickSeconds)),
 			slog.Int("receive_threads", threads))
+		if err == nil && threads == 0 {
+			slog.Warn("overload guard found no receive threads to raise, because threaded NAPI is off, so the probe's replies can still miss the receive ring",
+				slog.String("interface", g.name))
+		}
 		return err
 	case Unlimited:
 		if previous == Limiting {

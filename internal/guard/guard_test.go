@@ -248,6 +248,90 @@ func TestControllerLowersTheBudgetWhileTheNICStillDrops(t *testing.T) {
 	assert.Equal(t, Unlimited, decisions[0].Mode)
 }
 
+// sim feeds a controller traffic whose cost on CPU 0 follows the program the
+// controller asks for. Passing a packet costs 1/5,000 of a tick, so 500,000
+// a second fill the CPU, and the program's drop costs a tenth of that. What
+// CPU 0 can't get to, the NIC drops.
+type sim struct {
+	c        Controller
+	n        nat
+	attached bool
+	budget   uint64
+}
+
+// run sends offered packets each interval for count intervals, and returns
+// the budgets the controller set and the share of packets the NIC dropped.
+func (s *sim) run(offered float64, count int) ([]uint64, float64) {
+	const passCost, shedCost, ticks = 10.0 / 50_000, 1.0 / 50_000, 10.0
+	var budgets []uint64
+	var dropped float64
+	for range count {
+		limit := math.Inf(1)
+		if s.attached {
+			limit = float64(s.budget) * Interval.Seconds() / tickSeconds
+		}
+		cost := func(handled float64) float64 {
+			passed := min(handled, limit)
+			return passed*passCost + (handled-passed)*shedCost
+		}
+		handled := offered
+		if cost(offered) > ticks {
+			if limit*passCost >= ticks {
+				handled = ticks / passCost
+			} else {
+				handled = limit + (ticks-limit*passCost)/shedCost
+			}
+		}
+		passed := min(handled, limit)
+		l := load{busyTicks: uint64(math.Round(cost(handled))), received: uint64(handled), dropped: uint64(offered - handled)}
+		if s.attached {
+			l.passed[0], l.shed[0] = uint64(passed), uint64(handled-passed)
+		}
+		dropped += offered - handled
+		d := s.c.Step(s.n.next(l))
+		if !d.Changed {
+			continue
+		}
+		s.attached, s.budget = d.Mode != Unlimited, d.Budget
+		if d.Mode == Limiting {
+			budgets = append(budgets, d.Budget)
+		}
+	}
+	return budgets, dropped / (offered * float64(count))
+}
+
+func TestControllerRaisesTheBudgetOnceTheFloodEnds(t *testing.T) {
+	// 2.4 million packets a second fill the CPU even under a budget of 90%
+	// of the measured rate, so it cuts the budget until the CPU keeps up
+	var s sim
+	budgets, _ := s.run(240_000, 100)
+	assert.Equal(t, []uint64{471, 423, 380, 342, 307}, budgets)
+	// The flood ends, but 400,000 packets a second of UDP, which doesn't
+	// slow down, stay above the cut budget. The CPU could forward them at
+	// 80%, so the budget rises once a second until the program sheds under
+	// 5%, and it clears
+	budgets, dropped := s.run(40_000, 60)
+	assert.Equal(t, []uint64{337, 370, 407}, budgets)
+	assert.Equal(t, Unlimited, s.c.Mode())
+	assert.Zero(t, dropped)
+}
+
+func TestControllerHoldsAFloodWithinABand(t *testing.T) {
+	for _, offered := range []float64{120_000, 240_000} {
+		// After it settles, the budget keeps the CPU from overflowing and
+		// stays put, rather than rising and being cut again
+		var s sim
+		budgets, _ := s.run(offered, 100)
+		require.NotEmpty(t, budgets)
+		settled := budgets[len(budgets)-1]
+		budgets, dropped := s.run(offered, 600)
+		assert.Empty(t, budgets, offered)
+		assert.Equal(t, Limiting, s.c.Mode())
+		assert.Less(t, dropped, engageDropShare, offered)
+		assert.Equal(t, settled, s.budget)
+	}
+}
+
 func TestNilGuardEnsureIsANoOp(t *testing.T) {
 	// Callers built without a guard, such as tests of the takeover steps,
 	// pass a nil one

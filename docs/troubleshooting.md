@@ -138,12 +138,14 @@ them, and more if they keep coming faster, to keep its own path probe
 working. `busiest_cpu` and `nic_drop_share` show the overload it saw, and
 `budget_pps_per_cpu` how many packets a second each CPU now forwards.
 `receive_threads` is how many of the shared ENI's receive threads it raised
-to nice -10. It's 0 when threaded NAPI is off, and then the probe's replies
-can still miss the ring while the daemon holds the CPU. While
-the NIC still drops packets, it logs `overload guard lowered its budget`
-once a second, down to half of `measured_pps_per_cpu`. It logs
-`overload guard cleared`, with how many packets it `dropped`, once the
-traffic fits the budget again.
+to nice -10. When it's 0, threaded NAPI is off, the daemon also logs
+`overload guard found no receive threads to raise`, and the probe's replies
+can still miss the ring while the daemon holds the CPU. While the NIC still
+drops packets, it logs `overload guard lowered its budget` once a second,
+down to half of `measured_pps_per_cpu`. While it still drops packets but the
+CPU has room, it logs `overload guard raised its budget` once a second, up
+to where it started. It logs `overload guard cleared`, with how many packets
+it `dropped`, once the traffic fits the budget again.
 
 Find the worker sending the most packets, often small UDP, and slow it down,
 or move to an instance type with more CPUs, as in
