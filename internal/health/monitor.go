@@ -239,6 +239,9 @@ type Dependencies struct {
 	// Inhibited reports maintenance, or the cooldown after stepping down or a
 	// failed takeover.
 	Inhibited func() bool
+	// Session returns the number of the controller's current or latest
+	// ownership session. It changes each time this NAT takes the lease.
+	Session func() uint64
 	// Now returns elapsed time on the boot clock.
 	Now func() time.Duration
 }
@@ -269,11 +272,13 @@ type Monitor struct {
 	// window holds this NAT's rounds while serving, oldest first, back to
 	// CongestionWindow ago. windowBad counts those that were congested or
 	// counted as failed. servingSince is when this NAT's current stretch of
-	// serving rounds started, if windowStarted. Standing by clears them.
+	// serving rounds started, in ownership session windowSession, if
+	// windowStarted. Standing by or a new session clears them.
 	window          []windowRound
 	windowBad       int
 	servingSince    time.Duration
 	windowStarted   bool
+	windowSession   uint64
 	flows           []timedFlow
 	lastReplication time.Duration
 	replicated      bool
@@ -690,8 +695,12 @@ func (m *Monitor) recordWindow(serving, bad bool, now time.Duration) bool {
 		m.window, m.windowBad, m.windowStarted = nil, 0, false
 		return false
 	}
-	if !m.windowStarted {
-		m.servingSince, m.windowStarted = now, true
+	// A new ownership session starts a new window too. A NAT that hands
+	// over and takes the lease back, such as when its peer offered to take
+	// over but couldn't, may run no round while standing by in between.
+	if session := m.deps.Session(); !m.windowStarted || session != m.windowSession {
+		m.window, m.windowBad = nil, 0
+		m.servingSince, m.windowStarted, m.windowSession = now, true, session
 	}
 	m.window = append(m.window, windowRound{at: now, bad: bad})
 	if bad {

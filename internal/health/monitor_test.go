@@ -40,6 +40,7 @@ type fixture struct {
 	clock     *fakeClock
 	serving   bool
 	inhibited bool
+	session   uint64
 	// peer is what the fake board returns. nil means no fresh report.
 	peer *health.Report
 }
@@ -73,6 +74,7 @@ func newFixture(t *testing.T) *fixture {
 		Reports:   f.reports,
 		Serving:   func() bool { return f.serving },
 		Inhibited: func() bool { return f.inhibited },
+		Session:   func() uint64 { return f.session },
 		Now:       f.clock.Now,
 	})
 	return f
@@ -592,6 +594,17 @@ func TestRoundCongestionWindow(t *testing.T) {
 		assert.Equal(t, 600, report.WindowBadRounds)
 		report, _ = f.roundsOf(t, "c")
 		assert.True(t, report.CongestionLimit)
+	}
+	{
+		// So does a new ownership session, even if this NAT took the lease
+		// back before it ran a round while standing by
+		f := newOwner(t)
+		report, _ := f.roundsOf(t, strings.Repeat("c", 601))
+		require.True(t, report.CongestionLimit)
+		f.session++
+		report, _ = f.roundsOf(t, "c")
+		assert.False(t, report.CongestionLimit)
+		assert.Equal(t, 1, report.WindowRounds)
 	}
 }
 

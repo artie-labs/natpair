@@ -565,6 +565,19 @@ func TestCongestionHandover(t *testing.T) {
 	}
 }
 
+func TestSession(t *testing.T) {
+	// Each acquired lease starts a new session
+	f := newFixture(t)
+	f.start(t)
+	require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+	assert.Equal(t, uint64(1), f.controller.Session())
+	f.setReport(health.Report{Ready: true, CanForward: true, CanTakeover: true, PathHealthy: true, PeerReady: true})
+	f.controller.SetHandover(true)
+	require.Eventually(t, func() bool { return f.stepDownCount() == 1 }, waitFor, 10*time.Millisecond)
+	require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+	assert.Equal(t, uint64(2), f.controller.Session())
+}
+
 func TestContendWarnings(t *testing.T) {
 	// A contender that can't reach the lease store warns once, not on every attempt
 	logs := &syncBuffer{}

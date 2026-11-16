@@ -144,14 +144,15 @@ the share of bad rounds, not an unbroken run of them. An upload that gets
 through now and then, or a burst that fails a single round, doesn't reset
 anything, so a fault that loses most of the owner's packets can't hold it.
 A pair with only the odd congested round never reaches half, so it doesn't
-move. The window counts rounds, and a congested round takes about 1.5 s
+move. The window counts rounds, and a congested round takes at least 1.5 s
 against about 1 s for a healthy one, so an owner that was healthy before
-reaches half about 6 minutes into solid loss by default. A NAT that takes
-over starts an empty window and must serve the whole window first, so a
-flood that congests whichever NAT owns moves the pair at most once per
-window instead of several times a minute. Standing by clears the window.
-An owner whose standby can't take over keeps serving and keeps warning.
-Run `natpair maintenance` on the owner to hand over sooner.
+reaches half about 6 minutes or a little more into solid loss by default.
+Each time a NAT takes the lease, it starts an empty window and must serve
+the whole window first, so a flood that congests whichever NAT owns moves
+the pair at most once per window instead of several times a minute.
+Standing by clears it. An owner whose standby can't take over keeps
+serving and keeps warning. Run `natpair maintenance` on the owner to hand
+over sooner.
 
 A congested owner publishes no probe flows, so its standby can't show it
 copied them. So both handovers from a congested owner, by the congestion

@@ -222,6 +222,7 @@ func runNAT(ctx context.Context, args []string) error {
 		Reports:   reports,
 		Serving:   func() bool { return ctrl.Serving() },
 		Inhibited: func() bool { return ctrl.Inhibited() },
+		Session:   func() uint64 { return ctrl.Session() },
 		Now:       bootclock.Now,
 	})
 	ctrl = controller.New(controller.Config{

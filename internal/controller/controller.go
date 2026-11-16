@@ -130,6 +130,8 @@ type Controller struct {
 	// handover asks the owner to hand ownership to a ready peer. Each acquired
 	// lease clears it. See [Controller.SetHandover].
 	handover atomic.Bool
+	// sessions counts the leases this NAT has acquired.
+	sessions atomic.Uint64
 }
 
 // New returns a controller.
@@ -147,6 +149,12 @@ func (c *Controller) Serving() bool {
 // already true while the takeover runs.
 func (c *Controller) Owner() bool {
 	return c.owner.Load()
+}
+
+// Session returns the number of this NAT's current or latest ownership
+// session: how many times it has taken the lease since it started.
+func (c *Controller) Session() uint64 {
+	return c.sessions.Load()
 }
 
 // Inhibited reports maintenance, or the cooldown after stepping down or a
@@ -287,6 +295,7 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 					}
 				}
 				if acquired != nil {
+					c.sessions.Add(1)
 					c.owner.Store(true)
 					// A request made before this session belongs to an earlier
 					// one, so it must not hand this one over.
