@@ -23,6 +23,7 @@ import (
 	"github.com/artie-labs/natpair/internal/health"
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/network"
+	"github.com/artie-labs/natpair/internal/ports"
 	"github.com/artie-labs/natpair/internal/probe"
 	"github.com/artie-labs/natpair/internal/update"
 )
@@ -209,17 +210,19 @@ func runNAT(ctx context.Context, args []string) error {
 	steps := localSteps{network: net, conntrack: conntrack, prober: prober, target: cfg.SharedProbe()}
 
 	var ctrl *controller.Controller
+	sharedPorts := ports.New(cfg.SharedAddress.Addr(), network.SharedPorts, func() bool { return ctrl.Serving() }, bootclock.Now)
 	monitor := health.New(health.Config{
 		Probe:        cfg.OwnProbe(),
 		ServingProbe: cfg.SharedProbe(),
 		Release:      reportedRelease(config.BootedReleasePath),
 	}, health.Dependencies{
-		Prober:    prober,
-		Conntrack: conntrack,
-		Reports:   reports,
-		Serving:   func() bool { return ctrl.Serving() },
-		Inhibited: func() bool { return ctrl.Inhibited() },
-		Now:       bootclock.Now,
+		Prober:          prober,
+		Conntrack:       conntrack,
+		Reports:         reports,
+		Serving:         func() bool { return ctrl.Serving() },
+		Inhibited:       func() bool { return ctrl.Inhibited() },
+		SharedPortsUsed: sharedPorts.Used,
+		Now:             bootclock.Now,
 	})
 	ctrl = controller.New(controller.Config{
 		Node:           cfg.Instance.ID,
@@ -264,6 +267,10 @@ func runNAT(ctx context.Context, args []string) error {
 	})
 	group.Go(func() error {
 		updater.Run(ctx)
+		return nil
+	})
+	group.Go(func() error {
+		sharedPorts.Run(ctx)
 		return nil
 	})
 	return group.Wait()

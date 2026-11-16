@@ -23,6 +23,13 @@ import (
 	"github.com/artie-labs/natpair/internal/config"
 )
 
+// SharedPorts is how many source ports the shared address offers each
+// destination address, port and protocol. The SNAT rules give no port range,
+// so the kernel keeps a worker's source port when it's free, and otherwise
+// picks one from 1024 to 65535 for a source port of 1024 or more, which
+// nearly all clients use.
+const SharedPorts = 65535 - 1024 + 1
+
 const (
 	snatChain      = "NATPAIR_SNAT"
 	inputChain     = "NATPAIR_INPUT"
