@@ -166,10 +166,12 @@ to nice -10. When it's 0, threaded NAPI is off, the daemon also logs
 `overload guard found no receive threads to raise`, and the probe's replies
 can still miss the ring while the daemon holds the CPU. While the NIC still
 drops packets, it logs `overload guard lowered its budget` once a second,
-down to half of `measured_pps_per_cpu`. While it still drops packets but the
-CPU has room, it logs `overload guard raised its budget` once a second. It
-logs `overload guard cleared`, with how many packets
-it `dropped`, once the traffic fits the budget again.
+down to half of `measured_pps_per_cpu`. While it still drops packets, the NIC
+keeps up and the CPU has room, it logs `overload guard raised its budget`
+once a second, starting 30 s after the last cut. Under a long flood, a
+raise followed by a cut about every 30 s is expected. It logs `overload
+guard cleared`, with how many packets it `dropped`, once the traffic fits
+the budget and the NIC has stopped dropping.
 
 Find the worker sending the most packets, often small UDP, and slow it down,
 or move to an instance type with more CPUs, as in

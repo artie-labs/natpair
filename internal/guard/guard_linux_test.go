@@ -292,9 +292,10 @@ func TestGuardSheds(t *testing.T) {
 	assert.Equal(t, uint64(471), budgets[0])
 	assert.Equal(t, []int{-10}, receiveNices(t, name))
 
-	// Once it sheds under 5% for a second, it clears: the program comes
-	// off and the ring and the threads go back
-	feed(load{busyTicks: 5, received: 40_000, passed: [2]uint64{39_990, 0}, shed: [2]uint64{10, 0}}, 10)
+	// Once it sheds under 5% for a second and the NIC hasn't dropped for
+	// 1.5 s, it clears: the program comes off and the ring and the threads
+	// go back
+	feed(load{busyTicks: 5, received: 40_000, passed: [2]uint64{39_990, 0}, shed: [2]uint64{10, 0}}, 15)
 	assert.Equal(t, Unlimited, g.ctrl.Mode())
 	assert.Nil(t, g.attached)
 	assert.False(t, regexp.MustCompile(`prog/xdp id \d+`).MatchString(ip(t, "-d", "link", "show", name)))
