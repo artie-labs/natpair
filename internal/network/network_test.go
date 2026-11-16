@@ -439,3 +439,101 @@ func TestPrepareNetworkNFTables(t *testing.T) {
 		assert.NotContains(t, log.commands, "ip rule add from 10.0.32.0/20 lookup 7001 priority 7001")
 	}
 }
+
+// offloadRuleset is nftRuleset for nftConfig with flow offload, before a
+// takeover offloads through the shared ENI: workers' UDP also takes ports
+// in the worker range, and the shared canary takes the canary's range.
+var offloadRuleset = strings.Replace(nftRuleset,
+	"\t\tip saddr 10.0.16.0/20 meta l4proto tcp snat to 10.0.1.100:1024-60999\n"+
+		"\t\tip saddr 10.0.16.0/20 snat to 10.0.1.100\n"+
+		"\t\tip saddr 10.0.32.0/20 meta l4proto tcp snat to 10.0.1.100:1024-60999\n"+
+		"\t\tip saddr 10.0.32.0/20 snat to 10.0.1.100\n"+
+		"\t\tip saddr 198.18.0.6/32 meta l4proto tcp snat to 10.0.1.100:1024-60999\n"+
+		"\t\tip saddr 198.18.0.6/32 snat to 10.0.1.100\n",
+	"\t\tip saddr 10.0.16.0/20 meta l4proto { tcp, udp } snat to 10.0.1.100:1024-60999\n"+
+		"\t\tip saddr 10.0.16.0/20 snat to 10.0.1.100\n"+
+		"\t\tip saddr 10.0.32.0/20 meta l4proto { tcp, udp } snat to 10.0.1.100:1024-60999\n"+
+		"\t\tip saddr 10.0.32.0/20 snat to 10.0.1.100\n"+
+		"\t\tip saddr 198.18.0.6/32 meta l4proto { tcp, udp } snat to 10.0.1.100:61000-65535\n"+
+		"\t\tip saddr 198.18.0.6/32 snat to 10.0.1.100\n", 1)
+
+// offloadedRuleset is offloadRuleset once a takeover offloads through ens6:
+// the flowtable on ens6, and a rule per protected CIDR that offloads its
+// established connections.
+var offloadedRuleset = strings.NewReplacer(
+	"\tcounter dropped {\n\t}\n",
+	"\tcounter dropped {\n\t}\n\tflowtable fastpath {\n\t\thook ingress priority 0\n\t\tdevices = { \"ens6\" }\n\t}\n",
+	"\t\ttype filter hook forward priority filter; policy drop;\n",
+	"\t\ttype filter hook forward priority filter; policy drop;\n"+
+		"\t\tip saddr 10.0.16.0/20 ct direction original ct state established meta l4proto { tcp, udp } meta mark set meta mark | 0x10000 flow add @fastpath\n"+
+		"\t\tip saddr 10.0.32.0/20 ct direction original ct state established meta l4proto { tcp, udp } meta mark set meta mark | 0x10000 flow add @fastpath\n",
+).Replace(offloadRuleset)
+
+func TestFlowOffloadRules(t *testing.T) {
+	cfg := nftConfig(t)
+	cfg.FlowOffload = true
+	{
+		// A takeover starts without the flowtable, and the route lookup for
+		// offloaded replies goes to the shared table.
+		log := &commandLog{}
+		require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, log.runner()).PrepareNetwork(t.Context()))
+		assert.Equal(t, []string{offloadRuleset}, log.inputs)
+		assert.NotContains(t, offloadRuleset, "flowtable")
+		assert.Contains(t, log.commands, "ip rule add fwmark 0x10000/0x10000 lookup 7001 priority 6998")
+	}
+	{
+		// The rule isn't added twice
+		log := &commandLog{responses: map[string]string{"ip -j rule show table 7001": `[{"priority":6998,"src":"all","fwmark":"0x10000","fwmask":"0x10000","table":"7001"}]`}}
+		require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, log.runner()).PrepareNetwork(t.Context()))
+		assert.NotContains(t, log.commands, "ip rule add fwmark 0x10000/0x10000 lookup 7001 priority 6998")
+	}
+	{
+		// Activating the shared ENI covers it with the fence, then offloads
+		// through it. The next takeover starts without the flowtable again.
+		log := &commandLog{}
+		fence := &mocks.FakeNetworkFence{}
+		runner := log.runner()
+		runner.RunWithInputCalls(func(ctx context.Context, timeout time.Duration, input, name string, args ...string) (string, error) {
+			if strings.Contains(input, "flowtable") {
+				require.Equal(t, 1, fence.CoverDevicesCallCount(), "the fence must cover the device before the flowtable lists it")
+			}
+			return log.runner().RunWithInput(ctx, timeout, input, name, args...)
+		})
+		n := network.New(cfg, fence, runner)
+		require.NoError(t, n.PrepareNetwork(t.Context()))
+		require.NoError(t, n.ActivateShared(t.Context(), sharedMAC))
+		require.Equal(t, 1, fence.CoverDevicesCallCount())
+		_, devices := fence.CoverDevicesArgsForCall(0)
+		assert.Equal(t, []string{"ens6"}, devices)
+		require.Len(t, log.inputs, 2)
+		assert.Equal(t, offloadedRuleset, log.inputs[1])
+		require.NoError(t, n.PrepareNetwork(t.Context()))
+		require.Len(t, log.inputs, 3)
+		assert.Equal(t, offloadRuleset, log.inputs[2])
+	}
+	{
+		// If the fence can't cover the device, no flowtable lists it, and the
+		// takeover goes on with the slow path
+		log := &commandLog{}
+		fence := &mocks.FakeNetworkFence{}
+		fence.CoverDevicesReturns(errors.New("nft failed: exit status 1"))
+		require.NoError(t, network.New(cfg, fence, log.runner()).ActivateShared(t.Context(), sharedMAC))
+		assert.Empty(t, log.inputs)
+	}
+	{
+		// If installing the flowtable fails, the next install leaves it out
+		log := &commandLog{fail: map[string]error{"nft -f -": errors.New("nft failed: exit status 1")}}
+		n := network.New(cfg, &mocks.FakeNetworkFence{}, log.runner())
+		assert.EqualError(t, n.OffloadThrough(t.Context(), []string{"ens6"}), "nft failed: exit status 1")
+		require.NoError(t, n.PrepareNetwork(t.Context()))
+		assert.Equal(t, offloadRuleset, log.inputs[len(log.inputs)-1])
+	}
+	{
+		// Without the setting, activating the shared ENI offloads nothing
+		fence := &mocks.FakeNetworkFence{}
+		log := &commandLog{}
+		require.NoError(t, network.New(nftConfig(t), fence, log.runner()).ActivateShared(t.Context(), sharedMAC))
+		assert.Zero(t, fence.CoverDevicesCallCount())
+		assert.Empty(t, log.inputs)
+	}
+}

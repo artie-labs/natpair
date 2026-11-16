@@ -59,6 +59,10 @@ func TestValidate(t *testing.T) {
 	assert.EqualError(t, edit(func(c *NAT) { c.Firewall = "nft" }), `firewall must be "iptables" or "nftables"`)
 	assert.NoError(t, edit(func(c *NAT) { c.Firewall = FirewallIPTables }))
 	assert.NoError(t, edit(func(c *NAT) { c.Firewall = FirewallNFTables }))
+	// The flowtable's fence is an nftables chain, so offload needs nftables.
+	assert.EqualError(t, edit(func(c *NAT) { c.FlowOffload = true }), `flow_offload needs firewall "nftables"`)
+	assert.EqualError(t, edit(func(c *NAT) { c.Firewall, c.FlowOffload = FirewallIPTables, true }), `flow_offload needs firewall "nftables"`)
+	assert.NoError(t, edit(func(c *NAT) { c.Firewall, c.FlowOffload = FirewallNFTables, true }))
 }
 
 func TestReleases(t *testing.T) {

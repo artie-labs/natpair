@@ -68,9 +68,18 @@ func discover(ctx context.Context, cfg *config.NAT) (aws.Config, error) {
 	return awsConfig, nil
 }
 
+// natFence is what the controller and the network package need of a fence.
+type natFence interface {
+	controller.Fence
+	network.Fence
+}
+
 // newFence returns the fence for the firewall the configuration picks.
-func newFence(cfg config.NAT) (controller.Fence, error) {
-	if cfg.NFTables() {
+func newFence(cfg config.NAT) (natFence, error) {
+	switch {
+	case cfg.FlowOffload:
+		return fence.NewNFTablesWithFastPath(cfg.ProtectedCIDRs, fence.FastPath{Shared: cfg.SharedAddress.Addr(), CanaryPorts: network.CanaryPorts})
+	case cfg.NFTables():
 		return fence.NewNFTables(cfg.ProtectedCIDRs)
 	}
 	return fence.New(config.BPFDir, cfg.ProtectedCIDRs)

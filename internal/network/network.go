@@ -31,11 +31,10 @@ const (
 	untrackOutChain = "NATPAIR_UNTRACK_OUT"
 	untrackInChain  = "NATPAIR_UNTRACK_IN"
 	// localPorts is the ephemeral port range this NAT's own sockets use, in
-	// iptables' form, and canaryPorts the range the own canary's probes are
-	// translated to. They don't overlap, so a reply to the NAT's address says
-	// by its port whether it goes to a socket or back to the canary.
-	localPorts  = "32768:60999"
-	canaryPorts = "61000-65535"
+	// iptables' form. It doesn't overlap CanaryPorts, so a reply to the NAT's
+	// address says by its port whether it goes to a socket or back to the
+	// canary.
+	localPorts = "32768:60999"
 	// workerPorts is the range worker TCP connections are translated to on
 	// the shared address. A port already in it is kept. It leaves out the
 	// well-known ports below 1024 and the canary's range, so a scan of
@@ -79,6 +78,12 @@ const (
 
 var macPattern = regexp.MustCompile(`^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$`)
 
+// CanaryPorts is the range the own canary's probes are translated to on the
+// NAT's own address. With flow offload, the shared canary's are translated to
+// it on the shared address too, so that the fence can tell their replies from
+// workers' before connection tracking (see fence.FastPath).
+const CanaryPorts = "61000-65535"
+
 // linkLocalServices are timeSync and resolver with the UDP ports the NAT
 // uses them on.
 var linkLocalServices = []struct{ address, port string }{{timeSync, "123"}, {resolver, "53"}}
@@ -105,6 +110,9 @@ func (SystemRunner) RunWithInput(ctx context.Context, timeout time.Duration, inp
 // Fence installs the forwarding guard.
 type Fence interface {
 	Install(ctx context.Context) error
+	// CoverDevices puts the guard on traffic that a flowtable forwards from
+	// devices, closed until its next grant.
+	CoverDevices(ctx context.Context, devices []string) error
 }
 
 // Network configures this NAT.
@@ -112,6 +120,9 @@ type Network struct {
 	cfg   config.NAT
 	fence Fence
 	run   Runner
+	// offloadDevices are the devices the flowtable forwards from, which
+	// [Network.OffloadThrough] sets. Empty means no flowtable.
+	offloadDevices []string
 }
 
 // New returns a Network. Production uses [SystemRunner].
@@ -324,7 +335,7 @@ func (n *Network) EnsurePeerRoute(ctx context.Context) (bool, error) {
 // before.
 //
 // The own canary's probes are translated to the NAT's address on
-// canaryPorts, outside the ephemeral range, so their replies stay tracked
+// CanaryPorts, outside the ephemeral range, so their replies stay tracked
 // and are translated back. The probes test the forwarding path, which needs
 // the table, so they still fail when it is full, as new worker connections
 // do.
@@ -366,7 +377,7 @@ func (n *Network) untrackOwnTraffic(ctx context.Context) error {
 }
 
 // limitLocalPorts keeps the NAT's own sockets on localPorts, out of
-// canaryPorts.
+// CanaryPorts.
 func (n *Network) limitLocalPorts(ctx context.Context) error {
 	_, err := n.run.Run(ctx, commandTimeout, "sysctl", "-qw", "net.ipv4.ip_local_port_range="+strings.Replace(localPorts, ":", " ", 1))
 	return err
@@ -509,6 +520,11 @@ func (n *Network) createCanary(ctx context.Context, index int, canary config.Can
 // POSTROUTING rules.
 func (n *Network) PrepareNetwork(ctx context.Context) error {
 	if n.cfg.NFTables() {
+		// A takeover starts without the flowtable, because the device it
+		// listed is gone: the shared ENI is on the peer, and comes back as a
+		// new device. Linux 6.12 and earlier refuse a flowtable on a device
+		// that doesn't exist. ActivateShared offloads through the new one.
+		n.offloadDevices = nil
 		if err := n.applyNFTables(ctx); err != nil {
 			return err
 		}
@@ -545,7 +561,7 @@ func (n *Network) installIPTablesForwarding(ctx context.Context) error {
 	// The own canary's probes take ports the NAT's own sockets never use, so
 	// their replies stay tracked (see untrackOwnTraffic).
 	for _, protocol := range []string{"tcp", "udp"} {
-		rules += fmt.Sprintf("-A %s -s %s/32 -o %s -p %s -j SNAT --to-source %s:%s\n", snatChain, cfg.OwnCanary().Guest(), cfg.Instance.Interface, protocol, cfg.Instance.PrivateIP, canaryPorts)
+		rules += fmt.Sprintf("-A %s -s %s/32 -o %s -p %s -j SNAT --to-source %s:%s\n", snatChain, cfg.OwnCanary().Guest(), cfg.Instance.Interface, protocol, cfg.Instance.PrivateIP, CanaryPorts)
 	}
 	rules += fmt.Sprintf("-A %s -s %s/32 -o %s -j SNAT --to-source %s\n", snatChain, cfg.OwnCanary().Guest(), cfg.Instance.Interface, cfg.Instance.PrivateIP)
 	rules += "-F POSTROUTING\n-A POSTROUTING -j " + snatChain + "\nCOMMIT\n"
@@ -589,6 +605,13 @@ func (n *Network) ensureSharedRules(ctx context.Context) error {
 	}
 	if err := n.ensureLocalRules(ctx, existing); err != nil {
 		return err
+	}
+	if n.cfg.FlowOffload && !slices.ContainsFunc(existing, func(rule routingRule) bool {
+		return rule.Priority == offloadMarkPriority && rule.FWMark == offloadMark && rule.FWMask == offloadMark
+	}) {
+		if _, err := n.run.Run(ctx, commandTimeout, "ip", "rule", "add", "fwmark", offloadMark+"/"+offloadMark, "lookup", sharedTable, "priority", strconv.Itoa(offloadMarkPriority)); err != nil {
+			return err
+		}
 	}
 	for _, source := range n.sharedSources() {
 		present := slices.ContainsFunc(existing, func(rule routingRule) bool {
@@ -731,6 +754,16 @@ func (n *Network) ActivateShared(ctx context.Context, mac string) error {
 			return err
 		}
 	}
+	if !n.cfg.FlowOffload {
+		return nil
+	}
+	// Worker connections arrive on the shared ENI both ways: requests from
+	// workers, and replies to the shared address. Without the flowtable they
+	// take the slow path, which still forwards them, so a failure here
+	// doesn't stop a takeover.
+	if err := n.OffloadThrough(ctx, []string{name}); err != nil {
+		slog.Warn("failed to offload worker connections through the shared ENI, so they take the slow path", slog.String("device", name), slog.Any("err", err))
+	}
 	return nil
 }
 
@@ -752,6 +785,8 @@ type routingRule struct {
 	Iif      string `json:"iif"`
 	Src      string `json:"src"`
 	SrcLen   int    `json:"srclen"`
+	FWMark   string `json:"fwmark"`
+	FWMask   string `json:"fwmask"`
 }
 
 // prefixLength returns the rule's source prefix length. `ip` leaves out

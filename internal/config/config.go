@@ -126,6 +126,12 @@ type NAT struct {
 	// at the next reboot.
 	Firewall Firewall `json:"firewall,omitempty"`
 
+	// FlowOffload sends established worker connections through an nftables
+	// flowtable, a fast path that skips routing and the forward chains. It
+	// needs FirewallNFTables. Like Firewall, it takes effect at the next
+	// reboot.
+	FlowOffload bool `json:"flow_offload,omitempty"`
+
 	// Instance holds facts read from the instance metadata service at
 	// startup. It is not part of the file.
 	Instance instance.Facts `json:"-"`
@@ -172,6 +178,9 @@ func (c NAT) Validate() error {
 	}
 	if c.Firewall != "" && c.Firewall != FirewallIPTables && c.Firewall != FirewallNFTables {
 		return fmt.Errorf("firewall must be %q or %q", FirewallIPTables, FirewallNFTables)
+	}
+	if c.FlowOffload && !c.NFTables() {
+		return fmt.Errorf("flow_offload needs firewall %q", FirewallNFTables)
 	}
 	if !c.SharedAddress.Addr().Is4() || c.SharedAddress.Bits() < 16 || c.SharedAddress.Bits() > 28 {
 		return fmt.Errorf("shared_address must be an IPv4 address with its subnet prefix length, such as 10.0.1.100/24")

@@ -19,6 +19,44 @@ func nftPortRange(ports string) string {
 	return strings.Replace(ports, ":", "-", 1)
 }
 
+// Flow offload. The flowtable forwards a connection's packets from the ingress
+// hook of its devices, where it looks them up by addresses, ports and the
+// device they arrive on. To fill in both directions, the kernel takes the
+// route of the packet that offloads the connection, and looks up the route
+// back as if the replies left through the device that packet arrived on. A
+// worker's request arrives on the shared ENI, so the kernel asks for a route
+// to the worker through the shared ENI. The main table has none, because
+// replies to workers leave through the own interface, so the kernel takes
+// the worker for a neighbor on the shared ENI's link, which never answers.
+// In a local test, a stream stalled after 14 KB. So the forward chain marks
+// the packet with offloadMark, and a routing rule sends lookups with the mark
+// to the shared table, whose default route through the VPC router reaches
+// the worker. Offloaded replies leave through the shared ENI, as replies of a
+// NAT instance with one interface do.
+const (
+	offloadMark         = "0x10000"
+	offloadMarkPriority = 6998
+	// flowtable is the flowtable's name in the natpair table.
+	flowtable = "fastpath"
+)
+
+// OffloadThrough lets the flowtable forward established worker connections
+// that arrive on devices. It first puts the fence on those devices, so the
+// fence stops offloaded packets as it stops the rest. If that fails, it
+// installs no flowtable. Each takeover's PrepareNetwork removes the
+// flowtable again.
+func (n *Network) OffloadThrough(ctx context.Context, devices []string) error {
+	if err := n.fence.CoverDevices(ctx, devices); err != nil {
+		return err
+	}
+	n.offloadDevices = slices.Clone(devices)
+	if err := n.applyNFTables(ctx); err != nil {
+		n.offloadDevices = nil
+		return err
+	}
+	return nil
+}
+
 // nonSYN matches TCP packets without SYN in nftables, as iptables' "! --syn"
 // does: those whose SYN, RST, ACK and FIN flags are anything but SYN alone.
 const nonSYN = "tcp flags & (fin|syn|rst|ack) != syn"
@@ -55,6 +93,11 @@ func (n *Network) nftRuleset() string {
 	b.WriteString("\tset reset_sources {\n\t\ttype ipv4_addr\n\t\tsize 65536\n\t\tflags dynamic,timeout\n\t\ttimeout 60s\n\t}\n")
 	// dropped counts what the host firewall drops without an answer.
 	b.WriteString("\tcounter dropped {\n\t}\n")
+	if len(n.offloadDevices) > 0 {
+		// The fence's ingress chain on the same devices runs at priority
+		// -10, before this.
+		fmt.Fprintf(&b, "\tflowtable %s {\n\t\thook ingress priority 0\n\t\tdevices = { \"%s\" }\n\t}\n", flowtable, strings.Join(n.offloadDevices, `", "`))
+	}
 
 	// The raw priority runs before connection tracking, as the raw table does.
 	b.WriteString("\tchain untrack_out {\n\t\ttype filter hook output priority raw; policy accept;\n")
@@ -117,6 +160,15 @@ func (n *Network) nftRuleset() string {
 	// The fence's own forward chain runs first, at a lower priority, and drops
 	// worker traffic while it's closed, before the reset below can answer it.
 	b.WriteString("\tchain forward {\n\t\ttype filter hook forward priority filter; policy drop;\n")
+	// A connection is offloaded by a worker's packet once both directions
+	// were seen, and TCP once the kernel tracks it as established. The
+	// canaries' connections aren't offloaded: their replies leave through
+	// the canary's own device, not the route the mark picks.
+	if len(n.offloadDevices) > 0 {
+		for _, prefix := range cfg.ProtectedCIDRs {
+			line("ip saddr %s ct direction original ct state established meta l4proto { tcp, udp } meta mark set meta mark | %s flow add @%s", prefix, offloadMark, flowtable)
+		}
+	}
 	for _, canary := range []netip.Addr{cfg.OwnCanary().Guest(), cfg.SharedCanary().Guest()} {
 		line("ip saddr %s accept", canary)
 		line("ip daddr %s ct state established,related accept", canary)
@@ -130,13 +182,26 @@ func (n *Network) nftRuleset() string {
 
 	b.WriteString("\tchain postrouting {\n\t\ttype nat hook postrouting priority srcnat; policy accept;\n")
 	line("fib saddr type local return")
-	for _, source := range n.sharedSources() {
-		line("ip saddr %s meta l4proto tcp snat to %s:%s", source, shared, workerPorts)
-		line("ip saddr %s snat to %s", source, shared)
+	if cfg.FlowOffload {
+		// The fence tells the shared canary's replies from workers' by their
+		// ports on the shared address, so workers' UDP keeps out of
+		// CanaryPorts too.
+		for _, prefix := range cfg.ProtectedCIDRs {
+			line("ip saddr %s meta l4proto { tcp, udp } snat to %s:%s", prefix, shared, workerPorts)
+			line("ip saddr %s snat to %s", prefix, shared)
+		}
+		sharedCanary := netip.PrefixFrom(cfg.SharedCanary().Guest(), 32)
+		line("ip saddr %s meta l4proto { tcp, udp } snat to %s:%s", sharedCanary, shared, CanaryPorts)
+		line("ip saddr %s snat to %s", sharedCanary, shared)
+	} else {
+		for _, source := range n.sharedSources() {
+			line("ip saddr %s meta l4proto tcp snat to %s:%s", source, shared, workerPorts)
+			line("ip saddr %s snat to %s", source, shared)
+		}
 	}
 	ownCanary := cfg.OwnCanary().Guest()
 	for _, protocol := range []string{"tcp", "udp"} {
-		line(`ip saddr %s oifname "%s" meta l4proto %s snat to %s:%s`, ownCanary, cfg.Instance.Interface, protocol, own, canaryPorts)
+		line(`ip saddr %s oifname "%s" meta l4proto %s snat to %s:%s`, ownCanary, cfg.Instance.Interface, protocol, own, CanaryPorts)
 	}
 	line(`ip saddr %s oifname "%s" snat to %s`, ownCanary, cfg.Instance.Interface, own)
 	b.WriteString("\t}\n}\n")

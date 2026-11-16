@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/artie-labs/natpair/internal/command"
@@ -19,8 +20,12 @@ import (
 
 // The local fault campaign has no EC2. Instead of moving the shared ENI, a
 // takeover points the neighbor entries for the shared addresses at this NAT.
-// NATPAIR_FIXTURE_NEIGHBORS names a JSON file listing them. This build is
-// only for the campaign and never ships.
+// NATPAIR_FIXTURE_NEIGHBORS names a JSON file listing them. Each NAT holds
+// the shared addresses on its own worker and outside interfaces, so with
+// flow offload, a takeover offloads through the interfaces that
+// NATPAIR_FIXTURE_OFFLOAD_DEVICES lists, comma-separated, where the real one
+// offloads through the shared ENI. This build is only for the campaign and
+// never ships.
 func newHandoff(_ config.NAT, _ handoff.EC2, steps handoff.Local) func(func() error, bool) controller.Preparer {
 	return func(guard func() error, verify bool) controller.Preparer {
 		return fixtureIdentity{steps: steps, guard: guard, verify: verify}
@@ -76,6 +81,15 @@ func (f fixtureIdentity) Prepare(ctx context.Context) error {
 	}
 	if err := f.guard(); err != nil {
 		return err
+	}
+	if devices := os.Getenv("NATPAIR_FIXTURE_OFFLOAD_DEVICES"); devices != "" {
+		steps, ok := f.steps.(localSteps)
+		if !ok {
+			return fmt.Errorf("the fixture offloads only through this host's steps")
+		}
+		if err := steps.network.OffloadThrough(ctx, strings.Split(devices, ",")); err != nil {
+			slog.Warn("failed to offload worker connections", slog.Any("err", err))
+		}
 	}
 	if !f.verify {
 		return nil

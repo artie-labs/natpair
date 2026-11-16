@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -19,8 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
+	"github.com/artie-labs/natpair/internal/bootclock"
 	"github.com/artie-labs/natpair/internal/command"
 	"github.com/artie-labs/natpair/internal/config"
+	"github.com/artie-labs/natpair/internal/fence"
 	"github.com/artie-labs/natpair/internal/mocks"
 	"github.com/artie-labs/natpair/internal/netns"
 	"github.com/artie-labs/natpair/internal/network"
@@ -686,5 +689,252 @@ func testSNAT(t *testing.T, firewall config.Firewall) {
 		// The NAT's own traffic keeps its own address, though the protected
 		// CIDRs hold it
 		assert.Equal(t, own, seenUDP("sn-nat", own))
+	}
+}
+
+// offloadLab is a NAT, fo-nat, wired as on AWS. The worker, fo-worker, and a
+// host outside the VPC, fo-remote, reach it through a VPC router, fo-router,
+// whose bridge is the NAT's subnet. The worker's subnet routes to the shared
+// ENI. The NAT's own interface is ens5, and the shared ENI attaches as a new
+// device on each takeover.
+type offloadLab struct {
+	t     *testing.T
+	ctx   context.Context
+	n     *network.Network
+	fence *fence.NFTables
+}
+
+func newOffloadLab(t *testing.T) *offloadLab {
+	// Cleanups run after t.Context is cancelled.
+	ctx := context.WithoutCancel(t.Context())
+	l := &offloadLab{t: t, ctx: ctx}
+	for _, namespace := range []string{"fo-worker", "fo-router", "fo-nat", "fo-remote"} {
+		l.run("ip", "netns", "add", namespace)
+		t.Cleanup(func() { _, _ = command.Run(ctx, 5*time.Second, "ip", "netns", "del", namespace) })
+	}
+	l.run("ip", "link", "add", "eth0", "netns", "fo-worker", "type", "veth", "peer", "name", "w0", "netns", "fo-router")
+	l.run("ip", "link", "add", "eth0", "netns", "fo-remote", "type", "veth", "peer", "name", "r0", "netns", "fo-router")
+	l.run("ip", "link", "add", "ens5", "netns", "fo-nat", "type", "veth", "peer", "name", "p-ens5", "netns", "fo-router")
+	for _, step := range [][]string{
+		{"fo-router", "link", "add", "br0", "type", "bridge"},
+		{"fo-router", "addr", "add", "10.0.1.1/24", "dev", "br0"},
+		{"fo-router", "addr", "add", "10.0.16.1/20", "dev", "w0"},
+		{"fo-router", "addr", "add", "203.0.113.1/24", "dev", "r0"},
+		{"fo-router", "link", "set", "p-ens5", "master", "br0"},
+		{"fo-worker", "addr", "add", "10.0.16.10/20", "dev", "eth0"},
+		{"fo-remote", "addr", "add", "203.0.113.10/24", "dev", "eth0"},
+		{"fo-nat", "addr", "add", "10.0.1.10/24", "dev", "ens5"},
+	} {
+		l.run(append([]string{"ip", "-n"}, step...)...)
+	}
+	for namespace, links := range map[string][]string{
+		"fo-router": {"lo", "br0", "w0", "r0", "p-ens5"},
+		"fo-worker": {"lo", "eth0"},
+		"fo-remote": {"lo", "eth0"},
+		"fo-nat":    {"lo", "ens5"},
+	} {
+		for _, link := range links {
+			l.run("ip", "-n", namespace, "link", "set", link, "up")
+		}
+	}
+	// The worker subnet's route table targets the shared ENI.
+	l.run("ip", "-n", "fo-router", "route", "add", "default", "via", "10.0.1.100", "table", "100")
+	l.run("ip", "-n", "fo-router", "rule", "add", "iif", "w0", "lookup", "100", "priority", "100")
+	l.run("ip", "-n", "fo-worker", "route", "add", "default", "via", "10.0.16.1")
+	l.run("ip", "-n", "fo-remote", "route", "add", "default", "via", "203.0.113.1")
+	l.run("ip", "-n", "fo-nat", "route", "add", "default", "via", "10.0.1.1", "dev", "ens5")
+	l.run("ip", "netns", "exec", "fo-router", "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=0", "net.ipv4.conf.default.rp_filter=0")
+	l.run("ip", "netns", "exec", "fo-nat", "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=0", "net.ipv4.conf.default.rp_filter=0")
+
+	cfg := testConfig(t)
+	cfg.Firewall, cfg.FlowOffload = config.FirewallNFTables, true
+	cfg.ProtectedCIDRs = []netip.Prefix{netip.MustParsePrefix("10.0.16.0/20")}
+	var err error
+	l.fence, err = fence.NewNFTablesWithFastPath(cfg.ProtectedCIDRs, fence.FastPath{Shared: cfg.SharedAddress.Addr(), CanaryPorts: network.CanaryPorts})
+	require.NoError(t, err)
+	l.n = network.New(cfg, l.fence, network.SystemRunner{})
+	l.inNAT(func() error {
+		if err := l.fence.Install(t.Context()); err != nil {
+			return err
+		}
+		return l.n.InstallFirewall(t.Context())
+	})
+	return l
+}
+
+func (l *offloadLab) run(args ...string) string {
+	output, err := command.Run(l.ctx, 10*time.Second, args[0], args[1:]...)
+	require.NoError(l.t, err, "%v", args)
+	return output
+}
+
+func (l *offloadLab) inNAT(fn func() error) {
+	l.t.Helper()
+	require.NoError(l.t, netns.Do("fo-nat", fn))
+}
+
+// attachShared attaches a new shared ENI as device and takes over through it,
+// as a takeover does on AWS, with the fence open for grant.
+func (l *offloadLab) attachShared(device string, grant time.Duration) {
+	l.run("ip", "link", "add", device, "netns", "fo-nat", "type", "veth", "peer", "name", "p-"+device, "netns", "fo-router")
+	l.run("ip", "-n", "fo-router", "link", "set", "p-"+device, "master", "br0")
+	l.run("ip", "-n", "fo-router", "link", "set", "p-"+device, "up")
+	// The VPC learns where the shared address moved.
+	l.run("ip", "-n", "fo-router", "neigh", "flush", "all")
+	var links []struct {
+		Address string `json:"address"`
+	}
+	require.NoError(l.t, json.Unmarshal([]byte(l.run("ip", "-n", "fo-nat", "-j", "link", "show", device)), &links))
+	l.inNAT(func() error {
+		if err := l.n.PrepareNetwork(l.t.Context()); err != nil {
+			return err
+		}
+		if err := l.n.ActivateShared(l.t.Context(), links[0].Address); err != nil {
+			return err
+		}
+		return l.fence.Arm(bootclock.Now() + grant)
+	})
+}
+
+// offloaded reports whether the worker's TCP connection from port is in the
+// NAT's flowtable.
+func (l *offloadLab) offloaded(port int) bool {
+	output, err := command.Run(l.ctx, 2*time.Second, "ip", "netns", "exec", "fo-nat", "conntrack", "-L", "-p", "tcp", "--orig-port-src", strconv.Itoa(port))
+	return err == nil && strings.Contains(output, "[OFFLOAD]")
+}
+
+// fenceDrops returns how many packets the fence's ingress chain dropped.
+func (l *offloadLab) fenceDrops() int {
+	listing := l.run("ip", "netns", "exec", "fo-nat", "nft", "list", "counter", "netdev", "natpair_fence", "dropped")
+	fields := strings.Fields(listing[strings.Index(listing, "packets"):])
+	drops, err := strconv.Atoi(fields[1])
+	require.NoError(l.t, err)
+	return drops
+}
+
+// offloadStream is a worker connection to fo-remote that sends 1400 bytes
+// every 5 ms until the test ends.
+type offloadStream struct {
+	port     int
+	received atomic.Int64
+}
+
+func (l *offloadLab) stream(listener net.Listener) *offloadStream {
+	s := &offloadStream{}
+	var conn net.Conn
+	require.NoError(l.t, netns.Do("fo-worker", func() error {
+		var err error
+		conn, err = net.DialTimeout("tcp4", listener.Addr().String(), time.Second)
+		return err
+	}))
+	l.t.Cleanup(func() { _ = conn.Close() })
+	s.port = conn.LocalAddr().(*net.TCPAddr).Port
+	served, err := listener.Accept()
+	require.NoError(l.t, err)
+	l.t.Cleanup(func() { _ = served.Close() })
+	go func() {
+		buffer := make([]byte, 65536)
+		for {
+			n, err := served.Read(buffer)
+			s.received.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		frame := make([]byte, 1400)
+		for {
+			if _, err := conn.Write(frame); err != nil {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	return s
+}
+
+// progresses reports whether the stream delivers bytes within 500 ms.
+func (s *offloadStream) progresses() bool {
+	before := s.received.Load()
+	time.Sleep(500 * time.Millisecond)
+	return s.received.Load() > before
+}
+
+// TestFlowOffload checks the flowtable on a NAT wired as on AWS: worker
+// connections are offloaded and keep working, the fence stops offloaded
+// connections at its deadline with nothing renewing it, as when the daemon
+// is frozen, and a takeover moves the fast path to the new shared ENI.
+func TestFlowOffload(t *testing.T) {
+	l := newOffloadLab(t)
+	var listener net.Listener
+	require.NoError(t, netns.Do("fo-remote", func() error {
+		var err error
+		listener, err = net.Listen("tcp4", "203.0.113.10:9000")
+		return err
+	}))
+	defer listener.Close()
+
+	l.attachShared("ens6", 3*time.Second)
+	deadline := bootclock.Now() + 3*time.Second
+	assert.Contains(t, l.run("ip", "netns", "exec", "fo-nat", "nft", "list", "flowtable", "ip", "natpair", "fastpath"), "ens6")
+	first := l.stream(listener)
+	require.Eventually(t, func() bool { return l.offloaded(first.port) }, 2*time.Second, 50*time.Millisecond, "the connection is offloaded")
+	{
+		// Offloaded replies leave through the shared ENI to the VPC router.
+		// Without the routing rule for marked lookups, the kernel sent them
+		// to the worker as a neighbor of the shared ENI, and the stream
+		// stalled.
+		assert.True(t, first.progresses(), "the offloaded connection keeps working")
+	}
+	{
+		// With nothing renewing the grant, the fence's ingress chain stops
+		// the offloaded connection at the deadline, though the flowtable
+		// still holds it
+		drops := l.fenceDrops()
+		time.Sleep(deadline - bootclock.Now() + 200*time.Millisecond)
+		assert.False(t, first.progresses(), "the offloaded connection stops at the deadline")
+		assert.True(t, l.offloaded(first.port))
+		assert.Greater(t, l.fenceDrops(), drops)
+	}
+
+	// The control: the same connection without the ingress chain.
+	l.inNAT(func() error { return l.fence.Arm(bootclock.Now() + 3*time.Second) })
+	deadline = bootclock.Now() + 3*time.Second
+	second := l.stream(listener)
+	require.Eventually(t, func() bool { return l.offloaded(second.port) }, 2*time.Second, 50*time.Millisecond, "the connection is offloaded")
+	l.run("ip", "netns", "exec", "fo-nat", "nft", "flush chain netdev natpair_fence ingress; delete chain netdev natpair_fence ingress")
+	{
+		// The forward chain's fence stops new connections at the deadline,
+		// but never sees the offloaded one, which keeps going
+		time.Sleep(deadline - bootclock.Now() + 200*time.Millisecond)
+		assert.True(t, second.progresses(), "without the ingress chain, the offloaded connection outlives the grant")
+		err := netns.Do("fo-worker", func() error {
+			conn, err := net.DialTimeout("tcp4", listener.Addr().String(), 300*time.Millisecond)
+			if err == nil {
+				_ = conn.Close()
+			}
+			return err
+		})
+		assert.Error(t, err, "the forward chain's fence still stops new connections")
+	}
+
+	{
+		// A takeover onto a new shared ENI. The old device's flows go with
+		// it, so nothing is forwarded through a device that's gone
+		l.run("ip", "-n", "fo-nat", "link", "del", "ens6")
+		assert.False(t, l.offloaded(second.port))
+		l.attachShared("ens7", time.Hour)
+		flowtable := l.run("ip", "netns", "exec", "fo-nat", "nft", "list", "flowtable", "ip", "natpair", "fastpath")
+		assert.Contains(t, flowtable, "ens7")
+		assert.NotContains(t, flowtable, "ens6")
+		assert.Contains(t, l.run("ip", "netns", "exec", "fo-nat", "nft", "list", "chain", "netdev", "natpair_fence", "ingress"), "ens7")
+		third := l.stream(listener)
+		require.Eventually(t, func() bool { return l.offloaded(third.port) }, 2*time.Second, 50*time.Millisecond, "the connection is offloaded through ens7")
+		assert.True(t, third.progresses())
+		// The connection from before the takeover still has its conntrack
+		// entry, so it carries on, offloaded again through the new device.
+		require.Eventually(t, func() bool { return l.offloaded(second.port) }, 5*time.Second, 50*time.Millisecond, "the old connection is offloaded through ens7")
+		assert.True(t, second.progresses())
 	}
 }
