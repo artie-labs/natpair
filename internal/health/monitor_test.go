@@ -418,13 +418,33 @@ func TestRoundCongestedFor(t *testing.T) {
 		assert.Equal(t, 9*time.Second, f.rounds(t, 9).CongestedFor)
 	}
 	{
-		// A healthy round ends the run
+		// Uploads that pass between congested rounds don't end the run, as
+		// when a fault on this NAT alone loses a moderate share of packets
+		f := newOwner(t)
+		for range 10 {
+			f.rounds(t, 1)
+			f.prober.UploadReturnsOnCall(f.prober.UploadCallCount(), probe.Flow{}, nil)
+			assert.True(t, f.rounds(t, 1).PathHealthy)
+		}
+		assert.Equal(t, 20*time.Second, f.rounds(t, 1).CongestedFor)
+	}
+	{
+		// Passing uploads for just under a minute don't end the run
 		f := newOwner(t)
 		f.rounds(t, 5)
 		f.prober.UploadReturns(probe.Flow{}, nil)
-		assert.Zero(t, f.rounds(t, 1).CongestedFor)
+		f.rounds(t, 58)
 		f.prober.UploadReturns(probe.Flow{}, errTimeout)
-		assert.Equal(t, time.Second, f.rounds(t, 2).CongestedFor)
+		assert.Equal(t, 63*time.Second, f.rounds(t, 1).CongestedFor)
+	}
+	{
+		// A minute without a congested round ends it
+		f := newOwner(t)
+		f.rounds(t, 5)
+		f.prober.UploadReturns(probe.Flow{}, nil)
+		f.rounds(t, 59)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		assert.Zero(t, f.rounds(t, 1).CongestedFor)
 	}
 	{
 		// A round that counts as failed doesn't end the run. A burst of

@@ -255,9 +255,7 @@ func TestCampaign(t *testing.T) {
 		congestedAt := bootclock.Now()
 		time.Sleep(45 * time.Second)
 		l.require(l.active("a") && !l.active("b"), "a keeps serving before the limit")
-		// A round in which no handshake completes counts as failed and starts
-		// the minute again, so allow for a few.
-		l.wait(func() bool { return l.active("b") }, 150*time.Second, "b takes over once a has been congested for the limit")
+		l.wait(func() bool { return l.active("b") }, 30*time.Second, "b takes over once a has been congested for the limit")
 		handedOver := (bootclock.Now() - congestedAt).Seconds()
 		l.ns("a", append([]string{"iptables", "-D"}, lossy...)...)
 		l.require(l.fresh(), "new connections work through b")

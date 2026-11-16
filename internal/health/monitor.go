@@ -88,6 +88,16 @@ const (
 	// entry in the connection table for up to 2 minutes, a few thousand
 	// entries while an overload lasts.
 	handshakeAttempts = 40
+	// congestionGap is how long an owner's path must go without a congested
+	// round before a run of congested rounds ends. Passing and failed
+	// rounds in between don't end it. With a fault losing a moderate share
+	// of this NAT's packets, some uploads still pass every few rounds, and
+	// ending the run at each would keep the owner past the time limit. A
+	// burst of traffic can fail single rounds, and ending the run then
+	// would let bursts keep an owner whose path a fault damaged. An upload
+	// can't be made to pass from off the path, so only a path that really
+	// recovered ends the run.
+	congestionGap = 60 * BaseInterval
 )
 
 // StaleAfter returns how old a report from rounds of the given interval may
@@ -138,9 +148,10 @@ type Report struct {
 	// a path failure.
 	Congested bool `json:"congested"`
 	// CongestedFor is how long this NAT's path has been congested without a
-	// break, from its first congested round to this one. Only a healthy
-	// round or a round while standing by ends the run. Only this NAT reads
-	// it, so it isn't sent to the peer.
+	// break, from its first congested round to this one. Only
+	// congestionGap without a congested round, or a round while standing
+	// by, ends the run. Only this NAT reads it, so it isn't sent to the
+	// peer.
 	CongestedFor time.Duration `json:"-"`
 	// CanTakeover means this NAT can forward and is not in maintenance or cooldown.
 	CanTakeover     bool `json:"can_takeover"`
@@ -241,9 +252,10 @@ type Monitor struct {
 	// uncounted is how many rounds counted neither way since the last failed
 	// round.
 	uncounted int
-	// congestedSince is when the current run of congested rounds started, if
-	// congestedRun.
+	// congestedSince is when the current run of congested rounds started,
+	// and lastCongested is its latest congested round, if congestedRun.
 	congestedSince  time.Duration
+	lastCongested   time.Duration
 	congestedRun    bool
 	flows           []timedFlow
 	lastReplication time.Duration
@@ -415,9 +427,10 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// because no upload passed, so this NAT stops offering to take over
 		// and the peer's updater doesn't reboot the only NAT that could.
 		m.failures, m.successes = 0, 0
-		if !m.congestedRun {
+		if !m.congestedRun || now-m.lastCongested >= congestionGap {
 			m.congestedSince, m.congestedRun = now, true
 		}
+		m.lastCongested = now
 		if m.congestedProbe.due(now) {
 			slog.Warn("the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure",
 				slog.Any("probe_error", probeErr), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts),
@@ -427,17 +440,12 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		m.failures, m.successes, m.uncounted = m.failures+1, 0, 0
 		countedFailure = true
 	}
-	// Only a round whose upload passed ends a run of congested rounds, or a
-	// round while standing by, so a NAT that serves again starts a new run.
-	// A failed round doesn't. A burst of traffic can fail one round without
-	// failing the next, and restarting the run then would let a burst every
-	// few minutes keep an owner whose path a fault damaged. An upload can't
-	// be made to pass from off the path.
 	var congestedFor time.Duration
-	switch {
-	case congested:
+	if congested {
 		congestedFor = now - m.congestedSince
-	case healthy || !serving:
+	}
+	// A NAT that serves again starts a new run.
+	if !serving {
 		m.congestedRun = false
 	}
 	var flows []timedFlow

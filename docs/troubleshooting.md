@@ -197,9 +197,9 @@ owner hands over by itself, as in the next section.
 The full message ends with `so connections the peer hasn't copied may
 reset`. The owner's path stayed congested, as in
 [`the health probe failed, but the path is alive`](#the-health-probe-failed-but-the-path-is-alive),
-for the `limit` field's time with no upload passing, so it handed over to a
-standby that has proven its own path. The `congested_for` field says how
-long. The handover doesn't wait for the standby to verify its copied
+for the `limit` field's time with no minute free of congestion, so it
+handed over to a standby that has proven its own path. The `congested_for`
+field says how long. The handover doesn't wait for the standby to verify its copied
 connections, so connections it hadn't copied may have reset.
 
 If the new owner serves without trouble, the loss was likely the old
