@@ -183,10 +183,35 @@ traffic. Its `health round` lines show `"congested":true`. Check the NAT's
 CPU with `top` (high `si` means the kernel is busy forwarding) and its
 [network limits](#the-nat-is-too-small). If neither is high, the loss is
 likely the owner's own, such as a fault in its host, so run `sudo natpair
-maintenance` on it to hand over. While the owner is congested, it hands over to a standby that has proven its own path, without waiting for the standby to verify its copied connections,
-and logs `handing over to a peer that hasn't verified its copied
-connections`. Connections the standby hasn't copied may reset. natpair logs this, and the `health round`
-line, at most once a minute.
+maintenance` on it to hand over. While the owner is congested, it hands
+over to a standby that has proven its own path, without waiting for the
+standby to verify its copied connections, and logs `handing over to a peer
+that hasn't verified its copied connections`. Connections the standby
+hasn't copied may reset. natpair logs this, and the `health round` line, at
+most once a minute. The `congested_for` field says how long the path has
+been congested. After `congestion_handover_minutes`, 10 by default, the
+owner hands over by itself, as in the next section.
+
+### `handing over because this NAT's path has been congested for longer than congestion_handover_minutes`
+
+The full message ends with `so connections the peer hasn't copied may
+reset`. The owner's path stayed congested, as in
+[`the health probe failed, but the path is alive`](#the-health-probe-failed-but-the-path-is-alive),
+for the `limit` field's time with no upload passing, so it handed over to a
+standby that has proven its own path. The `congested_for` field says how
+long. The handover doesn't wait for the standby to verify its copied
+connections, so connections it hadn't copied may have reset.
+
+If the new owner serves without trouble, the loss was likely the old
+owner's own, such as a fault in its host. Replace that NAT, as in
+[Replace a NAT](operations.md#replace-a-nat). If the new owner logs `the
+health probe failed, but the path is alive` too, more traffic arrives than
+either NAT can forward, and the pair moves again after the same time. See
+[more packets than the CPU can forward](#the-nat-is-too-small).
+
+If the standby can't take over, because it hasn't proven its own path or is
+in maintenance or cooldown, the owner keeps serving and keeps logging `the
+health probe failed, but the path is alive`.
 
 ### `failed to check whether the path is alive, so the failed probe counts`
 

@@ -400,6 +400,67 @@ func TestRoundCongestedPath(t *testing.T) {
 	}
 }
 
+func TestRoundCongestedFor(t *testing.T) {
+	// newOwner returns an owner that has run a healthy round, and whose
+	// uploads now time out while 5 of 40 handshakes complete.
+	newOwner := func(t *testing.T) *fixture {
+		f := newFixture(t)
+		f.serving = true
+		f.rounds(t, 1)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		return f
+	}
+	{
+		// The time runs from the first congested round
+		f := newOwner(t)
+		assert.Zero(t, f.rounds(t, 1).CongestedFor)
+		assert.Equal(t, 9*time.Second, f.rounds(t, 9).CongestedFor)
+	}
+	{
+		// A healthy round ends the run
+		f := newOwner(t)
+		f.rounds(t, 5)
+		f.prober.UploadReturns(probe.Flow{}, nil)
+		assert.Zero(t, f.rounds(t, 1).CongestedFor)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		assert.Equal(t, time.Second, f.rounds(t, 2).CongestedFor)
+	}
+	{
+		// A round that counts as failed doesn't end the run. A burst of
+		// traffic can fail one round, and restarting the time then would let
+		// a burst every few minutes keep an owner with a damaged path.
+		f := newOwner(t)
+		f.rounds(t, 5)
+		f.prober.HandshakesReturns(0, nil)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+		f.prober.HandshakesReturns(5, nil)
+		assert.Equal(t, 7*time.Second, f.rounds(t, 2).CongestedFor)
+	}
+	{
+		// A full table proves nothing about the path, so the run goes on
+		// through it
+		f := newOwner(t)
+		f.rounds(t, 5)
+		f.tableReadings(262133, 262144, 40)
+		f.rounds(t, 1)
+		f.tableReadings(1200, 262144, 0)
+		assert.Equal(t, 6*time.Second, f.rounds(t, 1).CongestedFor)
+	}
+	{
+		// A NAT that hands over and later serves again starts fresh, even if
+		// its table was full the whole time it stood by
+		f := newOwner(t)
+		f.rounds(t, 5)
+		f.serving = false
+		f.tableReadings(262133, 262144, 40)
+		f.rounds(t, 2)
+		f.serving = true
+		f.tableReadings(1200, 262144, 0)
+		assert.Zero(t, f.rounds(t, 1).CongestedFor)
+	}
+}
+
 func TestRoundTakeoverEligibility(t *testing.T) {
 	{
 		// A NAT that can forward offers to take over, even without recent copies
@@ -718,7 +779,8 @@ func TestCongestedPathWarning(t *testing.T) {
 	// Once a minute, and so is the health round, like a healthy one's: an
 	// overload can last hours
 	assert.Equal(t, 2, strings.Count(output, `"msg":"the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure"`))
-	assert.Contains(t, output, `"handshakes":7,"attempts":40`)
+	// The repeat says how long the path has been congested, in nanoseconds
+	assert.Contains(t, output, `"handshakes":7,"attempts":40,"congested_for":60000000000}`)
 	assert.Equal(t, 2, strings.Count(output, `"msg":"health round"`))
 	assert.Equal(t, 2, strings.Count(output, `"congested":true`))
 	assert.Equal(t, 2, strings.Count(output, `"handshakes":7}`))

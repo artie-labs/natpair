@@ -72,6 +72,7 @@ var (
 	errHandover    = errors.New("handover requested")
 	errDemoted     = errors.New("stepped down after corroborated path failure")
 	errTakeover    = errors.New("takeover failed")
+	errCongested   = errors.New("handed over after a long congestion")
 )
 
 // Fence opens and closes worker forwarding.
@@ -97,6 +98,10 @@ type Config struct {
 	StateDir string
 	// PrepareTimeout bounds a takeover.
 	PrepareTimeout time.Duration
+	// CongestionHandover is how long this NAT's path may stay congested
+	// while it owns before it hands over to a peer that can take over. It
+	// must be positive.
+	CongestionHandover time.Duration
 }
 
 // Dependencies connect the controller to the system.
@@ -305,6 +310,15 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 			// congested, maintenance needs only a peer that can take over.
 			// Handover requests come from upgrades, which wait for a ready
 			// peer.
+			//
+			// The check can't tell a flood from a fault that damaged this
+			// NAT's path, such as one losing 90% of packets, which still lets
+			// some handshakes through. So a congested owner also hands over
+			// once its path has been congested for CongestionHandover. A flood
+			// congests the new owner too, which then waits as long, so the
+			// pair moves at most once per CongestionHandover. A congested peer
+			// never gets it: no upload of its passed either, so it can't take
+			// over.
 			if !report.Stale && report.PeerReady {
 				if c.maintenanceRequested() {
 					return errMaintenance
@@ -312,9 +326,16 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 				if c.handover.Load() {
 					return errHandover
 				}
-			} else if !report.Stale && report.Congested && report.PeerCanTakeover && c.maintenanceRequested() {
-				slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
-				return errMaintenance
+			} else if !report.Stale && report.Congested && report.PeerCanTakeover {
+				if c.maintenanceRequested() {
+					slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
+					return errMaintenance
+				}
+				if report.CongestedFor >= c.cfg.CongestionHandover {
+					slog.Warn("handing over because this NAT's path has been congested for longer than congestion_handover_minutes, so connections the peer hasn't copied may reset",
+						slog.Duration("congested_for", report.CongestedFor), slog.Duration("limit", c.cfg.CongestionHandover))
+					return errCongested
+				}
 			}
 			if !storeDown {
 				if _, err := l.Valid(); err != nil {

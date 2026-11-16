@@ -57,6 +57,17 @@ variable "max_connections" {
   }
 }
 
+variable "congestion_handover_minutes" {
+  description = "How many minutes the owner's path may stay congested, losing some packets but not all, before the owner hands over to a standby that has proven its own path. A whole number from 1 to 1440. Null uses natpair's default, 10. A flood congests whichever NAT owns, so this is also the shortest time between the moves it causes. Releases before the one that added it reject it. NATs read it at first boot, so changing it needs new NATs."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = floor(coalesce(var.congestion_handover_minutes, 10)) == coalesce(var.congestion_handover_minutes, 10) && coalesce(var.congestion_handover_minutes, 10) >= 1 && coalesce(var.congestion_handover_minutes, 10) <= 1440
+    error_message = "congestion_handover_minutes must be a whole number from 1 to 1440."
+  }
+}
+
 variable "release" {
   description = "natpair release tag the pair runs, such as v0.1.1. New NATs install it at first boot. Changing it pins a new release, which the NATs roll out to themselves one at a time."
   type        = string

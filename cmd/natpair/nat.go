@@ -215,9 +215,10 @@ func runNAT(ctx context.Context, args []string) error {
 		Now:       bootclock.Now,
 	})
 	ctrl = controller.New(controller.Config{
-		Node:           cfg.Instance.ID,
-		StateDir:       config.StateDir,
-		PrepareTimeout: prepareTimeout,
+		Node:               cfg.Instance.ID,
+		StateDir:           config.StateDir,
+		PrepareTimeout:     prepareTimeout,
+		CongestionHandover: cfg.CongestionHandover(),
 	}, controller.Dependencies{
 		Fence:      f,
 		Health:     monitor,

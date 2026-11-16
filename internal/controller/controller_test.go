@@ -49,6 +49,8 @@ type fixture struct {
 	// verified records the verify argument of each takeover.
 	verified  []bool
 	stepDowns int
+	// onStepDown runs after each step-down, if set.
+	onStepDown func()
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -81,7 +83,7 @@ func newFixture(t *testing.T) *fixture {
 		defer f.mu.Unlock()
 		return f.report
 	})
-	f.controller = controller.New(controller.Config{Node: "nat-a", StateDir: f.stateDir, PrepareTimeout: 5 * time.Second},
+	f.controller = controller.New(controller.Config{Node: "nat-a", StateDir: f.stateDir, PrepareTimeout: 5 * time.Second, CongestionHandover: 10 * time.Minute},
 		controller.Dependencies{
 			Fence:  f.fence,
 			Health: f.health,
@@ -94,8 +96,12 @@ func newFixture(t *testing.T) *fixture {
 			},
 			StepDown: func(context.Context) error {
 				f.mu.Lock()
-				defer f.mu.Unlock()
 				f.stepDowns++
+				hook := f.onStepDown
+				f.mu.Unlock()
+				if hook != nil {
+					hook()
+				}
 				return nil
 			},
 			Now: bootclock.Now,
@@ -469,6 +475,80 @@ func TestCongestedOwnerHandsOver(t *testing.T) {
 		require.NoError(t, controller.RequestMaintenance(f.stateDir))
 		time.Sleep(100 * time.Millisecond)
 		assert.True(t, f.controller.Serving(), "the peer can't take over")
+	}
+}
+
+func TestCongestionHandover(t *testing.T) {
+	// congested is what an owner reports once its path has been congested
+	// for the 10 minute limit: no upload passed, so it can forward only
+	// unproven.
+	congested := health.Report{CanForwardUnverified: true, Congested: true, CongestedFor: 10 * time.Minute, PeerCanTakeover: true}
+	const handingOver = `"msg":"handing over because this NAT's path has been congested for longer than congestion_handover_minutes, so connections the peer hasn't copied may reset"`
+	{
+		// An owner congested for the limit hands over once to a peer that can
+		// take over, and the log says why
+		logs := &syncBuffer{}
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+		defer slog.SetDefault(previous)
+		f := newFixture(t)
+		// The peer takes the released lease, as it does on taking over.
+		f.onStepDown = func() {
+			raw, err := f.store.Read(t.Context())
+			assert.NoError(t, err)
+			var record lease.Record
+			assert.NoError(t, json.Unmarshal(raw, &record))
+			record.Owner, record.Revision, record.Epoch, record.Released = "nat-b/1", "peer", record.Epoch+1, false
+			taken, err := json.Marshal(record)
+			assert.NoError(t, err)
+			swapped, err := f.store.Swap(t.Context(), raw, taken)
+			assert.NoError(t, err)
+			assert.True(t, swapped)
+		}
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		f.setReport(congested)
+		require.Eventually(t, func() bool { return f.stepDownCount() == 1 }, waitFor, 10*time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
+		assert.False(t, f.controller.Serving())
+		assert.Equal(t, 1, f.stepDownCount())
+		assert.Equal(t, 1, strings.Count(logs.String(), handingOver))
+		assert.Contains(t, logs.String(), `"congested_for":600000000000,"limit":600000000000`)
+	}
+	{
+		// Congested for less than the limit, the owner keeps serving
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.CongestedFor = 10*time.Minute - time.Second
+		f.setReport(report)
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving())
+	}
+	{
+		// A peer that can't take over, which includes a congested peer since
+		// no upload passed for it either, doesn't get the handover
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.PeerCanTakeover = false
+		f.setReport(report)
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving())
+	}
+	{
+		// A stale report never hands over, because the monitor itself may be
+		// the problem
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.Stale = true
+		f.setReport(report)
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving())
 	}
 }
 
