@@ -259,7 +259,7 @@ func (c *Controller) Step(r Reading) Decision {
 		busiest, _ := c.busiest(engageReadings)
 		share, full := c.shedShare()
 		recent, _ := c.dropShare(dropReadings)
-		overflow, _ := c.dropShare(overflowReadings)
+		overflow, known := c.dropShare(overflowReadings)
 		hold := Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
 		if !full {
 			return hold
@@ -267,8 +267,9 @@ func (c *Controller) Step(r Reading) Decision {
 		if busiest >= cutBusy && recent >= engageDropShare {
 			return c.change(max(c.floor, uint64(cutShare*float64(c.budget))), busiest, recent)
 		}
-		if overflow >= engageDropShare {
-			// The NIC still drops, so neither clearing nor a raise is safe.
+		if !known || overflow >= engageDropShare {
+			// The NIC still drops, or its counters reset too recently to
+			// say, so neither clearing nor a raise is safe.
 			return hold
 		}
 		if share >= clearShedShare {

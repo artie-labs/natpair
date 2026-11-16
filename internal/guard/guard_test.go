@@ -465,6 +465,24 @@ func TestControllerHoldsWhenENARefreshesLate(t *testing.T) {
 	}
 }
 
+func TestControllerHoldsAcrossANICResetWhileLimiting(t *testing.T) {
+	var c Controller
+	var n nat
+	steps(&c, &n, flood, 12)
+	c.Step(n.next(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{50_000, 10_000}}))
+	require.Equal(t, Limiting, c.Mode())
+	// The NIC drops 20% while the program sheds 1% and the CPU is at 80%,
+	// too idle to blame the budget, so it holds
+	dropping := load{busyTicks: 8, received: 80_000, dropped: 20_000, passed: [2]uint64{79_200, 0}, shed: [2]uint64{800, 0}}
+	assert.Empty(t, changed(steps(&c, &n, dropping, 30)))
+	// The NIC resets its counters, which empties the readings. Until 1.5 s
+	// of them are back, the NIC's drops are unknown, not zero
+	n.received, n.dropped = 0, 0
+	for i := range 30 {
+		require.Equal(t, Limiting, c.Step(n.next(dropping)).Mode, i)
+	}
+}
+
 func TestNilGuardEnsureIsANoOp(t *testing.T) {
 	// Callers built without a guard, such as tests of the takeover steps,
 	// pass a nil one
