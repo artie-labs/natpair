@@ -145,12 +145,14 @@ func TestControllerEngagesAndClears(t *testing.T) {
 		// CPU has room, so the budget rises once a second. This simulated
 		// flood doesn't fill the CPU as it would.
 		flooding := load{busyTicks: 7, received: 95_000, passed: [2]uint64{45_000, 5_000}, shed: [2]uint64{45_000, 0}}
-		assert.Equal(t, []uint64{518, 569, 625}, raised(steps(&c, &n, flooding, 30)))
+		// The first waits until the NIC drops from before the attach are
+		// 1.5 s old
+		assert.Equal(t, []uint64{518, 569}, raised(steps(&c, &n, flooding, 30)))
 		assert.Equal(t, Limiting, c.Mode())
 	}
 	// The flood eases. Dropping 7.5% of what it sees keeps it on
 	tail := load{busyTicks: 5, received: 40_000, passed: [2]uint64{37_000, 0}, shed: [2]uint64{3_000, 0}}
-	assert.Equal(t, []uint64{687, 755}, raised(steps(&c, &n, tail, 20)))
+	assert.Equal(t, []uint64{625, 687}, raised(steps(&c, &n, tail, 20)))
 	// It stops. The share over the last second falls below 5% at the fourth
 	// quiet reading: 6 readings shedding 3,000 and 4 shedding 10, of 400,000.
 	// At the third it is 5.3%.
@@ -254,28 +256,75 @@ func TestControllerLowersTheBudgetWhileTheNICStillDrops(t *testing.T) {
 	assert.Equal(t, []uint64{423, 380, 342, 307, 276, 262}, budgets)
 	// The flood ends, but ENA's counter catches up a second late: NIC drops
 	// against almost no traffic, with the CPU idle. They aren't the budget's
-	// fault, so it clears instead of cutting again
-	late := load{busyTicks: 1, received: 100, dropped: 20_000, passed: [2]uint64{100, 0}}
-	decisions := changed(steps(&c, &n, late, 3))
-	require.Len(t, decisions, 1)
-	assert.Equal(t, Unlimited, decisions[0].Mode)
+	// fault, so it doesn't cut again, and it clears once they are 1.5 s old
+	idle := load{busyTicks: 1, received: 100, passed: [2]uint64{100, 0}}
+	late := idle
+	late.dropped = 20_000
+	decisions := steps(&c, &n, late, 1)
+	decisions = append(decisions, steps(&c, &n, idle, 15)...)
+	assert.Empty(t, changed(decisions[:15]))
+	assert.Equal(t, Unlimited, decisions[15].Mode)
+	assert.True(t, decisions[15].Changed)
 }
 
-// sim feeds a controller traffic whose cost on CPU 0 follows the program the
-// controller asks for. Passing a packet costs 1/5,000 of a tick, so 500,000
-// a second fill the CPU, and the program's drop costs a tenth of that. What
-// CPU 0 can't get to, the NIC drops.
+// sim feeds a controller traffic that responds to the program the controller
+// asks for. traffic returns one interval of offered packets when the program
+// passes at most limit of them, +Inf while it isn't attached, and CPU 0's
+// busy ticks. It is costModel unless a test sets it. busy carries the
+// fraction of a tick that /proc/stat hasn't counted yet.
 type sim struct {
 	c        Controller
 	n        nat
 	attached bool
 	budget   uint64
+	traffic  func(offered, limit float64) (load, float64)
+	busy     float64
+}
+
+// costModel charges CPU 0 for each packet: passing one costs 1/5,000 of a
+// tick, so 500,000 a second fill the CPU, and the program's drop costs a
+// tenth of that. What CPU 0 can't get to, the NIC drops.
+func costModel(offered, limit float64) (load, float64) {
+	const passCost, shedCost, ticks = 10.0 / 50_000, 1.0 / 50_000, 10.0
+	cost := func(handled float64) float64 {
+		passed := min(handled, limit)
+		return passed*passCost + (handled-passed)*shedCost
+	}
+	handled := offered
+	if cost(offered) > ticks {
+		if limit*passCost >= ticks {
+			handled = ticks / passCost
+		} else {
+			handled = limit + (ticks-limit*passCost)/shedCost
+		}
+	}
+	passed := min(handled, limit)
+	return load{received: uint64(handled), dropped: uint64(offered - handled), passed: [2]uint64{uint64(passed), 0}, shed: [2]uint64{uint64(handled - passed), 0}}, cost(handled)
+}
+
+// c7gnMedium follows what a c7gn.medium's owner logged under a 1.2 million
+// packet a second flood on AWS. Its CPU forwards at most 50,000 packets per
+// 100 ms. Below that, the busiest CPU tracks what the program passes and its
+// drops cost next to nothing: budgets of 236,000 and 478,000 packets a
+// second read 47% and 81%. At the limit the NIC's ring overflows, the
+// program sees only what the CPU gets to, and the busiest CPU reads 90%: on
+// AWS, 91 to 93%, never the 95% that engaging needs.
+func c7gnMedium(offered, limit float64) (load, float64) {
+	const capacity = 50_000
+	if min(offered, limit) < capacity {
+		passed := min(offered, limit)
+		return load{received: uint64(offered), passed: [2]uint64{uint64(passed), 0}, shed: [2]uint64{uint64(offered - passed), 0}}, 8.5 * passed / capacity
+	}
+	return load{received: capacity, dropped: uint64(offered - capacity), passed: [2]uint64{capacity, 0}}, 9
 }
 
 // run sends offered packets each interval for count intervals, and returns
 // the budgets the controller set and the share of packets the NIC dropped.
 func (s *sim) run(offered float64, count int) ([]uint64, float64) {
-	const passCost, shedCost, ticks = 10.0 / 50_000, 1.0 / 50_000, 10.0
+	traffic := s.traffic
+	if traffic == nil {
+		traffic = costModel
+	}
 	var budgets []uint64
 	var dropped float64
 	for range count {
@@ -283,24 +332,14 @@ func (s *sim) run(offered float64, count int) ([]uint64, float64) {
 		if s.attached {
 			limit = float64(s.budget) * Interval.Seconds() / tickSeconds
 		}
-		cost := func(handled float64) float64 {
-			passed := min(handled, limit)
-			return passed*passCost + (handled-passed)*shedCost
+		l, busy := traffic(offered, limit)
+		s.busy += busy
+		l.busyTicks = uint64(s.busy + 1e-9)
+		s.busy -= float64(l.busyTicks)
+		if !s.attached {
+			l.passed, l.shed = [2]uint64{}, [2]uint64{}
 		}
-		handled := offered
-		if cost(offered) > ticks {
-			if limit*passCost >= ticks {
-				handled = ticks / passCost
-			} else {
-				handled = limit + (ticks-limit*passCost)/shedCost
-			}
-		}
-		passed := min(handled, limit)
-		l := load{busyTicks: uint64(math.Round(cost(handled))), received: uint64(handled), dropped: uint64(offered - handled)}
-		if s.attached {
-			l.passed[0], l.shed[0] = uint64(passed), uint64(handled-passed)
-		}
-		dropped += offered - handled
+		dropped += float64(l.dropped)
 		d := s.c.Step(s.n.next(l))
 		if !d.Changed {
 			continue
@@ -311,22 +350,6 @@ func (s *sim) run(offered float64, count int) ([]uint64, float64) {
 		}
 	}
 	return budgets, dropped / (offered * float64(count))
-}
-
-func TestControllerRaisesTheBudgetOnceTheFloodEnds(t *testing.T) {
-	// 2.4 million packets a second fill the CPU even under a budget of 90%
-	// of the measured rate, so it cuts the budget until the CPU keeps up
-	var s sim
-	budgets, _ := s.run(240_000, 100)
-	assert.Equal(t, []uint64{471, 423, 380, 342, 307}, budgets)
-	// The flood ends, but 400,000 packets a second of UDP, which doesn't
-	// slow down, stay above the cut budget. The CPU could forward them at
-	// 80%, so the budget rises once a second until the program sheds under
-	// 5%, and it clears
-	budgets, dropped := s.run(40_000, 60)
-	assert.Equal(t, []uint64{337, 370, 407}, budgets)
-	assert.Equal(t, Unlimited, s.c.Mode())
-	assert.Zero(t, dropped)
 }
 
 func TestControllerRaisesPastALowMeasurement(t *testing.T) {
@@ -359,6 +382,67 @@ func TestControllerHoldsAFloodWithinABand(t *testing.T) {
 		assert.Equal(t, Limiting, s.c.Mode())
 		assert.Less(t, dropped, engageDropShare, offered)
 		assert.Equal(t, settled, s.budget)
+	}
+}
+
+// limitingOnAMedium returns a sim of the c7gn.medium limiting a flood of
+// offered packets per interval, as it engaged on AWS.
+func limitingOnAMedium(t *testing.T, offered float64) *sim {
+	s := &sim{traffic: c7gnMedium}
+	steps(&s.c, &s.n, flood, 12)
+	limit := s.c.Step(s.n.next(load{busyTicks: 10, received: 50_000, dropped: 70_000, passed: [2]uint64{50_000, 0}}))
+	require.Equal(t, Limiting, limit.Mode)
+	s.attached, s.budget = true, limit.Budget
+	_, _ = s.run(offered, 1)
+	return s
+}
+
+func TestControllerHoldsAFloodAtTheCPUsLimit(t *testing.T) {
+	// On AWS the guard raised its budget while the CPU had room, until the
+	// budget passed what the CPU forwards. The NIC then dropped again and
+	// the program saw only what it passed, so it cleared at a busiest CPU
+	// of 91% in the middle of a 1.2 million packet a second flood. It must
+	// hold for the whole flood, and keep the NIC's drops low
+	s := limitingOnAMedium(t, 120_000)
+	_, dropped := s.run(120_000, 6_000)
+	assert.Equal(t, Limiting, s.c.Mode())
+	assert.Less(t, dropped, engageDropShare)
+}
+
+func TestControllerRaisesUntilSteadyTrafficPasses(t *testing.T) {
+	// 2.4 million packets a second cut the budget to 307 a tick
+	var s sim
+	budgets, _ := s.run(240_000, 100)
+	require.Equal(t, uint64(307), budgets[len(budgets)-1])
+	// The flood ends, and a steady 475,000 packets a second follow, which
+	// the CPU would forward at 95%. On AWS the budget stopped rising once
+	// the busiest CPU reached 85%, and the program dropped 7 to 15% for 3
+	// minutes. 30 s after the last cut, the budget rises once a second while
+	// the NIC keeps up, and the guard clears
+	budgets, dropped := s.run(47_500, 600)
+	assert.Equal(t, []uint64{337, 370, 407, 447, 491}, budgets)
+	assert.Equal(t, Unlimited, s.c.Mode())
+	assert.Zero(t, dropped)
+}
+
+func TestControllerEngagesAgainSoonAfterItClears(t *testing.T) {
+	s := limitingOnAMedium(t, 120_000)
+	_, _ = s.run(30_000, 300)
+	require.Equal(t, Unlimited, s.c.Mode())
+	{
+		// The flood comes back within a minute. Without the program the
+		// busiest CPU reads 90% while the NIC drops, as on AWS, where the
+		// guard then stayed off for 61 s. It engages within 2 s
+		_, _ = s.run(120_000, 20)
+		assert.NotEqual(t, Unlimited, s.c.Mode())
+	}
+	{
+		// Long after a clear, the same reading isn't an overload: 90% busy
+		// with drops from a burst
+		_, _ = s.run(30_000, 1_200)
+		require.Equal(t, Unlimited, s.c.Mode())
+		_, _ = s.run(120_000, 100)
+		assert.Equal(t, Unlimited, s.c.Mode())
 	}
 }
 

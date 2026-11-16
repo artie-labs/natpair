@@ -108,25 +108,29 @@ packet there costs about 100 ns, against about 1,450 ns for the kernel's path.
   second because its receive ring was full (ENA's `rx_over_errors`). A full
   CPU alone isn't enough: TCP as fast as it goes also fills a small NAT's CPU,
   but TCP senders slow down at the first losses, so the NIC drops about 2% and
-  the probe gets through.
+  the probe gets through. For a minute after it clears, 85% busy is enough.
 - **It attaches the program and measures for 100 ms**, starting one reading
   after the attach, because attaching restarts an ENA interface. It then
   gives each CPU a budget of 90% of the packets the busiest CPU passed, per
   1 ms tick. Past the budget the program drops worker packets. Dropping is
   cheap, so the CPU has room again.
 - **It lowers the budget** to 90% of itself, once a second and down to half
-  the measured rate, while the CPU stays full and the NIC still drops at least
-  5%. The program's own drops take CPU too, so a bigger flood needs a smaller
-  budget: at 1.2 million packets a second, a c7gn.medium stayed full under
-  90%.
+  the measured rate, while the busiest CPU is at least 85% busy and the NIC
+  still drops at least 5%. The program's own drops take CPU too, so a bigger
+  flood needs a smaller budget: at 1.2 million packets a second, a
+  c7gn.medium stayed full under 90%. With the program attached, its busiest
+  CPU read 91 to 93% while the NIC overflowed, so the rules that act on NIC
+  drops don't wait for 95%.
 - **It raises the budget** to 110% of itself, once a second, while the
-  program still drops at least 5% but the busiest CPU was under 85% busy
-  over the last second. Otherwise steady traffic that doesn't slow down,
-  left above the budget after a flood ends, would keep the program dropping
-  it for as long as it lasts. That includes traffic above the starting
-  budget, which comes in low when something else held the CPU while the
-  guard measured. Under a flood, a raise that fills the CPU again is cut
-  back by the rule above.
+  program still drops at least 5%, the NIC dropped under 5% over the last
+  1.5 s, and the busiest CPU was under 95% busy over the last second.
+  Otherwise steady traffic that doesn't slow down, left above the budget
+  after a flood ends, would keep the program dropping it for as long as it
+  lasts. That includes traffic above the starting budget, which comes in low
+  when something else held the CPU while the guard measured. After a cut,
+  the next raise waits 30 s. Under a flood, a raise past what the CPU
+  forwards makes the NIC drop, and the rule above cuts it back a second
+  later.
 - **It raises the shared ENI's receive ring and receive threads.** Right
   after attaching, the daemon raises the receive ring to the most the NIC
   allows, 2,048 packets on a c7gn.medium against ENA's default of 1,024.
@@ -140,7 +144,9 @@ packet there costs about 100 ns, against about 1,450 ns for the kernel's path.
   ports 61000 to 65535, which only the shared canary's connections use. Past
   the budget, each CPU passes at most 128 such replies every 16.8 ms.
 - **It clears** once the program drops less than 5% of what it sees over the
-  last second, unless the CPU is still full and the NIC still drops. The
+  last second and the NIC dropped less than 5% over the last 1.5 s. A budget
+  above what the CPU forwards sheds nothing while the NIC drops the rest, so
+  the program's own drops alone can't say the flood is over. The
   daemon then detaches the program, puts the ring and the threads back, and
   waits at least 1 s before it can engage again.
 

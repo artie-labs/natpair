@@ -76,7 +76,7 @@ const (
 	engageDropShare = 0.05
 	dropReadings    = 10
 	// overflowReadings is the window of NIC drops that keeps the guard from
-	// clearing while the CPU is full: 1.5 s. A window of exactly the second
+	// clearing or raising its budget: 1.5 s. A window of exactly the second
 	// ENA takes to refresh its drop counters can miss the refresh when a
 	// reading comes late, and then reads no drops in the middle of a flood.
 	// Engaging or cutting a second late costs little, so they keep the
@@ -84,39 +84,52 @@ const (
 	overflowReadings = 15
 	// clearShedShare and clearReadings: the budget comes off once the
 	// program has dropped less than 5% of the packets it saw over the last
-	// second, so the budget hardly binds, unless the CPU is full and the NIC
-	// drops at least engageDropShare. Without that exception, a budget the
-	// CPU can't reach sheds nothing while the NIC drops the rest, and on AWS
-	// the budget came off at 100% CPU. The CPU alone can't decide either:
-	// under a steady flood the budget itself keeps the busiest CPU near 80%.
-	// On AWS, a rule of "below 80% for 1 s" took the budget off 2 s after it
-	// went on, and the flood filled the CPU again 1 s later.
+	// second, so the budget hardly binds, and the NIC dropped less than
+	// engageDropShare over the last overflowReadings. A budget above what
+	// the CPU forwards sheds nothing while the NIC drops the rest. On AWS,
+	// a rule that let the NIC's drops hold it only while the busiest CPU was
+	// at 95% took the program off in the middle of a 1.2 million packet a
+	// second flood: with the program attached, the busiest CPU read 91 to 93%
+	// while the NIC overflowed. The CPU alone can't decide either: under a
+	// steady flood the budget itself keeps the busiest CPU near 80%. On AWS, a
+	// rule of "below 80% for 1 s" took the budget off 2 s after it went on,
+	// and the flood filled the CPU again 1 s later.
 	clearShedShare = 0.05
 	clearReadings  = 10
-	// cutShare and cutFloor: while the CPU stays full and the NIC still
-	// drops at least engageDropShare of what arrives, the budget was too
-	// high for this flood, because the program's own drops also take CPU.
-	// The budget then falls to 90% of itself, at most once a second, and no
-	// lower than half the measured rate. On AWS, 1.2 million packets a second on a
-	// c7gn.medium still filled the CPU under a budget of 90% of the measured
-	// rate, and the probe failed 29 times in 60 s.
+	// cutBusy, cutShare and cutFloor: while the busiest CPU is at least 85%
+	// busy and the NIC still drops at least engageDropShare of what arrives,
+	// the budget lets through more than the CPU forwards, partly because the
+	// program's own drops also take CPU. The budget then falls to 90% of
+	// itself, at most once a second, and no lower than half the measured
+	// rate. ENA refreshes rx_over_errors once a second, so a flood that just
+	// ended can still show NIC drops against almost no traffic: below 85%
+	// they aren't the budget's fault. On AWS, 1.2 million packets a second
+	// on a c7gn.medium still filled the CPU under a budget of 90% of the
+	// measured rate, and the probe failed 29 times in 60 s.
+	cutBusy  = 0.85
 	cutShare = 0.9
 	cutFloor = 0.5
-	// raiseBusy and raiseShare: while the program still drops at least
-	// clearShedShare of what it sees, but the busiest CPU was less than 85%
-	// busy over the last second, the budget is lower than the CPU needs. That
-	// happens when a flood ends and steady traffic that doesn't slow down,
-	// such as UDP, stays above a budget that a cut lowered. Without a raise,
-	// the program would drop that traffic for as long as it lasts. The budget
-	// then rises to 110% of itself, at most once a second, until the program
-	// drops under clearShedShare and the guard clears. It has no upper limit
-	// other than that: the rate measured at the attach can come in low, as
-	// when a health round held the CPU, and traffic just above a limit would
-	// be dropped for good. Under a flood, a rise that fills the CPU makes the
-	// NIC drop again and the cut rule lowers the budget. The gap to cutting
-	// at a 95% busy CPU keeps one rise from undoing the last cut.
-	raiseBusy  = 0.85
-	raiseShare = 1.1
+	// raiseShare and raiseAfterCut: while the program still drops at least
+	// clearShedShare of what it sees, the NIC keeps up and the busiest CPU
+	// was under engageBusy over the last second, the budget is lower than
+	// the CPU needs. That happens when a flood ends and steady traffic that
+	// doesn't slow down, such as UDP, stays above a budget a cut lowered, or
+	// when the rate measured at the attach came in low, as when a health
+	// round held the CPU. The budget then rises to 110% of itself, at most
+	// once a second, until the program drops under clearShedShare and the
+	// guard clears. On AWS, raises that stopped at 85% CPU left a steady
+	// 458,000 packets a second 7 to 15% dropped for 3 minutes. Under a
+	// flood, a raise past what the CPU forwards makes the NIC drop, and the
+	// cut rule lowers the budget a second later. The next raise waits 30 s
+	// after a cut, so a flood costs a second of NIC drops every 30 s.
+	raiseShare    = 1.1
+	raiseAfterCut = 300
+	// reengageWithin: for a minute after it clears, the guard engages again
+	// once the busiest CPU is at cutBusy, not engageBusy, while the NIC
+	// drops. On AWS, with the program off again in the middle of a flood,
+	// the busiest CPU stayed under 95% often enough that the guard took 61 s
+	// to engage, and the owner stepped down.
+	reengageWithin = time.Minute
 	// budgetShare is the share of the measured rate the budget lets through.
 	// The 10% it drops costs much less than forwarding it would, so the CPU
 	// has room again for the probe and the NAT's own work.
@@ -209,9 +222,13 @@ type Controller struct {
 	engagedBy Decision
 	measuring bool
 	// budget is the current budget and floor the lowest a cut goes.
-	// changedAt is the value of since at the last cut or raise.
-	budget, floor uint64
-	changedAt     int
+	// changedAt and cutAt are the values of since at the last cut or raise,
+	// and at the last cut.
+	budget, floor    uint64
+	changedAt, cutAt int
+	// clearedAt is the time of the reading where the guard last cleared, 0
+	// if it hasn't.
+	clearedAt time.Duration
 }
 
 // Mode returns what the program is doing.
@@ -243,35 +260,39 @@ func (c *Controller) Step(r Reading) Decision {
 		share, full := c.shedShare()
 		recent, _ := c.dropShare(dropReadings)
 		overflow, _ := c.dropShare(overflowReadings)
+		hold := Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
 		if !full {
-			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
+			return hold
 		}
-		// ENA refreshes rx_over_errors once a second, so a flood that just
-		// ended can still show NIC drops against almost no traffic. Only a
-		// full CPU makes them the budget's fault.
-		if busiest >= engageBusy && recent >= engageDropShare {
+		if busiest >= cutBusy && recent >= engageDropShare {
 			return c.change(max(c.floor, uint64(cutShare*float64(c.budget))), busiest, recent)
 		}
-		if busiest >= engageBusy && overflow >= engageDropShare {
-			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
+		if overflow >= engageDropShare {
+			// The NIC still drops, so neither clearing nor a raise is safe.
+			return hold
 		}
 		if share >= clearShedShare {
-			if calm, _ := c.busiest(clearReadings); calm < raiseBusy {
-				// At least 1 more, so a budget of a few packets can rise too.
-				return c.change(max(c.budget+1, uint64(raiseShare*float64(c.budget))), calm, share)
+			calm, _ := c.busiest(clearReadings)
+			if calm >= engageBusy || c.since-c.cutAt < raiseAfterCut {
+				return hold
 			}
-			return Decision{Mode: Limiting, Busiest: busiest, DropShare: share}
+			// At least 1 more, so a budget of a few packets can rise too.
+			return c.change(max(c.budget+1, uint64(raiseShare*float64(c.budget))), calm, share)
 		}
 		shed := sumSince(c.from.Shed, r.Shed)
 		// A fresh history makes the next engagement wait for a full second
 		// of readings, so NIC drops from the flood it just shed, which ENA
 		// reports up to a second late, don't count again.
-		*c = Controller{history: []Reading{r}}
+		*c = Controller{history: []Reading{r}, clearedAt: r.At}
 		return Decision{Mode: Unlimited, Changed: true, Busiest: busiest, DropShare: share, Shed: shed}
 	}
 	busiest, hot := c.busiest(engageReadings)
 	share, full := c.dropShare(dropReadings)
-	if !hot || !full || busiest < engageBusy || share < engageDropShare {
+	need := engageBusy
+	if c.clearedAt > 0 && r.At-c.clearedAt <= reengageWithin {
+		need = cutBusy
+	}
+	if !hot || !full || busiest < need || share < engageDropShare {
 		return Decision{Mode: Unlimited, Busiest: busiest, DropShare: share}
 	}
 	c.mode, c.from = Measuring, r
@@ -299,7 +320,8 @@ func (c *Controller) limit(r Reading) Decision {
 	c.mode, c.from, c.since = Limiting, r, 0
 	// A budget of 0 would mean no limit, so it lets at least one through.
 	budget := max(1, uint64(budgetShare*rate*tickSeconds))
-	c.budget, c.floor, c.changedAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), 0
+	// A cut-off time in the past lets the first raise come at once.
+	c.budget, c.floor, c.changedAt, c.cutAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), 0, -raiseAfterCut
 	return Decision{Mode: Limiting, Changed: true, Budget: budget, Rate: rate, Busiest: c.engagedBy.Busiest, DropShare: c.engagedBy.DropShare}
 }
 
@@ -312,6 +334,9 @@ func (c *Controller) change(budget uint64, busiest, share float64) Decision {
 	}
 	raised := budget > c.budget
 	c.budget, c.changedAt = budget, c.since
+	if !raised {
+		c.cutAt = c.since
+	}
 	return Decision{Mode: Limiting, Changed: true, Budget: budget, Busiest: busiest, DropShare: share, Raised: raised}
 }
 
