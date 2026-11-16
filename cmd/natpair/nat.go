@@ -308,7 +308,7 @@ func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {
-	if _, err := s.prober.Upload(ctx, s.target); err != nil {
+	if err := health.VerifyPath(ctx, s.prober, s.target); err != nil {
 		return fmt.Errorf("upload through the shared Elastic IP failed: %w", err)
 	}
 	return nil

@@ -153,6 +153,13 @@ When the standby takes the lease, it:
 3. checks an upload through the shared Elastic IP,
 4. and only then opens its fence and starts forwarding.
 
+If the upload times out, the new owner runs the same handshake check as a
+serving owner. If some handshakes complete and some don't, the path is
+congested, as under a flood that follows the shared Elastic IP, so the
+takeover counts it as verified and opens forwarding. Otherwise the new
+owner retries the upload until the takeover runs out of time, as when
+none complete because AWS is still moving the ENI.
+
 ## Upgrading itself
 
 The pinned release lives in the same DynamoDB table. Every minute each NAT
@@ -266,7 +273,10 @@ old release. See [operations](operations.md#upgrade) for the steps.
   count toward stepping down. At worst, a flood makes the pair move once
   per limit. The standby's copied connections
   aren't verified on these handovers, which only risks resetting the ones
-  it hasn't copied.
+  it hasn't copied. A takeover counts a congested shared path as verified
+  by the same check, so it too opens forwarding only after a handshake
+  through the shared address completed, which a dead path or an off-path
+  host can't produce.
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
   of its connections. Linux acts on one only if it matches a socket's
   addresses and ports. For TCP, its sequence number must also fall inside

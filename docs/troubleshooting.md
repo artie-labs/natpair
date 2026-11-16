@@ -136,6 +136,17 @@ failed, so it hasn't opened forwarding yet. They're normal for up to about
 10 s while AWS moves the ENI. If they continue, check that the Elastic IP is still
 associated with the shared ENI.
 
+### `the upload through the shared Elastic IP timed out, but the path is alive`
+
+The full message ends with `so forwarding is congested and the path counts
+as verified`. During a takeover, the new owner's upload through the shared
+Elastic IP timed out, but the `handshakes` field's count of 40 TCP
+handshakes with the probe receiver completed. The path works but loses
+packets, usually because of a flood that follows the shared Elastic IP, so
+the new owner opened forwarding instead of retrying until its takeover
+timed out. Its health rounds then likely show
+[`the health probe failed, but the path is alive`](#the-health-probe-failed-but-the-path-is-alive).
+
 ### `this boot was prepared by another release, so this NAT reports none until it reboots`
 
 This NAT took over while it was installing a release, so it runs a binary it

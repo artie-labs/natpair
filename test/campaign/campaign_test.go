@@ -262,6 +262,27 @@ func TestCampaign(t *testing.T) {
 		return map[string]any{"handed_over_after_limit": true, "handed_over_after_s": handedOver}
 	})
 
+	l.runCase("congested-takeover-verifies", func() map[string]any {
+		// b loses 80% of what its shared canary sends out, as under a flood
+		// that follows the shared Elastic IP. Its takeover's uploads through
+		// the shared address time out, but some handshakes complete, so the
+		// takeover counts the path as verified and opens forwarding instead
+		// of retrying until it times out.
+		l.restartPair()
+		lossy := []string{"FORWARD", "-s", l.configs["b"].SharedCanary().CIDR.String(), "-o", "wan", "-m", "statistic", "--mode", "random", "--probability", "0.8", "-j", "DROP"}
+		l.ns("b", append([]string{"iptables", "-I"}, lossy...)...)
+		injected := bootclock.Now()
+		l.ns("a", l.binary, "maintenance")
+		l.wait(func() bool { return l.active("b") }, 15*time.Second, "b takes over through its congested shared path")
+		recovery := (bootclock.Now() - injected).Seconds()
+		l.ns("b", append([]string{"iptables", "-D"}, lossy...)...)
+		logs, err := os.ReadFile(filepath.Join(l.out, l.caseName+"-b.log"))
+		require.NoError(l.t, err)
+		l.require(strings.Contains(string(logs), "forwarding is congested and the path counts as verified"), "b's takeover verified its path by the handshake check")
+		l.require(l.fresh(), "new connections work through b")
+		return map[string]any{"congested_takeover_verified": true, "local_takeover_s": recovery}
+	})
+
 	l.runCase("dead-path-fails-over", func() map[string]any {
 		l.restartPair()
 		injected := bootclock.Now()

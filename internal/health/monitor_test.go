@@ -481,6 +481,63 @@ func TestRoundCongestedFor(t *testing.T) {
 	}
 }
 
+func TestVerifyPath(t *testing.T) {
+	target := probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-shared"}
+	{
+		// A passing upload verifies the path without a check
+		prober := &mocks.FakeProber{}
+		require.NoError(t, health.VerifyPath(t.Context(), prober, target))
+		assert.Zero(t, prober.HandshakesCallCount())
+	}
+	{
+		// An upload that ran out of time while some handshakes complete
+		// means the path is congested, as under a flood that follows the
+		// shared Elastic IP, so it is verified
+		prober := &mocks.FakeProber{}
+		prober.UploadReturns(probe.Flow{}, errTimeout)
+		prober.HandshakesReturns(5, nil)
+		require.NoError(t, health.VerifyPath(t.Context(), prober, target))
+		_, checked, attempts := prober.HandshakesArgsForCall(0)
+		assert.Equal(t, target, checked)
+		assert.Equal(t, 40, attempts)
+	}
+	{
+		// None completing means the path is dead
+		prober := &mocks.FakeProber{}
+		prober.UploadReturns(probe.Flow{}, errTimeout)
+		prober.HandshakesReturns(0, nil)
+		err := health.VerifyPath(t.Context(), prober, target)
+		assert.ErrorIs(t, err, probe.ErrTimeout)
+		assert.ErrorContains(t, err, "0 of 40 handshakes completed")
+	}
+	{
+		// All completing means lost packets don't explain the failure
+		prober := &mocks.FakeProber{}
+		prober.UploadReturns(probe.Flow{}, errTimeout)
+		prober.HandshakesReturns(40, nil)
+		assert.ErrorIs(t, health.VerifyPath(t.Context(), prober, target), probe.ErrTimeout)
+	}
+	{
+		// Without an answer from the check, the failure stands
+		prober := &mocks.FakeProber{}
+		prober.UploadReturns(probe.Flow{}, errTimeout)
+		prober.HandshakesReturns(0, errors.New("connection refused"))
+		err := health.VerifyPath(t.Context(), prober, target)
+		assert.ErrorIs(t, err, probe.ErrTimeout)
+		assert.ErrorContains(t, err, "connection refused")
+	}
+	{
+		// A failure that came back over the path, such as a reply from the
+		// wrong address, fails without a check
+		prober := &mocks.FakeProber{}
+		wrong := errors.New("probe receiver saw source IP 192.0.2.7, expected 192.0.2.10")
+		prober.UploadReturns(probe.Flow{}, wrong)
+		prober.HandshakesReturns(5, nil)
+		assert.ErrorIs(t, health.VerifyPath(t.Context(), prober, target), wrong)
+		assert.Zero(t, prober.HandshakesCallCount())
+	}
+}
+
 func TestRoundTakeoverEligibility(t *testing.T) {
 	{
 		// A NAT that can forward offers to take over, even without recent copies

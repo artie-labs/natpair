@@ -13,6 +13,7 @@ package health
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -392,7 +393,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// old as the round's end.
 		now = m.deps.Now()
 	}
-	congested := checked && completed > 0 && completed < handshakeAttempts
+	congested := checked && congestedPath(completed)
 
 	// countedFailure is whether this round counts as failed.
 	countedFailure := false
@@ -638,6 +639,37 @@ func (m *Monitor) handshakes(ctx context.Context, target probe.Target, now time.
 		return 0, false
 	}
 	return completed, true
+}
+
+// congestedPath reports whether completed of handshakeAttempts handshakes
+// show a congested path: some completed and the rest were lost.
+func congestedPath(completed int) bool {
+	return completed > 0 && completed < handshakeAttempts
+}
+
+// VerifyPath sends an upload through target, as a takeover does through
+// the shared Elastic IP before it opens forwarding. It also passes when the
+// upload ran out of time but the path is congested, by the same check as a
+// serving NAT's rounds. Under a flood that follows the shared Elastic IP,
+// uploads can time out for as long as the flood lasts. Without this, a NAT
+// taking over then kept retrying until its takeover timed out, with no NAT
+// forwarding. Only completed handshakes count, and an off-path host can't
+// complete one. A dead path completes none, so it still fails.
+func VerifyPath(ctx context.Context, prober Prober, target probe.Target) error {
+	_, err := prober.Upload(ctx, target)
+	if err == nil || !errors.Is(err, probe.ErrTimeout) {
+		return err
+	}
+	completed, checkErr := prober.Handshakes(ctx, target, handshakeAttempts)
+	if checkErr != nil {
+		return fmt.Errorf("%w, and the check of whether the path is alive failed: %w", err, checkErr)
+	}
+	if !congestedPath(completed) {
+		return fmt.Errorf("%w, and %d of %d handshakes completed", err, completed, handshakeAttempts)
+	}
+	slog.Warn("the upload through the shared Elastic IP timed out, but the path is alive, so forwarding is congested and the path counts as verified",
+		slog.Any("probe_error", err), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts))
+	return nil
 }
 
 // warning limits a repeated warning to one each tableWarnInterval.
