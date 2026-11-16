@@ -80,7 +80,9 @@ const (
 	// ENA takes to refresh its drop counters can miss the refresh when a
 	// reading comes late, and then reads no drops in the middle of a flood.
 	// Engaging or cutting a second late costs little, so they keep the
-	// one-second window, which holds only drops since the last cut.
+	// one-second window. ENA's count can come up to a second late, so that
+	// window can still hold drops from before the last change: the first cut
+	// can follow overflow from the measuring interval.
 	overflowReadings = 15
 	// clearShedShare and clearReadings: the budget comes off once the
 	// program has dropped less than 5% of the packets it saw over the last
