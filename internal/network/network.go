@@ -79,6 +79,10 @@ const (
 
 var macPattern = regexp.MustCompile(`^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$`)
 
+// linkLocalServices are timeSync and resolver with the UDP ports the NAT
+// uses them on.
+var linkLocalServices = []struct{ address, port string }{{timeSync, "123"}, {resolver, "53"}}
+
 // Runner runs system commands.
 type Runner interface {
 	Run(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error)
@@ -122,10 +126,7 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	if err := n.fence.Install(ctx); err != nil {
 		return err
 	}
-	if err := n.protectHost(ctx); err != nil {
-		return err
-	}
-	if err := n.untrackOwnTraffic(ctx); err != nil {
+	if err := n.installFirewall(ctx); err != nil {
 		return err
 	}
 	// The conntrack settings below exist only once this module is loaded. On
@@ -183,6 +184,22 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	return n.PrepareNetwork(ctx)
 }
 
+// installFirewall installs the host firewall and exempts the NAT's own traffic
+// from connection tracking. With nftables, the table it installs also holds
+// the forwarding and SNAT rules, which PrepareNetwork installs again.
+func (n *Network) installFirewall(ctx context.Context) error {
+	if !n.cfg.NFTables() {
+		if err := n.protectHost(ctx); err != nil {
+			return err
+		}
+		return n.untrackOwnTraffic(ctx)
+	}
+	if err := n.limitLocalPorts(ctx); err != nil {
+		return err
+	}
+	return n.applyNFTables(ctx)
+}
+
 // protectHost blocks new connections to the NAT's own services, such as SSH
 // and conntrackd, from outside the VPC, and drops other traffic from outside
 // the VPC without an answer, except the resets below. The security group
@@ -212,7 +229,7 @@ func (n *Network) protectHost(ctx context.Context) error {
 	rules += fmt.Sprintf("-A %s -d %s -p tcp ! --syn --dport %s -m conntrack --ctstate UNTRACKED -m socket -j ACCEPT\n", inputChain, own, localPorts)
 	// UDP replies from the link-local services. Nothing outside the
 	// instance can send from a link-local address.
-	for _, service := range []struct{ address, port string }{{timeSync, "123"}, {resolver, "53"}} {
+	for _, service := range linkLocalServices {
 		rules += fmt.Sprintf("-A %s -s %s/32 -d %s -p udp --sport %s --dport %s -m conntrack --ctstate UNTRACKED -j ACCEPT\n", inputChain, service.address, own, service.port, localPorts)
 	}
 	// ICMP errors about the NAT's untracked connections: path MTU discovery
@@ -312,7 +329,7 @@ func (n *Network) EnsurePeerRoute(ctx context.Context) (bool, error) {
 // the table, so they still fail when it is full, as new worker connections
 // do.
 func (n *Network) untrackOwnTraffic(ctx context.Context) error {
-	if _, err := n.run.Run(ctx, commandTimeout, "sysctl", "-qw", "net.ipv4.ip_local_port_range="+strings.Replace(localPorts, ":", " ", 1)); err != nil {
+	if err := n.limitLocalPorts(ctx); err != nil {
 		return err
 	}
 	own := n.cfg.Instance.PrivateIP.String()
@@ -334,7 +351,7 @@ func (n *Network) untrackOwnTraffic(ctx context.Context) error {
 		in(fmt.Sprintf("-s %s -p udp --dport %s", cidr, localPorts))
 	}
 	in(fmt.Sprintf("-s %s/32 -p udp --dport %s", n.cfg.PeerIP, syncPort))
-	for _, service := range []struct{ address, port string }{{timeSync, "123"}, {resolver, "53"}} {
+	for _, service := range linkLocalServices {
 		out(fmt.Sprintf("-d %s/32 -p udp --sport %s --dport %s", service.address, localPorts, service.port))
 		in(fmt.Sprintf("-s %s/32 -p udp --sport %s --dport %s", service.address, service.port, localPorts))
 	}
@@ -346,6 +363,13 @@ func (n *Network) untrackOwnTraffic(ctx context.Context) error {
 		return err
 	}
 	return n.ensureRule(ctx, "raw", "PREROUTING", "-j", untrackInChain)
+}
+
+// limitLocalPorts keeps the NAT's own sockets on localPorts, out of
+// canaryPorts.
+func (n *Network) limitLocalPorts(ctx context.Context) error {
+	_, err := n.run.Run(ctx, commandTimeout, "sysctl", "-qw", "net.ipv4.ip_local_port_range="+strings.Replace(localPorts, ":", " ", 1))
+	return err
 }
 
 // ConnectionTable is one reading of the kernel's connection table.
@@ -461,6 +485,10 @@ func (n *Network) createCanary(ctx context.Context, index int, canary config.Can
 			return err
 		}
 	}
+	// The nftables table already forwards the canaries.
+	if n.cfg.NFTables() {
+		return nil
+	}
 	guestHost := canary.Guest().String() + "/32"
 	if err := n.ensureRule(ctx, "filter", "FORWARD", "-s", guestHost, "-j", "ACCEPT"); err != nil {
 		return err
@@ -480,6 +508,28 @@ func (n *Network) createCanary(ctx context.Context, index int, canary config.Can
 // this NAT's own IP. The NAT is a dedicated instance, so these are its only
 // POSTROUTING rules.
 func (n *Network) PrepareNetwork(ctx context.Context) error {
+	if n.cfg.NFTables() {
+		if err := n.applyNFTables(ctx); err != nil {
+			return err
+		}
+	} else if err := n.installIPTablesForwarding(ctx); err != nil {
+		return err
+	}
+	if err := n.ensureSharedRules(ctx); err != nil {
+		return err
+	}
+	// The route only keeps conntrackd's copies from fragmenting, and the
+	// daemon's 5 s check sets it again, so a failure here doesn't stop a
+	// takeover.
+	if err := n.routePeer(ctx); err != nil {
+		slog.Warn("failed to set the route to the peer, the 5 s check will try again", slog.Any("err", err))
+	}
+	return nil
+}
+
+// installIPTablesForwarding installs the SNAT rules and the forwarding rules
+// for the protected CIDRs with iptables.
+func (n *Network) installIPTablesForwarding(ctx context.Context) error {
 	cfg := n.cfg
 	shared := cfg.SharedAddress.Addr()
 	rules := "*nat\n:" + snatChain + " - [0:0]\n-F " + snatChain + "\n"
@@ -502,9 +552,6 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 	if _, err := n.run.RunWithInput(ctx, commandTimeout, rules, "iptables-restore", "--noflush", "-w", "1"); err != nil {
 		return err
 	}
-	if err := n.ensureSharedRules(ctx); err != nil {
-		return err
-	}
 	for _, prefix := range cfg.ProtectedCIDRs {
 		if err := n.ensureRule(ctx, "filter", "FORWARD", "-s", prefix.String(), "-m", "conntrack", "--ctstate", "NEW,ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
 			return err
@@ -519,12 +566,6 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 		if err := n.ensureRule(ctx, "filter", "FORWARD", "-s", prefix.String(), "-p", "tcp", "-m", "conntrack", "--ctstate", "INVALID", "-j", "REJECT", "--reject-with", "tcp-reset"); err != nil {
 			return err
 		}
-	}
-	// The route only keeps conntrackd's copies from fragmenting, and the
-	// daemon's 5 s check sets it again, so a failure here doesn't stop a
-	// takeover.
-	if err := n.routePeer(ctx); err != nil {
-		slog.Warn("failed to set the route to the peer, the 5 s check will try again", slog.Any("err", err))
 	}
 	return nil
 }

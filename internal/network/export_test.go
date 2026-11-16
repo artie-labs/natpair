@@ -7,12 +7,7 @@ func (n *Network) RoutePeer(ctx context.Context) error {
 	return n.routePeer(ctx)
 }
 
-// UntrackOwnTraffic exposes untrackOwnTraffic to the privileged tests.
-func (n *Network) UntrackOwnTraffic(ctx context.Context) error {
-	return n.untrackOwnTraffic(ctx)
-}
-
-// ProtectHost exposes protectHost to the privileged tests.
-func (n *Network) ProtectHost(ctx context.Context) error {
-	return n.protectHost(ctx)
+// InstallFirewall exposes installFirewall to the privileged tests.
+func (n *Network) InstallFirewall(ctx context.Context) error {
+	return n.installFirewall(ctx)
 }

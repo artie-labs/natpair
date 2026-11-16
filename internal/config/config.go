@@ -34,6 +34,19 @@ const (
 	DefaultMaxConnections = 262144
 )
 
+// Firewall names a way of installing the NAT's firewall, NAT and fence rules.
+type Firewall string
+
+const (
+	// FirewallIPTables installs them with the iptables commands, which on
+	// Amazon Linux 2023 run on nftables through the iptables-nft package, and
+	// runs the fence as a BPF program that iptables' bpf match calls.
+	FirewallIPTables Firewall = "iptables"
+	// FirewallNFTables installs them as native nftables tables with the nft
+	// command, and runs the fence as a timed nftables set element.
+	FirewallNFTables Firewall = "nftables"
+)
+
 // maxConnectionsAllowed lists the limits max_connections accepts. The hash
 // tables are a quarter of the limit, so powers of two keep them even. A full
 // table costs about 80 MB in the kernel per 262,144 connections, and about
@@ -107,6 +120,12 @@ type NAT struct {
 	// DefaultReleaseURL.
 	ReleaseURL string `json:"release_url,omitempty"`
 
+	// Firewall picks how the NAT installs its firewall, NAT and fence rules:
+	// FirewallIPTables, the default when empty, or FirewallNFTables.
+	// Bootstrap installs the rules at every boot, so a change takes effect
+	// at the next reboot.
+	Firewall Firewall `json:"firewall,omitempty"`
+
 	// Instance holds facts read from the instance metadata service at
 	// startup. It is not part of the file.
 	Instance instance.Facts `json:"-"`
@@ -151,6 +170,9 @@ func (c NAT) Validate() error {
 	if c.MaxConnections != 0 && !slices.Contains(maxConnectionsAllowed, c.MaxConnections) {
 		return fmt.Errorf("max_connections must be one of %v", maxConnectionsAllowed)
 	}
+	if c.Firewall != "" && c.Firewall != FirewallIPTables && c.Firewall != FirewallNFTables {
+		return fmt.Errorf("firewall must be %q or %q", FirewallIPTables, FirewallNFTables)
+	}
 	if !c.SharedAddress.Addr().Is4() || c.SharedAddress.Bits() < 16 || c.SharedAddress.Bits() > 28 {
 		return fmt.Errorf("shared_address must be an IPv4 address with its subnet prefix length, such as 10.0.1.100/24")
 	}
@@ -172,6 +194,11 @@ func (c NAT) ConnectionLimit() int {
 		return DefaultMaxConnections
 	}
 	return c.MaxConnections
+}
+
+// NFTables reports whether Firewall picks native nftables.
+func (c NAT) NFTables() bool {
+	return c.Firewall == FirewallNFTables
 }
 
 // OwnCanary sends probes out through this NAT's own public IP.

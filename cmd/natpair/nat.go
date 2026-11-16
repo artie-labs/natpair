@@ -68,7 +68,11 @@ func discover(ctx context.Context, cfg *config.NAT) (aws.Config, error) {
 	return awsConfig, nil
 }
 
-func newFence(cfg config.NAT) (*fence.Fence, error) {
+// newFence returns the fence for the firewall the configuration picks.
+func newFence(cfg config.NAT) (controller.Fence, error) {
+	if cfg.NFTables() {
+		return fence.NewNFTables(cfg.ProtectedCIDRs)
+	}
 	return fence.New(config.BPFDir, cfg.ProtectedCIDRs)
 }
 

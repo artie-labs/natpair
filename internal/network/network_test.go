@@ -321,3 +321,121 @@ func TestEnsureForwarding(t *testing.T) {
 		assert.Equal(t, 1, runner.RunCallCount())
 	}
 }
+
+// nftConfig is testConfig with the native nftables firewall.
+func nftConfig(t *testing.T) config.NAT {
+	cfg := testConfig(t)
+	cfg.Firewall = config.FirewallNFTables
+	return cfg
+}
+
+// nftRuleset is the table natpair installs for nftConfig, rule for rule what
+// the iptables tests above expect.
+const nftRuleset = "table ip natpair\ndelete table ip natpair\ntable ip natpair {\n" +
+	"\tset reset_sources {\n\t\ttype ipv4_addr\n\t\tsize 65536\n\t\tflags dynamic,timeout\n\t\ttimeout 60s\n\t}\n" +
+	"\tcounter dropped {\n\t}\n" +
+	"\tchain untrack_out {\n\t\ttype filter hook output priority raw; policy accept;\n" +
+	"\t\toifname \"lo\" notrack\n" +
+	"\t\tip saddr 10.0.1.10 tcp sport 32768-60999 notrack\n" +
+	"\t\tip saddr 10.0.1.10 ip daddr 10.0.0.0/16 udp sport 32768-60999 notrack\n" +
+	"\t\tip saddr 10.0.1.10 ip daddr 169.254.169.123 udp sport 32768-60999 udp dport 123 notrack\n" +
+	"\t\tip saddr 10.0.1.10 ip daddr 169.254.169.253 udp sport 32768-60999 udp dport 53 notrack\n\t}\n" +
+	"\tchain untrack_in {\n\t\ttype filter hook prerouting priority raw; policy accept;\n" +
+	"\t\tiifname \"lo\" notrack\n" +
+	"\t\tip daddr 10.0.1.10 tcp dport 32768-60999 notrack\n" +
+	"\t\tip daddr 10.0.1.10 ip saddr 10.0.0.0/16 udp dport 32768-60999 notrack\n" +
+	"\t\tip daddr 10.0.1.10 ip saddr 10.0.1.11 udp dport 3780 notrack\n" +
+	"\t\tip daddr 10.0.1.10 ip saddr 169.254.169.123 udp sport 123 udp dport 32768-60999 notrack\n" +
+	"\t\tip daddr 10.0.1.10 ip saddr 169.254.169.253 udp sport 53 udp dport 32768-60999 notrack\n\t}\n" +
+	"\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n" +
+	"\t\tiifname \"lo\" accept\n" +
+	"\t\tct state established,related accept\n" +
+	"\t\tip saddr 10.0.0.0/16 accept\n" +
+	"\t\tip saddr 10.0.1.11/32 accept\n" +
+	// A listener on any address gets nothing, and any other socket that
+	// owns the packet, TIME_WAIT included, gets it.
+	"\t\tip daddr 10.0.1.10 tcp dport 32768-60999 tcp flags & (fin|syn|rst|ack) != syn ct state untracked socket wildcard 1 counter name \"dropped\" drop\n" +
+	"\t\tip daddr 10.0.1.10 tcp dport 32768-60999 tcp flags & (fin|syn|rst|ack) != syn ct state untracked socket transparent 0 accept\n" +
+	"\t\tip saddr 169.254.169.123 ip daddr 10.0.1.10 udp sport 123 udp dport 32768-60999 ct state untracked accept\n" +
+	"\t\tip saddr 169.254.169.253 ip daddr 10.0.1.10 udp sport 53 udp dport 32768-60999 ct state untracked accept\n" +
+	"\t\tip daddr 10.0.1.10 icmp type destination-unreachable icmp code frag-needed limit rate 50/second burst 100 packets accept\n" +
+	"\t\tip daddr 10.0.1.10 icmp type destination-unreachable icmp code host-unreachable limit rate 50/second burst 100 packets accept\n" +
+	"\t\tip daddr 10.0.1.10 icmp type destination-unreachable icmp code port-unreachable limit rate 50/second burst 100 packets accept\n" +
+	"\t\tip daddr 10.0.1.10 icmp type time-exceeded limit rate 50/second burst 100 packets accept\n" +
+	"\t\tip daddr 10.0.1.100 tcp dport 1024-60999 tcp flags & (fin|syn|rst|ack) != syn ct state invalid " +
+	"update @reset_sources { ip saddr limit rate 10/second burst 50 packets } counter reject with tcp reset\n" +
+	"\t\tcounter name \"dropped\" drop\n\t}\n" +
+	"\tchain forward {\n\t\ttype filter hook forward priority filter; policy drop;\n" +
+	"\t\tip saddr 198.18.0.2 accept\n" +
+	"\t\tip daddr 198.18.0.2 ct state established,related accept\n" +
+	"\t\tip saddr 198.18.0.6 accept\n" +
+	"\t\tip daddr 198.18.0.6 ct state established,related accept\n" +
+	"\t\tip saddr 10.0.16.0/20 ct state new,established,related accept\n" +
+	"\t\tip daddr 10.0.16.0/20 ct state established,related accept\n" +
+	"\t\tip saddr 10.0.16.0/20 meta l4proto tcp ct state invalid reject with tcp reset\n" +
+	"\t\tip saddr 10.0.32.0/20 ct state new,established,related accept\n" +
+	"\t\tip daddr 10.0.32.0/20 ct state established,related accept\n" +
+	"\t\tip saddr 10.0.32.0/20 meta l4proto tcp ct state invalid reject with tcp reset\n\t}\n" +
+	"\tchain postrouting {\n\t\ttype nat hook postrouting priority srcnat; policy accept;\n" +
+	"\t\tfib saddr type local return\n" +
+	"\t\tip saddr 10.0.16.0/20 meta l4proto tcp snat to 10.0.1.100:1024-60999\n" +
+	"\t\tip saddr 10.0.16.0/20 snat to 10.0.1.100\n" +
+	"\t\tip saddr 10.0.32.0/20 meta l4proto tcp snat to 10.0.1.100:1024-60999\n" +
+	"\t\tip saddr 10.0.32.0/20 snat to 10.0.1.100\n" +
+	"\t\tip saddr 198.18.0.6/32 meta l4proto tcp snat to 10.0.1.100:1024-60999\n" +
+	"\t\tip saddr 198.18.0.6/32 snat to 10.0.1.100\n" +
+	"\t\tip saddr 198.18.0.2 oifname \"ens5\" meta l4proto tcp snat to 10.0.1.10:61000-65535\n" +
+	"\t\tip saddr 198.18.0.2 oifname \"ens5\" meta l4proto udp snat to 10.0.1.10:61000-65535\n" +
+	"\t\tip saddr 198.18.0.2 oifname \"ens5\" snat to 10.0.1.10\n\t}\n}\n"
+
+func TestBootstrapNFTables(t *testing.T) {
+	log := &commandLog{}
+	fence := &mocks.FakeNetworkFence{}
+	runner := log.runner()
+	runner.RunWithInputCalls(func(ctx context.Context, timeout time.Duration, input, name string, args ...string) (string, error) {
+		require.Equal(t, 1, fence.InstallCallCount(), "the fence must close forwarding before anything else")
+		return log.runner().RunWithInput(ctx, timeout, input, name, args...)
+	})
+	require.NoError(t, network.New(nftConfig(t), fence, runner).Bootstrap(t.Context()))
+	// No iptables command runs, so the NAT needs no iptables tables.
+	for _, c := range log.commands {
+		assert.False(t, strings.HasPrefix(c, "iptables"), c)
+	}
+	// One table holds every rule, and Bootstrap installs it twice: before
+	// anything else, then again from PrepareNetwork.
+	var applies []int
+	for i, c := range log.commands {
+		if c == "nft -f -" {
+			applies = append(applies, i)
+		}
+	}
+	require.Len(t, applies, 2)
+	require.Len(t, log.inputs, 2)
+	assert.Equal(t, nftRuleset, log.inputs[0])
+	assert.Equal(t, nftRuleset, log.inputs[1])
+	// The NAT's own sockets never pick the canary's ports, and the host
+	// firewall is in place before the conntrack settings and forwarding.
+	ports := slices.Index(log.commands, "sysctl -qw net.ipv4.ip_local_port_range=32768 60999")
+	require.GreaterOrEqual(t, ports, 0)
+	assert.Less(t, ports, applies[0])
+	assert.Less(t, applies[0], slices.Index(log.commands, "modprobe nf_conntrack"))
+	assert.Less(t, applies[0], slices.Index(log.commands, "sysctl -qw net.ipv4.ip_forward=1"))
+}
+
+func TestPrepareNetworkNFTables(t *testing.T) {
+	log := &commandLog{}
+	require.NoError(t, network.New(nftConfig(t), &mocks.FakeNetworkFence{}, log.runner()).PrepareNetwork(t.Context()))
+	require.Equal(t, []string{nftRuleset}, log.inputs)
+	assert.Contains(t, log.commands, "ip rule add from 10.0.32.0/20 lookup 7001 priority 7001")
+	assert.Contains(t, log.commands, "ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10")
+	for _, c := range log.commands {
+		assert.False(t, strings.HasPrefix(c, "iptables"), c)
+	}
+	{
+		// A failed install stops a takeover
+		log := &commandLog{fail: map[string]error{"nft -f -": errors.New("nft failed: exit status 1")}}
+		err := network.New(nftConfig(t), &mocks.FakeNetworkFence{}, log.runner()).PrepareNetwork(t.Context())
+		assert.EqualError(t, err, "nft failed: exit status 1")
+		assert.NotContains(t, log.commands, "ip rule add from 10.0.32.0/20 lookup 7001 priority 7001")
+	}
+}
