@@ -102,7 +102,9 @@ func TestNFTablesFence(t *testing.T) {
 		// The element's timeout alone closes it, with nothing of natpair's
 		// running: the wall clock cap here is an hour away
 		deadline := bootclock.Now() + time.Second
-		inNAT(func() error { return runNFT(t.Context(), armCommands(time.Second, time.Now().Add(time.Hour))) })
+		inNAT(func() error {
+			return runNFT(t.Context(), armCommands("ip", "forward", closedRules, time.Second, time.Now().Add(time.Hour)))
+		})
 		assert.True(t, forwards())
 		time.Sleep(deadline - bootclock.Now() + 100*time.Millisecond)
 		assert.False(t, forwards())
@@ -119,7 +121,9 @@ func TestNFTablesFence(t *testing.T) {
 		// A write delayed past the grant's end can't reopen forwarding: the
 		// element below has 10 s left, but the wall clock cap was written as
 		// if Arm had run 11 s ago
-		inNAT(func() error { return runNFT(t.Context(), armCommands(10*time.Second, time.Now().Add(-11*time.Second))) })
+		inNAT(func() error {
+			return runNFT(t.Context(), armCommands("ip", "forward", closedRules, 10*time.Second, time.Now().Add(-11*time.Second)))
+		})
 		assert.Contains(t, run("ip", "netns", "exec", "nf-nat", "nft", "list", "set", "ip", nftTable, "grant"), "elements = { 4 timeout 10s")
 		assert.False(t, forwards())
 	}

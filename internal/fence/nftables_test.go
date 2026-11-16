@@ -2,6 +2,7 @@ package fence
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,8 @@ func TestNFTablesClosedRuleset(t *testing.T) {
 func TestNFTablesArmCommands(t *testing.T) {
 	// 2026-11-16 10:00:00.700 UTC
 	wall := time.Unix(1794823200, 700_000_000)
+	f, err := NewNFTables([]netip.Prefix{netip.MustParsePrefix("10.0.16.0/20")})
+	require.NoError(t, err)
 	{
 		// The element times out after the grant's remaining time, and the
 		// wall clock cap, in whole seconds, is rounded up: 10:00:04.200
@@ -41,15 +44,15 @@ func TestNFTablesArmCommands(t *testing.T) {
 			"flush chain ip natpair_fence forward\n"+
 			"add rule ip natpair_fence forward ip version @grant meta time < 1794823205 accept\n"+
 			"add rule ip natpair_fence forward ip saddr @protected counter name \"dropped\" drop\n"+
-			"add rule ip natpair_fence forward ip daddr @protected counter name \"dropped\" drop\n", armCommands(3500*time.Millisecond, wall))
+			"add rule ip natpair_fence forward ip daddr @protected counter name \"dropped\" drop\n", f.armScript(3500*time.Millisecond, wall))
 	}
 	{
 		// A grant that ends on a whole second keeps that second
-		assert.Contains(t, armCommands(300*time.Millisecond, wall), "{ 4 timeout 300ms }")
-		assert.Contains(t, armCommands(300*time.Millisecond, wall), "meta time < 1794823201 accept")
+		assert.Contains(t, f.armScript(300*time.Millisecond, wall), "{ 4 timeout 300ms }")
+		assert.Contains(t, f.armScript(300*time.Millisecond, wall), "meta time < 1794823201 accept")
 	}
 	{
-		assert.Contains(t, armCommands(301*time.Millisecond, wall), "meta time < 1794823202 accept")
+		assert.Contains(t, f.armScript(301*time.Millisecond, wall), "meta time < 1794823202 accept")
 	}
 }
 
@@ -61,4 +64,87 @@ func TestNFTablesArmRejectsExpiredGrant(t *testing.T) {
 	// Less than a millisecond would be written as timeout 0ms, which
 	// nftables takes as no timeout at all.
 	assert.EqualError(t, f.Arm(bootclock.Now()+500*time.Microsecond), "an expired grant cannot open forwarding")
+}
+
+func fastPathFence(t *testing.T) *NFTables {
+	f, err := NewNFTablesWithFastPath([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("10.0.16.0/20")},
+		FastPath{Shared: netip.MustParseAddr("10.0.1.100"), CanaryPorts: "61000-65535"})
+	require.NoError(t, err)
+	return f
+}
+
+func TestNFTablesFastPath(t *testing.T) {
+	{
+		_, err := NewNFTablesWithFastPath([]netip.Prefix{netip.MustParsePrefix("10.0.16.0/20")}, FastPath{Shared: netip.MustParseAddr("10.0.1.100")})
+		assert.EqualError(t, err, "the fast path fence needs the shared IPv4 address and the canary's port range")
+	}
+	{
+		_, err := NewNFTablesWithFastPath(nil, FastPath{Shared: netip.MustParseAddr("10.0.1.100"), CanaryPorts: "61000-65535"})
+		assert.EqualError(t, err, "protected worker CIDRs are required")
+	}
+	f := fastPathFence(t)
+	closedIngress := "ip saddr @protected ip daddr != 10.0.1.100 meta l4proto { tcp, udp } counter name \"dropped\" drop\n" +
+		"add rule netdev natpair_fence check ip daddr 10.0.1.100 meta l4proto { tcp, udp } th dport != 61000-65535 counter name \"dropped\" drop\n"
+	{
+		// Installing replaces the forward fence, and in the same transaction
+		// closes the ingress chain without deleting the netdev table, so a
+		// flowtable's devices stay covered.
+		install := f.installScript()
+		assert.True(t, strings.HasPrefix(install, f.closedRuleset()))
+		assert.Equal(t, "add table netdev natpair_fence\n"+
+			"add set netdev natpair_fence protected { type ipv4_addr; flags interval; auto-merge; }\n"+
+			"flush set netdev natpair_fence protected\n"+
+			"add element netdev natpair_fence protected { 10.0.0.0/16, 10.0.16.0/20 }\n"+
+			"add set netdev natpair_fence grant { typeof ip version; flags timeout; }\n"+
+			"flush set netdev natpair_fence grant\n"+
+			"add counter netdev natpair_fence dropped\n"+
+			"add chain netdev natpair_fence check\n"+
+			"flush chain netdev natpair_fence check\n"+
+			"add rule netdev natpair_fence check "+closedIngress, strings.TrimPrefix(install, f.closedRuleset()))
+		assert.NotContains(t, install, "delete table netdev")
+	}
+	{
+		// Covering devices replaces the netdev table, closed, with its
+		// ingress chain on them ahead of the flowtable's priority 0.
+		script, err := f.coverScript([]string{"ens6", "eth1"})
+		require.NoError(t, err)
+		assert.Equal(t, "table netdev natpair_fence\ndelete table netdev natpair_fence\ntable netdev natpair_fence {\n"+
+			"\tset protected {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\tauto-merge\n\t\telements = { 10.0.0.0/16, 10.0.16.0/20 }\n\t}\n"+
+			"\tset grant {\n\t\ttypeof ip version\n\t\tflags timeout\n\t}\n"+
+			"\tcounter dropped {\n\t}\n"+
+			"\tchain check {\n"+
+			"\t\tip saddr @protected ip daddr != 10.0.1.100 meta l4proto { tcp, udp } counter name \"dropped\" drop\n"+
+			"\t\tip daddr 10.0.1.100 meta l4proto { tcp, udp } th dport != 61000-65535 counter name \"dropped\" drop\n\t}\n"+
+			"\tchain ingress {\n\t\ttype filter hook ingress devices = { \"ens6\", \"eth1\" } priority -10; policy accept;\n"+
+			"\t\tjump check\n\t}\n}\n", script)
+	}
+	{
+		// A device name that could change the script's meaning is refused
+		_, err := f.coverScript([]string{`ens6" } priority -500; }`})
+		assert.EqualError(t, err, `invalid device name "ens6\" } priority -500; }"`)
+		_, err = f.coverScript(nil)
+		assert.EqualError(t, err, "no devices to cover")
+	}
+	{
+		// Without a fast path, nothing would stop a flowtable's packets
+		plain, err := NewNFTables([]netip.Prefix{netip.MustParsePrefix("10.0.16.0/20")})
+		require.NoError(t, err)
+		_, err = plain.coverScript([]string{"ens6"})
+		assert.EqualError(t, err, "this fence has no fast path to cover devices with")
+		assert.Equal(t, "flush set ip natpair_fence grant\n", plain.closeScript())
+	}
+	{
+		// One transaction opens both chains with the same timeout and cap, and
+		// Close empties both grant sets.
+		wall := time.Unix(1794823200, 700_000_000)
+		arm := f.armScript(3500*time.Millisecond, wall)
+		assert.True(t, strings.HasPrefix(arm, armCommands("ip", "forward", closedRules, 3500*time.Millisecond, wall)))
+		assert.Equal(t, "flush set netdev natpair_fence grant\n"+
+			"add element netdev natpair_fence grant { 4 timeout 3500ms }\n"+
+			"flush chain netdev natpair_fence check\n"+
+			"add rule netdev natpair_fence check ip version @grant meta time < 1794823205 accept\n"+
+			"add rule netdev natpair_fence check "+closedIngress,
+			strings.TrimPrefix(arm, armCommands("ip", "forward", closedRules, 3500*time.Millisecond, wall)))
+		assert.Equal(t, "flush set ip natpair_fence grant\nflush set netdev natpair_fence grant\n", f.closeScript())
+	}
 }

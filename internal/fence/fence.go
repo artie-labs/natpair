@@ -13,6 +13,7 @@
 package fence
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"path/filepath"
@@ -38,4 +39,10 @@ func New(bpfDir string, protected []netip.Prefix) (*Fence, error) {
 		programPath: filepath.Join(bpfDir, "check"),
 		protected:   protected,
 	}, nil
+}
+
+// CoverDevices fails, because a flowtable forwards from the devices' ingress
+// hook, where only the nftables fence has a chain.
+func (f *Fence) CoverDevices(context.Context, []string) error {
+	return fmt.Errorf("flow offload needs the nftables fence")
 }
