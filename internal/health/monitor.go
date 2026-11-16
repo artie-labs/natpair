@@ -51,6 +51,21 @@ const (
 	// can't show that: on AWS, churn pushed a restarted standby's copy past 90%
 	// of the owner's count while it held none of 209 idle connections.
 	oldestCount = 16
+	// copiedPercent is how much of the owner's table, in percent, a standby's
+	// copy must hold before the standby counts as ready. The oldest
+	// connections and probe connections are a sample, which the start of a
+	// full copy usually carries. On AWS, standbys whose full copy lost 13 to
+	// 31% of the table passed that sample and reported ready, and the next
+	// takeover reset the connections they lacked. The owner's count comes
+	// from its latest report, up to a second or two old, so the margin covers
+	// the table shrinking that much in between, and copies on their way.
+	copiedPercent = 95
+	// copiedSlack is how many connections a standby's copy may lack whatever
+	// the share. In a small table, a few connections opened or closed since
+	// the owner's report are more than 5% of it. A full copy loses
+	// connections only when its burst overflows the standby's buffers, which
+	// takes tens of thousands of them, so the slack never hides that.
+	copiedSlack = 100
 	// oldestInterval is how often a NAT reads its oldest connections again.
 	// Reading them dumps conntrackd's whole cache.
 	oldestInterval = StandbyInterval
@@ -94,7 +109,9 @@ type Report struct {
 	// Ready means this NAT can forward, holds recently copied connections,
 	// and is not in maintenance or cooldown. A copy counts when it holds at
 	// least one of the peer's recent probe connections and all of the peer's
-	// oldest connections, and it stays recent for replicationRounds.
+	// oldest connections, and, while standing by, at least copiedPercent of
+	// the peer's TrackedConnections or all but copiedSlack of them. It stays
+	// recent for replicationRounds.
 	Ready bool `json:"ready"`
 	// ProvenWhilePeerFailing means this round proved this NAT's path while the
 	// peer was failing its own checks. That shows the peer's failure is its
@@ -318,8 +335,9 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	m.flows = flows
 
 	var tracked, copied int
+	counted := false
 	if stats, err := m.deps.Conntrack.Stats(ctx); err == nil {
-		tracked, copied, _ = conntrackd.CacheSizes(stats)
+		tracked, copied, counted = conntrackd.CacheSizes(stats)
 	} else {
 		slog.Warn("conntrackd is not answering, so connections are not being copied", slog.Any("err", err))
 	}
@@ -341,7 +359,19 @@ func (m *Monitor) Round(ctx context.Context) Report {
 					oldestCopied++
 				}
 			}
-			complete := oldestCopied == len(peer.Oldest)
+			// Only a standby's copy is what a takeover would install. The
+			// owner's copy is of the standby's table, and the NAT that just
+			// stepped down still counts its old table until its flush 60 s
+			// later.
+			enough := serving || (counted && (copied*100 >= peer.TrackedConnections*copiedPercent ||
+				peer.TrackedConnections-copied <= copiedSlack))
+			complete := oldestCopied == len(peer.Oldest) && enough
+			// A copy known to be short isn't ready, even within
+			// replicationRounds of the last good one, such as just after this
+			// NAT's conntrackd restarted empty.
+			if !enough {
+				m.replicated = false
+			}
 			if complete || serving {
 				m.incomplete = 0
 			} else {
@@ -356,7 +386,8 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			// copied count after the next handover.
 			if m.incomplete >= incompleteRounds && (!m.resynced || now-m.lastResync >= resyncInterval) {
 				slog.Warn("copied connections are incomplete, requesting a full copy from the peer",
-					slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied))
+					slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
+					slog.Int("copied_connections", copied), slog.Int("peer_tracked_connections", peer.TrackedConnections))
 				m.lastResync, m.resynced = now, true
 				if err := m.deps.Conntrack.RequestResync(ctx); err != nil {
 					slog.Warn("failed to request a full copy", slog.Any("err", err))

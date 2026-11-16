@@ -205,6 +205,74 @@ func TestRoundReplication(t *testing.T) {
 	assert.False(t, report.PeerCanTakeover)
 }
 
+func TestRoundCopiedShare(t *testing.T) {
+	flow := probe.Flow{Src: netip.MustParseAddr("172.31.94.10"), Dst: netip.MustParseAddr("192.0.2.1"), SrcPort: 40000, DstPort: 443}
+	cache := "tcp 6 ESTABLISHED src=172.31.94.10 dst=192.0.2.1 sport=40000 dport=443 src=192.0.2.1 dst=192.0.2.200 sport=443 dport=40000\n"
+	// standby returns a standby whose copy holds the peer's probe connection
+	// and copied of the peer's 100,000 connections.
+	standby := func(t *testing.T, copied int) *fixture {
+		f := newFixture(t)
+		f.peer = &health.Report{TrackedConnections: 100000, Flows: []probe.Flow{flow}}
+		f.conntrack.ExternalCacheReturns(cache, nil)
+		f.conntrack.StatsReturns(stats(3, copied), nil)
+		return f
+	}
+	{
+		// A copy of 70%, as after a full copy lost part of its burst, is not
+		// ready, though it holds the sampled connections. After two such
+		// rounds the standby asks for a full copy.
+		f := standby(t, 70000)
+		assert.False(t, f.rounds(t, 2).Ready)
+		assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
+	}
+	{
+		f := standby(t, 96000)
+		assert.True(t, f.rounds(t, 2).Ready)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
+	}
+	{
+		// Exactly 95% is enough, one connection fewer is not
+		assert.True(t, standby(t, 95000).rounds(t, 2).Ready)
+		assert.False(t, standby(t, 94999).rounds(t, 2).Ready)
+	}
+	{
+		// In a small table, a copy lacking the few connections opened since the
+		// owner's report is still ready, up to 100 of them
+		f := standby(t, 8)
+		f.peer.TrackedConnections = 9
+		assert.True(t, f.rounds(t, 2).Ready)
+		f = standby(t, 400)
+		f.peer.TrackedConnections = 500
+		assert.True(t, f.rounds(t, 2).Ready)
+		f = standby(t, 399)
+		f.peer.TrackedConnections = 500
+		assert.False(t, f.rounds(t, 2).Ready)
+	}
+	{
+		// A ready standby whose copy falls short, as when its conntrackd
+		// restarts empty, stops being ready in that round, not
+		// replicationRounds later.
+		f := standby(t, 96000)
+		require.True(t, f.rounds(t, 2).Ready)
+		f.conntrack.StatsReturns(stats(3, 40), nil)
+		assert.False(t, f.rounds(t, 1).Ready)
+	}
+	{
+		// Without its own counts, a standby can't show its copy is complete
+		f := standby(t, 96000)
+		f.conntrack.StatsReturns("cache internal:\ncurrent active connections: 3\n", nil)
+		assert.False(t, f.rounds(t, 2).Ready)
+	}
+	{
+		// An owner's copy is of the standby's table, which still counts the
+		// owner's old table for 60 s after a handover, so the share doesn't
+		// apply.
+		f := standby(t, 3)
+		f.serving = true
+		assert.True(t, f.rounds(t, 2).Ready)
+	}
+}
+
 func TestRoundOldest(t *testing.T) {
 	// A NAT publishes its oldest connections, and reads them from conntrackd
 	// again only every StandbyInterval, because that dumps the whole cache.
