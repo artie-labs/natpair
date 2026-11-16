@@ -33,8 +33,8 @@ const (
 	// DefaultMaxConnections is the connection limit when the configuration
 	// doesn't set max_connections.
 	DefaultMaxConnections = 262144
-	// DefaultCongestionHandoverMinutes is how long an owner's path may stay
-	// congested when the configuration doesn't set
+	// DefaultCongestionHandoverMinutes is the congestion window, in
+	// minutes, when the configuration doesn't set
 	// congestion_handover_minutes.
 	DefaultCongestionHandoverMinutes = 10
 	// maxCongestionHandoverMinutes is the longest congestion_handover_minutes
@@ -116,11 +116,12 @@ type NAT struct {
 	// DefaultReleaseURL.
 	ReleaseURL string `json:"release_url,omitempty"`
 
-	// CongestionHandoverMinutes is how many minutes an owner's path may stay
-	// congested before the owner hands over to a peer that can take over.
-	// Zero means DefaultCongestionHandoverMinutes. The minimum, 1, means a
-	// flood that congests whichever NAT owns moves the pair at most once a
-	// minute.
+	// CongestionHandoverMinutes is the congestion window, in minutes. An
+	// owner that has served for the whole window, with at least half of its
+	// health rounds in it congested or failed, hands over to a peer that can
+	// take over. Zero means DefaultCongestionHandoverMinutes. The minimum,
+	// 1, means a flood that congests whichever NAT owns moves the pair at
+	// most once a minute.
 	CongestionHandoverMinutes int `json:"congestion_handover_minutes,omitempty"`
 
 	// Instance holds facts read from the instance metadata service at

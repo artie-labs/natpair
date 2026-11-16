@@ -57,9 +57,10 @@ func newFixture(t *testing.T) *fixture {
 		return f.peer, nil
 	})
 	f.monitor = health.New(health.Config{
-		Probe:        probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-own"},
-		ServingProbe: probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-shared"},
-		Release:      "v0.2.0",
+		Probe:            probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-own"},
+		ServingProbe:     probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-shared"},
+		Release:          "v0.2.0",
+		CongestionWindow: 10 * time.Minute,
 	}, health.Dependencies{
 		Prober:    f.prober,
 		Conntrack: f.conntrack,
@@ -400,84 +401,108 @@ func TestRoundCongestedPath(t *testing.T) {
 	}
 }
 
-func TestRoundCongestedFor(t *testing.T) {
-	// newOwner returns an owner that has run a healthy round, and whose
-	// uploads now time out while 5 of 40 handshakes complete.
+// roundsOf runs one serving round of each kind in kinds, in order: 'h'
+// passes its upload, 'c' is congested, with 5 of 40 handshakes completing,
+// and 'f' fails, with none completing. It returns the last report and
+// whether any round reached the congestion limit.
+func (f *fixture) roundsOf(t *testing.T, kinds string) (health.Report, bool) {
+	var report health.Report
+	var reached bool
+	for _, kind := range kinds {
+		switch kind {
+		case 'h':
+			f.prober.UploadReturns(probe.Flow{}, nil)
+		case 'c':
+			f.prober.UploadReturns(probe.Flow{}, errTimeout)
+			f.prober.HandshakesReturns(5, nil)
+		case 'f':
+			f.prober.UploadReturns(probe.Flow{}, errTimeout)
+			f.prober.HandshakesReturns(0, nil)
+		}
+		report = f.rounds(t, 1)
+		reached = reached || report.CongestionLimit
+	}
+	return report, reached
+}
+
+func TestRoundCongestionWindow(t *testing.T) {
+	// newOwner returns a NAT that just started serving, with a 10 minute
+	// congestion window and 1 s rounds.
 	newOwner := func(t *testing.T) *fixture {
 		f := newFixture(t)
 		f.serving = true
-		f.rounds(t, 1)
-		f.prober.UploadReturns(probe.Flow{}, errTimeout)
-		f.prober.HandshakesReturns(5, nil)
 		return f
 	}
+	// lossy is 20 rounds like those of an owner losing about 85% of its
+	// packets: mostly congested, a failed round now and then, never two in
+	// a row, and an upload that gets through.
+	lossy := "ccccfcccchccccfccccc"
 	{
-		// The time runs from the first congested round
+		// 85% loss reaches the limit once the owner has served the whole
+		// window, and not before
 		f := newOwner(t)
-		assert.Zero(t, f.rounds(t, 1).CongestedFor)
-		assert.Equal(t, 9*time.Second, f.rounds(t, 9).CongestedFor)
+		report, reached := f.roundsOf(t, strings.Repeat(lossy, 30))
+		assert.False(t, reached)
+		assert.Equal(t, 600, report.WindowRounds)
+		assert.Equal(t, 570, report.WindowBadRounds)
+		report, _ = f.roundsOf(t, "c")
+		assert.True(t, report.CongestionLimit)
+		assert.Equal(t, 600, report.WindowRounds)
 	}
 	{
-		// Uploads that pass between congested rounds don't end the run, as
-		// when a fault on this NAT alone loses a moderate share of packets
+		// One congested round a minute never reaches it
 		f := newOwner(t)
-		for range 10 {
-			f.rounds(t, 1)
-			f.prober.UploadReturnsOnCall(f.prober.UploadCallCount(), probe.Flow{}, nil)
-			assert.True(t, f.rounds(t, 1).PathHealthy)
+		_, reached := f.roundsOf(t, strings.Repeat(strings.Repeat("h", 59)+"c", 30))
+		assert.False(t, reached)
+	}
+	{
+		// Nor does a burst every 30 s that leaves most rounds healthy
+		f := newOwner(t)
+		_, reached := f.roundsOf(t, strings.Repeat("ccfcc"+strings.Repeat("h", 25), 60))
+		assert.False(t, reached)
+	}
+	{
+		// A failed round every 30 s and a passing upload every 7 s don't
+		// restart anything, so an owner whose rounds are mostly congested
+		// still reaches it. Restarting at either would let bursts or a fault
+		// that lets some uploads through keep a damaged owner.
+		f := newOwner(t)
+		var kinds strings.Builder
+		for i := range 601 {
+			switch {
+			case i%30 == 29:
+				kinds.WriteByte('f')
+			case i%7 == 6:
+				kinds.WriteByte('h')
+			default:
+				kinds.WriteByte('c')
+			}
 		}
-		assert.Equal(t, 20*time.Second, f.rounds(t, 1).CongestedFor)
+		report, _ := f.roundsOf(t, kinds.String())
+		assert.True(t, report.CongestionLimit)
 	}
 	{
-		// Passing uploads for just under a minute don't end the run
+		// Exactly half is enough
 		f := newOwner(t)
-		f.rounds(t, 5)
-		f.prober.UploadReturns(probe.Flow{}, nil)
-		f.rounds(t, 58)
-		f.prober.UploadReturns(probe.Flow{}, errTimeout)
-		assert.Equal(t, 63*time.Second, f.rounds(t, 1).CongestedFor)
+		report, _ := f.roundsOf(t, strings.Repeat("hc", 300)+"h")
+		assert.Equal(t, 300, report.WindowBadRounds)
+		assert.True(t, report.CongestionLimit)
 	}
 	{
-		// A minute without a congested round ends it
+		// Standing by clears the window, so a NAT that serves again must
+		// serve a whole window again
 		f := newOwner(t)
-		f.rounds(t, 5)
-		f.prober.UploadReturns(probe.Flow{}, nil)
-		f.rounds(t, 59)
-		f.prober.UploadReturns(probe.Flow{}, errTimeout)
-		assert.Zero(t, f.rounds(t, 1).CongestedFor)
-	}
-	{
-		// A round that counts as failed doesn't end the run. A burst of
-		// traffic can fail one round, and restarting the time then would let
-		// a burst every few minutes keep an owner with a damaged path.
-		f := newOwner(t)
-		f.rounds(t, 5)
-		f.prober.HandshakesReturns(0, nil)
-		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
-		f.prober.HandshakesReturns(5, nil)
-		assert.Equal(t, 7*time.Second, f.rounds(t, 2).CongestedFor)
-	}
-	{
-		// A full table proves nothing about the path, so the run goes on
-		// through it, even for more than a minute
-		f := newOwner(t)
-		f.rounds(t, 5)
-		f.tableReadings(262133, 262144, 40)
-		f.rounds(t, 61)
-		f.tableReadings(1200, 262144, 0)
-		assert.Equal(t, 66*time.Second, f.rounds(t, 1).CongestedFor)
-	}
-	{
-		// A NAT that hands over and later serves again starts fresh, even if
-		// its table was full the whole time it stood by
-		f := newOwner(t)
-		f.rounds(t, 5)
+		report, _ := f.roundsOf(t, strings.Repeat("c", 601))
+		require.True(t, report.CongestionLimit)
 		f.serving = false
-		f.tableReadings(262133, 262144, 40)
-		f.rounds(t, 2)
+		f.prober.UploadReturns(probe.Flow{}, nil)
+		assert.False(t, f.rounds(t, 1).CongestionLimit)
 		f.serving = true
-		f.tableReadings(1200, 262144, 0)
-		assert.Zero(t, f.rounds(t, 1).CongestedFor)
+		report, reached := f.roundsOf(t, strings.Repeat("c", 600))
+		assert.False(t, reached)
+		assert.Equal(t, 600, report.WindowBadRounds)
+		report, _ = f.roundsOf(t, "c")
+		assert.True(t, report.CongestionLimit)
 	}
 }
 
@@ -856,8 +881,8 @@ func TestCongestedPathWarning(t *testing.T) {
 	// Once a minute, and so is the health round, like a healthy one's: an
 	// overload can last hours
 	assert.Equal(t, 2, strings.Count(output, `"msg":"the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure"`))
-	// The repeat says how long the path has been congested, in nanoseconds
-	assert.Contains(t, output, `"handshakes":7,"attempts":40,"congested_for":60000000000}`)
+	// The repeat says how many rounds in the window were congested or failed
+	assert.Contains(t, output, `"handshakes":7,"attempts":40,"window_bad_rounds":61,"window_rounds":61}`)
 	assert.Equal(t, 2, strings.Count(output, `"msg":"health round"`))
 	assert.Equal(t, 2, strings.Count(output, `"congested":true`))
 	assert.Equal(t, 2, strings.Count(output, `"handshakes":7}`))

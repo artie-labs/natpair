@@ -128,21 +128,26 @@ round counts as failed.
 
 The check can't tell why the path loses packets. Loss on the owner's path
 alone, such as from a fault in its host, also counts as congested, so the
-owner keeps serving while some handshakes complete. So once the owner's
-path has been congested for `congestion_handover_minutes`, 10 by default,
-it hands over to a standby that has proven its own path. The time starts
-again only once the owner goes a minute without a congested round, or
-stands by. Passing, failed and full-table rounds in between don't restart
-it, so a fault that still lets some uploads through can't hold the owner
-past the limit. A flood congests
-whichever NAT owns, so the new owner also waits that long, and the pair
-moves at most once per limit instead of several times a minute. An owner
-whose standby can't take over keeps serving and keeps warning. Run
-`natpair maintenance` on the owner to hand over sooner.
+owner keeps serving while some handshakes complete. So the owner keeps a
+window of its health rounds over the last `congestion_handover_minutes`,
+10 by default. Once it has served for the whole window and at least half
+of its rounds in it were congested or failed, it hands over to a standby
+that has proven its own path. What counts is the share of bad rounds, not
+an unbroken run of them. An upload that gets through now and then, or a
+burst that fails a single round, doesn't reset anything, so a fault that
+loses most of the owner's packets can't hold it. A pair with only the odd
+congested round never reaches half, so it doesn't move. An owner that was
+healthy before reaches half about halfway into solid loss, 5 minutes by
+default. A NAT that takes over starts an empty window and must serve the
+whole window first, so a flood that congests whichever NAT owns moves the
+pair at most once per window instead of several times a minute. Standing
+by clears the window. An owner whose standby can't take over keeps serving
+and keeps warning. Run `natpair maintenance` on the owner to hand over
+sooner.
 
 A congested owner publishes no probe flows, so its standby can't show it
-copied them. So both handovers from a congested owner, after the time
-limit or for maintenance, go to a standby that has proven its own path
+copied them. So both handovers from a congested owner, by the congestion
+window or for maintenance, go to a standby that has proven its own path
 without waiting for the standby to verify its copied connections.
 Connections the standby hasn't copied may reset. Upgrades still wait for a
 ready standby.
@@ -267,15 +272,18 @@ old release. See [operations](operations.md#upgrade) for the steps.
   about 90% of packets, or one that drops only full-size packets while a
   flood loses some small ones, counts as congested. At 99% loss, all 40
   handshakes usually fail, and the owner fails over. An attacker can't
-  cause such a fault, only add a flood while it lasts. Once the owner has
-  been congested for `congestion_handover_minutes`, with no minute free of
-  congestion, it hands over to a standby that has proven its own path,
-  and `natpair maintenance` hands over sooner. The time limit only adds a
-  way to hand over. It can't keep an owner that would otherwise step
-  down. A flood can't extend it either. A minute free of congestion needs
-  uploads that pass, which a flood can't cause, or rounds that fail, which
-  count toward stepping down. At worst, a flood makes the pair move once
-  per limit. The standby's copied connections
+  cause such a fault, only add a flood while it lasts. Once at least half
+  of the owner's rounds over its whole congestion window were congested
+  or failed, it hands over to a standby that has proven its own path, and
+  `natpair maintenance` hands over sooner. The window only adds a way to
+  hand over. It can't keep an owner that would otherwise step down. A
+  flood can't keep a damaged owner either: it can only turn rounds
+  congested or failed, which both count toward the handover, and the
+  share of bad rounds has no reset that an attacker could trigger. Only
+  uploads that pass, which a flood can't cause, lower it. At worst, a
+  flood that congests whichever NAT owns makes the pair move once per
+  window, because a new owner must serve a whole window first. Bursts
+  that leave most rounds healthy can't move the pair at all. The standby's copied connections
   aren't verified on these handovers, which only risks resetting the ones
   it hasn't copied. A takeover counts a congested shared path as verified
   by the same check, so it too opens forwarding only after a handshake

@@ -237,8 +237,10 @@ func TestCampaign(t *testing.T) {
 
 	l.runCase("lossy-path-hands-over-after-limit", func() map[string]any {
 		// The same loss, but as from a fault on a alone: b's path is clean.
-		// With congestion_handover_minutes at its minimum, 1, a keeps serving
-		// for a minute and then hands over.
+		// With congestion_handover_minutes at its minimum, 1, a hands over
+		// once it has served a whole minute and at least half of its rounds
+		// in the last minute were congested or failed: about 30 s into the
+		// loss, or a minute after it started serving, whichever is later.
 		setLimit := func(minutes int) {
 			for _, name := range []string{"a", "b"} {
 				cfg := l.configs[name]
@@ -253,9 +255,9 @@ func TestCampaign(t *testing.T) {
 		l.ns("a", append([]string{"iptables", "-I"}, lossy...)...)
 		l.wait(func() bool { return l.report("a").Congested }, 10*time.Second, "a reports its path congested")
 		congestedAt := bootclock.Now()
-		time.Sleep(45 * time.Second)
-		l.require(l.active("a") && !l.active("b"), "a keeps serving before the limit")
-		l.wait(func() bool { return l.active("b") }, 30*time.Second, "b takes over once a has been congested for the limit")
+		time.Sleep(20 * time.Second)
+		l.require(l.active("a") && !l.active("b"), "a keeps serving while fewer than half of its rounds were bad")
+		l.wait(func() bool { return l.active("b") }, 60*time.Second, "b takes over once most of a's rounds in the window were congested")
 		handedOver := (bootclock.Now() - congestedAt).Seconds()
 		l.ns("a", append([]string{"iptables", "-D"}, lossy...)...)
 		l.require(l.fresh(), "new connections work through b")

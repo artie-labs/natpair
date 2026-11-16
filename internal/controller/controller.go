@@ -72,7 +72,7 @@ var (
 	errHandover    = errors.New("handover requested")
 	errDemoted     = errors.New("stepped down after corroborated path failure")
 	errTakeover    = errors.New("takeover failed")
-	errCongested   = errors.New("handed over after a long congestion")
+	errCongested   = errors.New("handed over after too many congested rounds")
 )
 
 // Fence opens and closes worker forwarding.
@@ -98,10 +98,6 @@ type Config struct {
 	StateDir string
 	// PrepareTimeout bounds a takeover.
 	PrepareTimeout time.Duration
-	// CongestionHandover is how long this NAT's path may stay congested
-	// while it owns before it hands over to a peer that can take over. It
-	// must be positive.
-	CongestionHandover time.Duration
 }
 
 // Dependencies connect the controller to the system.
@@ -317,9 +313,11 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 			// The check can't tell a flood from a fault that damaged this
 			// NAT's path, such as one losing 90% of packets, which still lets
 			// some handshakes through. So a congested owner also hands over
-			// once its path has been congested for CongestionHandover. A flood
-			// congests the new owner too, which then waits as long, so the
-			// pair moves at most once per CongestionHandover. A congested peer
+			// once at least half of its rounds over its whole congestion
+			// window were congested or failed (see health.Report.
+			// CongestionLimit). A flood congests the new owner too, which must
+			// then serve a whole window first, so the pair moves at most once
+			// per window. A congested peer
 			// never gets it: no upload of its passed either, so it can't take
 			// over. A ready peer can, so it gets it too. With a fault that still
 			// lets some uploads through, the peer copies their flows and can
@@ -338,9 +336,9 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 					slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
 					return errMaintenance
 				}
-				if report.CongestedFor >= c.cfg.CongestionHandover {
-					slog.Warn("handing over because this NAT's path has been congested for longer than congestion_handover_minutes, so connections the peer hasn't copied may reset",
-						slog.Duration("congested_for", report.CongestedFor), slog.Duration("limit", c.cfg.CongestionHandover))
+				if report.CongestionLimit {
+					slog.Warn("handing over because at least half of this NAT's health rounds in the last congestion_handover_minutes were congested or failed, so connections the peer hasn't copied may reset",
+						slog.Int("window_bad_rounds", report.WindowBadRounds), slog.Int("window_rounds", report.WindowRounds))
 					return errCongested
 				}
 			}

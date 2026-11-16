@@ -83,7 +83,7 @@ func newFixture(t *testing.T) *fixture {
 		defer f.mu.Unlock()
 		return f.report
 	})
-	f.controller = controller.New(controller.Config{Node: "nat-a", StateDir: f.stateDir, PrepareTimeout: 5 * time.Second, CongestionHandover: 10 * time.Minute},
+	f.controller = controller.New(controller.Config{Node: "nat-a", StateDir: f.stateDir, PrepareTimeout: 5 * time.Second},
 		controller.Dependencies{
 			Fence:  f.fence,
 			Health: f.health,
@@ -479,11 +479,11 @@ func TestCongestedOwnerHandsOver(t *testing.T) {
 }
 
 func TestCongestionHandover(t *testing.T) {
-	// congested is what an owner reports once its path has been congested
-	// for the 10 minute limit: no upload passed, so it can forward only
-	// unproven.
-	congested := health.Report{CanForwardUnverified: true, Congested: true, CongestedFor: 10 * time.Minute, PeerCanTakeover: true}
-	const handingOver = `"msg":"handing over because this NAT's path has been congested for longer than congestion_handover_minutes, so connections the peer hasn't copied may reset"`
+	// congested is what an owner reports once 510 of its 600 rounds in its
+	// congestion window were congested or failed: no upload passed this
+	// round, so it can forward only unproven.
+	congested := health.Report{CanForwardUnverified: true, Congested: true, CongestionLimit: true, WindowRounds: 600, WindowBadRounds: 510, PeerCanTakeover: true}
+	const handingOver = `"msg":"handing over because at least half of this NAT's health rounds in the last congestion_handover_minutes were congested or failed, so connections the peer hasn't copied may reset"`
 	{
 		// An owner congested for the limit hands over once to a peer that can
 		// take over, and the log says why
@@ -513,15 +513,15 @@ func TestCongestionHandover(t *testing.T) {
 		assert.False(t, f.controller.Serving())
 		assert.Equal(t, 1, f.stepDownCount())
 		assert.Equal(t, 1, strings.Count(logs.String(), handingOver))
-		assert.Contains(t, logs.String(), `"congested_for":600000000000,"limit":600000000000`)
+		assert.Contains(t, logs.String(), `"window_bad_rounds":510,"window_rounds":600`)
 	}
 	{
-		// Congested for less than the limit, the owner keeps serving
+		// Below the limit, the owner keeps serving
 		f := newFixture(t)
 		f.start(t)
 		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
 		report := congested
-		report.CongestedFor = 10*time.Minute - time.Second
+		report.CongestionLimit = false
 		f.setReport(report)
 		time.Sleep(100 * time.Millisecond)
 		assert.True(t, f.controller.Serving())

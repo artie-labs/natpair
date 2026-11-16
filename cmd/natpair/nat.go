@@ -210,9 +210,10 @@ func runNAT(ctx context.Context, args []string) error {
 
 	var ctrl *controller.Controller
 	monitor := health.New(health.Config{
-		Probe:        cfg.OwnProbe(),
-		ServingProbe: cfg.SharedProbe(),
-		Release:      reportedRelease(config.BootedReleasePath),
+		Probe:            cfg.OwnProbe(),
+		ServingProbe:     cfg.SharedProbe(),
+		Release:          reportedRelease(config.BootedReleasePath),
+		CongestionWindow: cfg.CongestionHandover(),
 	}, health.Dependencies{
 		Prober:    prober,
 		Conntrack: conntrack,
@@ -223,10 +224,9 @@ func runNAT(ctx context.Context, args []string) error {
 		Now:       bootclock.Now,
 	})
 	ctrl = controller.New(controller.Config{
-		Node:               cfg.Instance.ID,
-		StateDir:           config.StateDir,
-		PrepareTimeout:     prepareTimeout,
-		CongestionHandover: cfg.CongestionHandover(),
+		Node:           cfg.Instance.ID,
+		StateDir:       config.StateDir,
+		PrepareTimeout: prepareTimeout,
 	}, controller.Dependencies{
 		Fence:      f,
 		Health:     monitor,

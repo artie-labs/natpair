@@ -58,7 +58,7 @@ variable "max_connections" {
 }
 
 variable "congestion_handover_minutes" {
-  description = "How many minutes the owner's path may stay congested, losing some packets but not all, before the owner hands over to a standby that has proven its own path. A whole number from 1 to 1440. Null uses natpair's default, 10. A flood congests whichever NAT owns, so this is also the shortest time between the moves it causes. Releases before the one that added it reject it. NATs read it at first boot, so changing it needs new NATs."
+  description = "The window, in minutes, over which the owner judges whether its path is congested, losing some packets but not all. Once the owner has served for the whole window and at least half of its health rounds in it were congested or failed, it hands over to a standby that has proven its own path. A whole number from 1 to 1440. Null uses natpair's default, 10. A NAT that takes over must serve a whole window first, so this is also the shortest time between the moves a flood causes. Releases before the one that added it reject it. NATs read it at first boot, so changing it needs new NATs."
   type        = number
   default     = null
 

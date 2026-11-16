@@ -215,25 +215,27 @@ over to a standby that has proven its own path, without waiting for the
 standby to verify its copied connections, and logs `handing over to a peer
 that hasn't verified its copied connections`. Connections the standby
 hasn't copied may reset. natpair logs this, and the `health round` line, at
-most once a minute. The `congested_for` field says how long the path has
-been congested. After `congestion_handover_minutes`, 10 by default, the
-owner hands over by itself, as in the next section.
+most once a minute. The `window_bad_rounds` field says how many of the
+`window_rounds` health rounds over the last `congestion_handover_minutes`,
+10 by default, were congested or failed. Once the owner has served for the
+whole window and that's at least half, it hands over by itself, as in the
+next section.
 
-### `handing over because this NAT's path has been congested for longer than congestion_handover_minutes`
+### `handing over because at least half of this NAT's health rounds in the last congestion_handover_minutes were congested or failed`
 
 The full message ends with `so connections the peer hasn't copied may
-reset`. The owner's path stayed congested, as in
+reset`. The owner's path was congested, as in
 [`the health probe failed, but the path is alive`](#the-health-probe-failed-but-the-path-is-alive),
-for the `limit` field's time with no minute free of congestion, so it
-handed over to a standby that has proven its own path. The `congested_for`
-field says how long. The handover doesn't wait for the standby to verify its copied
+or failed, in `window_bad_rounds` of its last `window_rounds` health
+rounds, at least half, so it handed over to a standby that has proven its
+own path. The handover doesn't wait for the standby to verify its copied
 connections, so connections it hadn't copied may have reset.
 
 If the new owner serves without trouble, the loss was likely the old
 owner's own, such as a fault in its host. Replace that NAT, as in
 [Replace a NAT](operations.md#replace-a-nat). If the new owner logs `the
 health probe failed, but the path is alive` too, more traffic arrives than
-either NAT can forward, and the pair moves again after the same time. See
+either NAT can forward, and the pair moves again at most once per window. See
 [more packets than the CPU can forward](#the-nat-is-too-small).
 
 If the standby can't take over, because it hasn't proven its own path or is

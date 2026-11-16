@@ -89,16 +89,6 @@ const (
 	// entry in the connection table for up to 2 minutes, a few thousand
 	// entries while an overload lasts.
 	handshakeAttempts = 40
-	// congestionGap is how long an owner's path must go without a congested
-	// round before a run of congested rounds ends. Passing and failed
-	// rounds in between don't end it, and full-table rounds keep it going. With a fault losing a moderate share
-	// of this NAT's packets, some uploads still pass every few rounds, and
-	// ending the run at each would keep the owner past the time limit. A
-	// burst of traffic can fail single rounds, and ending the run then
-	// would let bursts keep an owner whose path a fault damaged. An upload
-	// can't be made to pass from off the path, so only a path that really
-	// recovered ends the run.
-	congestionGap = 60 * BaseInterval
 )
 
 // StaleAfter returns how old a report from rounds of the given interval may
@@ -148,12 +138,13 @@ type Report struct {
 	// traffic arrives than the NAT can forward, so the round doesn't count as
 	// a path failure.
 	Congested bool `json:"congested"`
-	// CongestedFor is how long this NAT's path has been congested without a
-	// break, from its first congested round to this one. Only
-	// congestionGap without a congested or full-table round, or a round
-	// while standing by, ends the run. Only this NAT reads it, so it isn't sent to the
-	// peer.
-	CongestedFor time.Duration `json:"-"`
+	// CongestionLimit means this NAT has served for its whole congestion
+	// window, and at least half of its rounds in that window were congested
+	// or counted as failed. WindowRounds and WindowBadRounds count them.
+	// Only this NAT reads these, so they aren't sent to the peer.
+	CongestionLimit bool `json:"-"`
+	WindowRounds    int  `json:"-"`
+	WindowBadRounds int  `json:"-"`
 	// CanTakeover means this NAT can forward and is not in maintenance or cooldown.
 	CanTakeover     bool `json:"can_takeover"`
 	PeerReady       bool `json:"peer_ready"`
@@ -182,6 +173,9 @@ type Config struct {
 	// Release is the release this NAT runs, or "" if unknown, reported to the
 	// peer.
 	Release string
+	// CongestionWindow is the trailing time over which a serving NAT judges
+	// how congested its path is. See [Report.CongestionLimit].
+	CongestionWindow time.Duration
 }
 
 // Prober checks a path.
@@ -253,11 +247,14 @@ type Monitor struct {
 	// uncounted is how many rounds counted neither way since the last failed
 	// round.
 	uncounted int
-	// congestedSince is when the current run of congested rounds started,
-	// and lastCongested is its latest congested round, if congestedRun.
-	congestedSince  time.Duration
-	lastCongested   time.Duration
-	congestedRun    bool
+	// window holds this NAT's rounds while serving, oldest first, back to
+	// CongestionWindow ago. windowBad counts those that were congested or
+	// counted as failed. servingSince is when this NAT's current stretch of
+	// serving rounds started, if windowStarted. Standing by clears them.
+	window          []windowRound
+	windowBad       int
+	servingSince    time.Duration
+	windowStarted   bool
 	flows           []timedFlow
 	lastReplication time.Duration
 	replicated      bool
@@ -408,9 +405,6 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// path and counts neither way. On AWS, an owner whose table
 		// filled stepped down, and so did the NAT that took over from it.
 		m.uncounted++
-		// It says nothing about congestion either, so it keeps a run of
-		// congested rounds going.
-		m.lastCongested = now
 		if m.uncounted >= failureGapRounds {
 			m.failures = 0
 		}
@@ -431,26 +425,15 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// because no upload passed, so this NAT stops offering to take over
 		// and the peer's updater doesn't reboot the only NAT that could.
 		m.failures, m.successes = 0, 0
-		if !m.congestedRun || now-m.lastCongested >= congestionGap {
-			m.congestedSince, m.congestedRun = now, true
-		}
-		m.lastCongested = now
-		if m.congestedProbe.due(now) {
-			slog.Warn("the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure",
-				slog.Any("probe_error", probeErr), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts),
-				slog.Duration("congested_for", now-m.congestedSince))
-		}
 	default:
 		m.failures, m.successes, m.uncounted = m.failures+1, 0, 0
 		countedFailure = true
 	}
-	var congestedFor time.Duration
-	if congested {
-		congestedFor = now - m.congestedSince
-	}
-	// A NAT that serves again starts a new run.
-	if !serving {
-		m.congestedRun = false
+	limit := m.recordWindow(serving, congested || countedFailure, now)
+	if congested && m.congestedProbe.due(now) {
+		slog.Warn("the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure",
+			slog.Any("probe_error", probeErr), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts),
+			slog.Int("window_bad_rounds", m.windowBad), slog.Int("window_rounds", len(m.window)))
 	}
 	var flows []timedFlow
 	for _, flow := range m.flows {
@@ -538,7 +521,9 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		PeerConfirmedFailure:   peerOK && peer.ProvenWhilePeerFailing,
 		Release:                m.config.Release,
 		Congested:              congested,
-		CongestedFor:           congestedFor,
+		CongestionLimit:        limit,
+		WindowRounds:           len(m.window),
+		WindowBadRounds:        m.windowBad,
 		Serving:                serving,
 		PeerRelease:            peer.Release,
 		PeerServing:            peerOK && peer.Serving,
@@ -642,6 +627,51 @@ func (m *Monitor) handshakes(ctx context.Context, target probe.Target, now time.
 		return 0, false
 	}
 	return completed, true
+}
+
+// windowRound is one serving round in a NAT's congestion window.
+type windowRound struct {
+	at  time.Duration
+	bad bool
+}
+
+// recordWindow adds this round to the congestion window and reports
+// whether the window has reached the limit: this NAT has served for the
+// whole CongestionWindow, and at least half of its rounds in it were
+// congested or counted as failed.
+//
+// The share of bad rounds, not an unbroken run of them, is what counts.
+// A fault that loses most of the owner's packets still lets an upload
+// through now and then, and a burst of traffic can fail single rounds.
+// Neither resets the window, so neither can keep a damaged owner. A pair
+// whose path is mostly healthy, with the odd congested round, never
+// reaches half, so it doesn't move. A NAT that just took over must serve
+// the whole window first, so a flood that congests whichever NAT owns
+// moves the pair at most once per window.
+//
+// Rounds start at most once per BaseInterval, so the window holds at most
+// CongestionWindow/BaseInterval rounds, and older ones are dropped beyond
+// that too.
+func (m *Monitor) recordWindow(serving, bad bool, now time.Duration) bool {
+	if !serving {
+		m.window, m.windowBad, m.windowStarted = nil, 0, false
+		return false
+	}
+	if !m.windowStarted {
+		m.servingSince, m.windowStarted = now, true
+	}
+	m.window = append(m.window, windowRound{at: now, bad: bad})
+	if bad {
+		m.windowBad++
+	}
+	maxRounds := int(m.config.CongestionWindow / BaseInterval)
+	for len(m.window) > 0 && (now-m.window[0].at >= m.config.CongestionWindow || len(m.window) > maxRounds) {
+		if m.window[0].bad {
+			m.windowBad--
+		}
+		m.window = m.window[1:]
+	}
+	return now-m.servingSince >= m.config.CongestionWindow && len(m.window) > 0 && 2*m.windowBad >= len(m.window)
 }
 
 // congestedPath reports whether completed of handshakeAttempts handshakes

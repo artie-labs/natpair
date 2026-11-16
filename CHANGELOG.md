@@ -37,14 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure. If none or all complete, it counts as before. NATs log `the
   health probe failed, but the path is alive`, and their reports show
   `congested`. Loss on the owner's path alone, such as from a fault in its
-  host, also counts as congested. So once an owner has been congested for
-  10 minutes, with no minute free of congestion, it hands over to a
-  standby that has proven its own path, and logs `handing over because
-  this NAT's path has been congested for longer than
-  congestion_handover_minutes`. A flood
-  congests the new owner too, so the pair moves at most once every 10
-  minutes. The Terraform module's `congestion_handover_minutes`, from 1 to
-  1440, changes the limit. Releases before this one reject the setting.
+  host, also counts as congested. So once an owner has served for 10
+  minutes with at least half of its health rounds in the last 10 minutes
+  congested or failed, it hands over to a standby that has proven its own
+  path, and logs `handing over because at least half of this NAT's health
+  rounds in the last congestion_handover_minutes were congested or
+  failed`. A NAT that takes over must serve 10 minutes first, so a flood
+  moves the pair at most once every 10 minutes, and bursts that leave most
+  rounds healthy never move it. The Terraform module's
+  `congestion_handover_minutes`, from 1 to 1440, changes the window. Releases before this one reject the setting.
   `natpair maintenance` hands over sooner. Both handovers from a congested
   owner go to a standby that has proven its own path, without waiting for
   it to verify its copied connections, so connections it hasn't copied may
