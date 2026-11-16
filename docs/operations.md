@@ -12,6 +12,7 @@ match yours.
 - [Take a NAT out of service](#take-a-nat-out-of-service)
 - [Upgrade](#upgrade)
 - [Replace a NAT](#replace-a-nat)
+- [Size the connection table](#size-the-connection-table)
 - [Monitoring](#monitoring)
 - [Download releases from your own S3 bucket](#download-releases-from-your-own-s3-bucket)
 - [Remove a pair](#remove-a-pair)
@@ -220,6 +221,36 @@ Do the standby first, then hand over, then do the other NAT and run
 
 Changing only tags updates the NATs in place without a restart, so it's safe
 to apply to both at once.
+
+## Size the connection table
+
+`max_connections` is the most connections each NAT tracks and copies to its
+peer. When the table is full, the kernel drops new connections. Size it for
+your peak with room to spare. A closed TCP connection stays in the table for
+120 s, so each new connection a second holds about 120 entries, and the
+default of 524,288 sustains about 4,000 new connections a second on top of
+the long-lived ones.
+
+Memory follows the connections in the table, not the limit. Measured on AWS,
+each connection costs the owner about 1.9 KB: 0.4 KB in the kernel's table,
+0.55 KB in conntrackd and the rest in natpair. A takeover is the peak. The
+NAT that steps down still holds its whole table while it takes in the new
+owner's copy, about 2.6 KB a connection. Keep that peak under half the
+instance's memory:
+
+| `max_connections` | Owner with a full table | Peak in a takeover | Smallest instance memory |
+| --- | --- | --- | --- |
+| 131,072 | 0.25 GB | 0.35 GB | 1 GiB |
+| 262,144 | 0.5 GB | 0.7 GB | 2 GiB, such as c7gn.medium |
+| 524,288, the default | 1.0 GB | 1.4 GB | 4 GiB, such as c7gn.large |
+| 1,048,576 | 2.0 GB | 2.7 GB | 8 GiB, such as c7gn.xlarge |
+| 2,097,152 | 4.0 GB | 5.5 GB | 16 GiB |
+| 4,194,304 | 8.0 GB | 11 GB | 32 GiB |
+
+On AWS, 2,097,152 connections on a 4 GiB NAT ran it out of memory, and the
+kernel killed conntrackd, so nothing was copied. A larger table also costs
+forwarding speed once it fills: on a c7gn.large, TCP fell from 19.0 Gbps with
+an empty table to 13.8 Gbps with 498,073 connections.
 
 ## Monitoring
 

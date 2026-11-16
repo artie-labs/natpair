@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The default `max_connections` is 524,288, up from 262,144. Each connection
+  in the table costs the owner about 1.9 KB of memory and up to 2.6 KB during
+  a takeover, far more than the 160 MB per 262,144 the docs said. 524,288
+  fits within half of a 4 GiB instance. NATs pick up the new default when
+  they boot into this release. On an instance with less than 4 GiB, such as
+  c7gn.medium, set `max_connections = 262144`. See
+  [Size the connection table](docs/operations.md#size-the-connection-table).
+- The kernel's connection table and conntrackd's caches have one hash bucket
+  per connection, up from a quarter, so lookups in a full table stay short.
+  This costs about 15 MB more at 524,288.
+
 ### Fixed
+
+- A full copy of the connection table to the standby, which happens after
+  the standby's conntrackd restarts or the standby reboots, as in every
+  upgrade, silently lost 13 to 31% of the connections on AWS. The standby
+  still reported ready, so the next takeover reset those connections.
+  conntrackd's socket buffers now hold a full copy, and it keeps every update
+  until the standby acknowledges it, so it can resend the lost ones. A standby
+  now counts as ready only when its copy holds at least 95% as many
+  connections as the owner tracks. One that falls short asks for a full copy
+  again, and planned maintenance and upgrades wait for it.
 
 - On a fresh apply, the NATs' SSM agent never came online and the Datadog
   agent install failed, because the NATs booted before their IAM policy was
