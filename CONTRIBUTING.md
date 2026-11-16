@@ -8,7 +8,8 @@ agree on the approach first.
 - Go, at the version in `go.mod`
 - Docker, for `make test-privileged` and `make test-campaign`
 - [golangci-lint](https://golangci-lint.run/) v2, for `make lint`
-- Terraform 1.6 or later, if you change `terraform/` or `examples/`
+- Terraform 1.7 or later, if you change `terraform/` or `examples/`. The module
+  itself needs 1.6, but its tests use mock providers, which came in 1.7.
 - [GoReleaser](https://goreleaser.com/) v2, only for `make release-snapshot`
 
 ## Build and test
@@ -24,8 +25,11 @@ agree on the approach first.
 | `make release-snapshot` | Builds the release tarballs into `dist/` without publishing them. |
 
 CI runs `make test`, `make test-privileged`, golangci-lint with and without the
-`privileged,campaign,localfixture` build tags, `make build`, and `terraform fmt`
-and `validate` for the module and each example.
+`privileged,campaign,localfixture` build tags, `make build`, `terraform fmt`
+and `validate` for the module and each example, and `terraform test` for the
+module. To run the module's tests locally, run
+`terraform -chdir=terraform init -backend=false`, then
+`terraform -chdir=terraform test`.
 
 ## Compatibility
 
