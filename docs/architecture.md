@@ -67,6 +67,43 @@ takes only whole seconds for the cap, so it's rounded up: a delayed write can
 extend the grant by less than 1 s, which the 2 s between the 4 s hold and the
 6 s takeover wait still covers.
 
+With the experimental `"flow_offload": true` setting on top, established
+worker connections take an nftables flowtable, which forwards their packets
+from the shared ENI's ingress hook, before the forward hook where the fence
+checks them. So the fence also keeps a `netdev` table, `natpair_fence`, whose
+chain runs on the shared ENI's ingress before the flowtable. It checks a
+second grant set, written in the same transaction as the first, with the
+same timeout and wall clock cap. When the grant runs out, it drops TCP and
+UDP from workers and to the shared address. The shared canary's
+connections, which a takeover tests before the fence opens, take their own
+ports on the shared address, 61000 to 65535, and their replies pass. The
+flowtable keeps an offloaded connection until it has been idle for 30 s, and
+the fence drops its packets all that time.
+
+The flowtable needs a route back for each connection, and the kernel looks
+it up as if the replies left through the device the request came in on, the
+shared ENI. Replies to workers normally leave through the NAT's own
+interface, so the forward chain marks the packet that offloads a
+connection, and a routing rule sends lookups with that mark to the shared
+ENI's route table. Offloaded replies then leave through the shared ENI to
+the VPC router, as replies do on a NAT instance with one interface.
+
+conntrackd still copies offloaded connections. The kernel sends no events
+for packets the flowtable forwards, but an established connection sends
+none anyway until it closes. On Linux 6.1 and 6.12, a FIN or reset takes
+the connection off the fast path, so conntrackd sees it close as before. On
+Linux 6.18 the flowtable forwards those too, and the copy goes away
+about 40 s after the connection closes: once the flowtable drops it after
+30 s idle, and the kernel's entry after 10 s more.
+
+One gap: when the kernel lists its table, it leaves out the TCP state and
+timeout of offloaded connections. conntrackd lists the table when it starts
+and about 30 s after it misses events. A connection it learns that way
+reaches the peer without its state, and after a takeover, the new owner
+drops the remote side's packets until the worker sends one. A connection
+conntrackd learned from events, which is almost all of them, is copied
+whole.
+
 ## Keeping connections across a takeover: conntrackd
 
 Each NAT runs conntrackd, which copies the owner's connection table to the
@@ -274,6 +311,14 @@ newer kernels. If something else writes 0, the daemon writes 1 again within
   before the forward chain could answer it with a reset. One difference: a
   socket with `IP_TRANSPARENT` set doesn't let replies through, where
   iptables' socket match would. The NAT has no such sockets.
+- **Flow offload.** With `"flow_offload": true`, offloaded packets skip the
+  forward chain, but not the fence, which also runs at the shared ENI's
+  ingress. They skip only forwarding rules: the host firewall's rules, for
+  traffic to the NAT itself, apply as before, and only connections from
+  workers that the forward chain accepted and the kernel tracks as
+  established are offloaded. While the fence is closed, its ingress chain
+  also drops TCP and UDP to the shared address that the host firewall would
+  have answered with a reset, outside the shared canary's ports.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs

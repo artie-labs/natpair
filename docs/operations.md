@@ -15,6 +15,7 @@ match yours.
 - [Monitoring](#monitoring)
 - [Download releases from your own S3 bucket](#download-releases-from-your-own-s3-bucket)
 - [Try the native nftables firewall](#try-the-native-nftables-firewall)
+  - [Try flow offload](#try-flow-offload)
 - [Remove a pair](#remove-a-pair)
 
 ## Open a shell on a NAT
@@ -322,7 +323,41 @@ sudo systemctl stop natpair
 sudo sysctl -w net.ipv4.ip_forward=0
 sudo nft delete table ip natpair
 sudo nft delete table ip natpair_fence
+sudo nft delete table netdev natpair_fence
 ```
+
+The last command is only for a NAT with flow offload, below.
+
+### Try flow offload
+
+The experimental `"flow_offload": true` setting, on top of
+`"firewall": "nftables"`, sends established worker TCP and UDP connections
+through an nftables flowtable. The flowtable forwards their packets as they
+arrive on the shared ENI, before routing and the forward chain, which saves
+CPU time on each packet. The
+[architecture](architecture.md#stopping-a-nat-that-cant-renew-the-fence)
+explains how the fence still stops them.
+
+To switch one NAT, follow the steps above with both settings:
+
+```sh
+sudo python3 -c 'import json; p="/etc/natpair/config.json"; c=json.load(open(p)); c["firewall"]="nftables"; c["flow_offload"]=True; json.dump(c, open(p, "w"), indent=2)'
+sudo natpair validate --config /etc/natpair/config.json
+sudo reboot
+```
+
+Once the NAT serves:
+
+- `sudo nft list flowtable ip natpair fastpath` lists the shared ENI's
+  device, and `sudo nft list chain netdev natpair_fence ingress` lists the
+  same device.
+- `sudo conntrack -L | grep -c OFFLOAD` counts offloaded connections.
+- `sudo nft list counter netdev natpair_fence dropped` counts what the fence
+  dropped at the shared ENI while closed.
+- `ip rule` shows `fwmark 0x10000/0x10000 lookup 7001`. Offloaded replies to
+  workers leave through the shared ENI, not the NAT's own interface.
+
+To switch back, remove `flow_offload` and reboot.
 
 ## Remove a pair
 

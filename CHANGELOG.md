@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setting at boot. New NATs install the `nftables` package.
   [Operations](docs/operations.md#try-the-native-nftables-firewall) says how
   to switch one NAT for a comparison.
+- An experimental `flow_offload` setting, which needs `"firewall":
+  "nftables"`. Established worker TCP and UDP connections then take an
+  nftables flowtable, a fast path that skips routing and the forward chain.
+  The fence also runs at the shared ENI's ingress, before the flowtable, so
+  offloaded connections still stop at the lease deadline when the daemon is
+  frozen. With the setting, workers' UDP takes ports 1024 to 60999 on the
+  shared address, as their TCP does, and the shared canary's probes take
+  ports 61000 to 65535. [Operations](docs/operations.md#try-flow-offload)
+  says how to switch one NAT.
 
 ### Fixed
 
