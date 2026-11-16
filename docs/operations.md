@@ -274,8 +274,9 @@ applies to either source.
 
 By default, a NAT installs its firewall, NAT and fence rules with the iptables
 commands. On Amazon Linux 2023 those run on nftables through `iptables-nft`,
-and most of the rules call iptables' match modules through a compatibility
-layer. The experimental `"firewall": "nftables"` setting installs the same
+and many of the rules call iptables' match and target modules, such as
+`conntrack`, `socket`, `hashlimit` and the fence's `bpf`, through nftables'
+compatibility layer. The experimental `"firewall": "nftables"` setting installs the same
 rules as native nftables tables instead: `natpair` for the firewall and
 SNAT, and `natpair_fence` for the fence. The
 [architecture](architecture.md#stopping-a-nat-that-cant-renew-the-fence)
