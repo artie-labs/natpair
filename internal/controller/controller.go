@@ -186,7 +186,10 @@ func (c *Controller) Run(ctx context.Context) error {
 		// API comes back, and the 12 s cooldown would then delay its next attempt.
 		// The cooldown starts before the release and before this NAT reports
 		// that it stopped serving, so the peer never sees it as both idle and
-		// ready to take over.
+		// ready to take over. A handover after a long congestion needs none,
+		// like maintenance: no upload of this NAT passed recently, so it
+		// could contend only as a last resort, after its peer, which has
+		// proven its path, takes the released lease.
 		if errors.Is(err, errDemoted) || (errors.Is(err, errTakeover) && c.deps.Health.Latest().PeerCanTakeover) {
 			c.startCooldown()
 		}
@@ -318,7 +321,9 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 			// congests the new owner too, which then waits as long, so the
 			// pair moves at most once per CongestionHandover. A congested peer
 			// never gets it: no upload of its passed either, so it can't take
-			// over.
+			// over. A ready peer can, so it gets it too. With a fault that still
+			// lets some uploads through, the peer copies their flows and can
+			// stay ready for most of the congestion.
 			if !report.Stale && report.PeerReady {
 				if c.maintenanceRequested() {
 					return errMaintenance
@@ -326,7 +331,9 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 				if c.handover.Load() {
 					return errHandover
 				}
-			} else if !report.Stale && report.Congested && report.PeerCanTakeover {
+			}
+			if !report.Stale && report.Congested && report.PeerCanTakeover {
+				// A ready peer already got maintenance above.
 				if c.maintenanceRequested() {
 					slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
 					return errMaintenance

@@ -527,6 +527,19 @@ func TestCongestionHandover(t *testing.T) {
 		assert.True(t, f.controller.Serving())
 	}
 	{
+		// A ready peer gets it too. With a fault that still lets some of the
+		// owner's uploads through, the peer copies their flows and can stay
+		// ready for most of the congestion.
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.PeerReady = true
+		f.setReport(report)
+		require.Eventually(t, func() bool { return !f.controller.Serving() }, waitFor, 10*time.Millisecond)
+		assert.True(t, f.released(t))
+	}
+	{
 		// A peer that can't take over, which includes a congested peer since
 		// no upload passed for it either, doesn't get the handover
 		f := newFixture(t)
