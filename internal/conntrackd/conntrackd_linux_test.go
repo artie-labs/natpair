@@ -46,6 +46,14 @@ func TestHandover(t *testing.T) {
 	}
 
 	{
+		// conntrackd gets the copies' socket buffers it asks for, 16 MB at
+		// 262,144 connections, which the kernel doubles, past the host's
+		// net.core.rmem_max and wmem_max.
+		sockets := nsRun(t, b.ns, "ss", "-uamn")
+		assert.Contains(t, sockets, "rb33554432")
+		assert.Contains(t, sockets, "tb33554432")
+	}
+	{
 		// Translated worker connections are copied. The NAT's own connections are not.
 		connect(t, a.ns, "10.0.16.5", 1000)
 		connect(t, a.ns, "10.99.0.1", 3000)

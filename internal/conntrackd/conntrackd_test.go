@@ -64,8 +64,14 @@ func TestWriteConfig(t *testing.T) {
 	for _, line := range []string{
 		"StartupResync on", "IPv4_address 10.0.1.10", "IPv4_Destination_Address 10.0.1.11", "Interface ens5",
 		"LockFile " + dir + "/conntrackd.lock", "Path " + dir + "/conntrackd.ctl",
-		// The same limit sizes the kernel's connection table.
-		"HashSize 65536", "HashLimit 262144",
+		// One hash bucket per connection, as in the kernel's table.
+		"HashSize 262144", "HashLimit 262144",
+		// A full copy's updates stay queued for resending until the peer
+		// acknowledges them, and its burst fits in the socket buffers: 64
+		// bytes a connection, which the kernel doubles.
+		"ResendQueueSize 262144",
+		"SndSocketBuffer 16777216", "RcvSocketBuffer 16777216",
+		"NetlinkBufferSize 16777216", "NetlinkBufferSizeMaxGrowth 33554432",
 	} {
 		assert.Contains(t, string(contents), line)
 	}
