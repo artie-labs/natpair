@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An experimental `firewall` setting in the NAT configuration file.
+  `"nftables"` installs the firewall, SNAT and fence rules as native
+  nftables tables with the `nft` command, instead of with the iptables
+  commands, which stay the default. The fence then keeps its deadline as a
+  timed nftables set element instead of in a BPF program. NATs read the
+  setting at boot. New NATs install the `nftables` package.
+  [Operations](docs/operations.md#try-the-native-nftables-firewall) says how
+  to switch one NAT for a comparison.
+
 ### Fixed
 
 - A full connection table cut off the NAT's own traffic: under 3,000 new

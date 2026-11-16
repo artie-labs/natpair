@@ -14,6 +14,7 @@ match yours.
 - [Replace a NAT](#replace-a-nat)
 - [Monitoring](#monitoring)
 - [Download releases from your own S3 bucket](#download-releases-from-your-own-s3-bucket)
+- [Try the native nftables firewall](#try-the-native-nftables-firewall)
 - [Remove a pair](#remove-a-pair)
 
 ## Open a shell on a NAT
@@ -268,6 +269,59 @@ release_url = "s3://my-bucket/natpair"
 
 The module gives the NATs read access to that prefix. The SHA-256 check
 applies to either source.
+
+## Try the native nftables firewall
+
+By default, a NAT installs its firewall, NAT and fence rules with the iptables
+commands. On Amazon Linux 2023 those run on nftables through `iptables-nft`,
+and most of the rules call iptables' match modules through a compatibility
+layer. The experimental `"firewall": "nftables"` setting installs the same
+rules as native nftables tables instead: `natpair` for the firewall and
+SNAT, and `natpair_fence` for the fence. The
+[architecture](architecture.md#stopping-a-nat-that-cant-renew-the-fence)
+explains how that fence differs.
+
+Each NAT reads the setting at boot, so the two NATs of a pair can differ,
+which allows an A/B comparison. To switch one NAT:
+
+1. Make sure the pair runs a release that has the setting. A release without
+   it rejects the configuration file.
+2. If the NAT serves, run `sudo natpair maintenance` and wait until the peer
+   serves.
+3. On the NAT, install the `nft` command and add the setting:
+
+   ```sh
+   sudo dnf install -y nftables
+   sudo python3 -c 'import json; p="/etc/natpair/config.json"; c=json.load(open(p)); c["firewall"]="nftables"; json.dump(c, open(p, "w"), indent=2)'
+   sudo natpair validate --config /etc/natpair/config.json
+   sudo reboot
+   ```
+
+4. After the reboot, check that the rules are native and the iptables ones
+   are gone. `sudo nft list tables` shows `table ip natpair` and
+   `table ip natpair_fence`, and `sudo iptables -S` shows no `NATPAIR`
+   chains. On the owner, `sudo nft list set ip natpair_fence grant` shows
+   one element whose `expires` stays under 4 s.
+5. If you ran `natpair maintenance`, run `sudo natpair resume`.
+
+`sudo nft list counter ip natpair dropped` counts what the host firewall
+dropped without an answer, and `sudo nft list counter ip natpair_fence
+dropped` what the fence dropped while closed.
+
+To switch back, remove the `firewall` key, or set it to `"iptables"`, and
+reboot. Remove the key before pinning a release that doesn't have the
+setting, or the upgrade stops at `natpair validate`. Rules don't survive a
+reboot, so a reboot always starts from a clean firewall. To remove the native
+tables without rebooting, such as on a test host, stop natpair and turn
+forwarding off first, because without the tables nothing filters forwarded
+traffic:
+
+```sh
+sudo systemctl stop natpair
+sudo sysctl -w net.ipv4.ip_forward=0
+sudo nft delete table ip natpair
+sudo nft delete table ip natpair_fence
+```
 
 ## Remove a pair
 

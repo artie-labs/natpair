@@ -55,6 +55,17 @@ traffic, even if the natpair daemon has crashed, hung or been killed. So two
 NATs never forward at the same time, and a frozen owner can't keep traffic
 going to the wrong place.
 
+With the experimental `"firewall": "nftables"` setting, natpair installs its
+rules as native nftables tables instead of with the iptables commands.
+nftables can't run a BPF program, so the fence is a set element with a
+timeout in its own table, `natpair_fence`. The kernel checks the timeout on
+every packet, so the fence still closes on its own when the daemon is frozen
+or killed. The timeout counts from when the kernel stores it, so a write
+delayed between computing it and storing it would extend the grant. The rule
+also compares the wall clock with the grant's end, which caps that. The cap
+is in whole seconds, rounded down, so once renewals stop the fence can close
+up to 1 s before the 4 s are up.
+
 ## Keeping connections across a takeover: conntrackd
 
 Each NAT runs conntrackd, which copies the owner's connection table to the
@@ -254,6 +265,14 @@ newer kernels. If something else writes 0, the daemon writes 1 again within
   one that matches can abort it, and the caller tries again. A forged
   port-unreachable that matches a DNS lookup's random port fails that
   lookup, which is retried. The rate limit bounds all of it.
+- **Native nftables.** With `"firewall": "nftables"`, the rules above are the
+  same, in the `natpair` table, and the fence is in `natpair_fence`. A drop
+  in any nftables chain is final, so an accept that another tool adds in its
+  own table can't let a packet past either one. The fence's chain runs
+  before natpair's forward chain, so a closed fence drops worker traffic
+  before the forward chain could answer it with a reset. One difference: a
+  socket with `IP_TRANSPARENT` set doesn't let replies through, where
+  iptables' socket match would. The NAT has no such sockets.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs
