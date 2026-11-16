@@ -187,6 +187,19 @@ func TestPrepareNetwork(t *testing.T) {
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C FORWARD -s 10.0.16.0/20 -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT")
 	// Worker packets from unknown connections are reset, not dropped in silence.
 	assert.Contains(t, log.commands, "iptables -w 1 -t filter -C FORWARD -s 10.0.32.0/20 -p tcp -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset")
+	// conntrackd's copies to the peer leave through the own interface from
+	// the own address, never through the shared ENI. Every takeover sets the
+	// route again, in case the kernel dropped it since boot.
+	assert.Contains(t, log.commands, "ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10")
+	{
+		// The route only keeps the copies from fragmenting, and the daemon's
+		// 5 s check sets it again, so failing to set it doesn't stop a takeover
+		// or skip the forwarding rules
+		log := &commandLog{fail: map[string]error{"ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10": errors.New("Error: Invalid prefsrc address.")}}
+		require.NoError(t, network.New(testConfig(t), &mocks.FakeNetworkFence{}, log.runner()).PrepareNetwork(t.Context()))
+		assert.Contains(t, log.commands, "ip route replace 10.0.1.11/32 dev ens5 src 10.0.1.10")
+		assert.Contains(t, log.commands, "iptables -w 1 -t filter -C FORWARD -s 10.0.32.0/20 -p tcp -m conntrack --ctstate INVALID -j REJECT --reject-with tcp-reset")
+	}
 }
 
 func TestActivateShared(t *testing.T) {
