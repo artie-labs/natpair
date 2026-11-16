@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"sync"
@@ -120,8 +121,8 @@ type Client struct {
 
 // Upload sends one verified upload to target and returns its connection. It
 // fails unless checkReply accepts the receiver's reply. A failure once the
-// upload's time is up wraps [ErrTimeout], unless the receiver's reply came
-// back and was wrong.
+// upload's time is up wraps [ErrTimeout], unless the receiver's reply or
+// TLS handshake came back and was wrong, such as an untrusted certificate.
 func (c *Client) Upload(ctx context.Context, target Target) (Flow, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -205,6 +206,16 @@ func (c *Client) upload(ctx context.Context, target Target) (Flow, error) {
 	}
 
 	secure := tls.Client(conn, tlsConfig)
+	if err := secure.HandshakeContext(ctx); err != nil {
+		err = fmt.Errorf("failed to secure probe connection: %w", err)
+		// Only running out of time can mean lost packets. Any other failure,
+		// such as a certificate this NAT doesn't trust or a reset, came back
+		// over the path, even if a starved CPU sees it after the deadline.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+			return Flow{}, err
+		}
+		return Flow{}, replyError{err}
+	}
 	if err := request.Write(secure); err != nil {
 		return Flow{}, fmt.Errorf("failed to send probe upload: %w", err)
 	}
@@ -257,7 +268,9 @@ func (c *Client) Handshakes(ctx context.Context, target Target, attempts int) (i
 		wg.Go(func() {
 			conn, err := dial(ctx, target, remote)
 			if err != nil {
-				if !timedOut(ctx) {
+				// Judge by the error, not the clock: on a starved CPU, a
+				// refused attempt may only be seen after the deadline.
+				if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, os.ErrDeadlineExceeded) {
 					mu.Lock()
 					failure = cmp.Or(failure, err)
 					mu.Unlock()

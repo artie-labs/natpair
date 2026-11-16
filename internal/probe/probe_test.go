@@ -3,6 +3,7 @@ package probe
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -251,6 +252,12 @@ func TestHandshakes(t *testing.T) {
 		target := Target{URL: "https://" + listener.Addr().String() + "/nat", Source: netip.MustParseAddr("127.0.0.1")}
 		_, err = (&Client{}).Handshakes(t.Context(), target, 40)
 		assert.ErrorIs(t, err, syscall.ECONNREFUSED)
+		// Even when a starved CPU only checks it after the deadline, which
+		// the clock moved past
+		clock = func() time.Time { return time.Now().Add(time.Hour) }
+		_, err = (&Client{}).Handshakes(t.Context(), target, 40)
+		clock = time.Now
+		assert.ErrorIs(t, err, syscall.ECONNREFUSED)
 	}
 	{
 		_, err := (&Client{}).Handshakes(t.Context(), Target{URL: "http://127.0.0.1/nat"}, 40)
@@ -317,6 +324,17 @@ func TestUploadTimeout(t *testing.T) {
 		target := startReceiver(t, http.NotFoundHandler())
 		_, err := (&Client{}).Upload(t.Context(), target)
 		assert.EqualError(t, err, "probe receiver returned status 404 with 19 bytes")
+		assert.NotErrorIs(t, err, ErrTimeout)
+	}
+	{
+		// Nor is a certificate this NAT doesn't trust, which also came back
+		// over the path
+		clock = func() time.Time { return time.Now().Add(time.Hour) }
+		target := startReceiver(t, probetest.Handler())
+		rootCAs = x509.NewCertPool()
+		_, err := (&Client{}).Upload(t.Context(), target)
+		var unverified *tls.CertificateVerificationError
+		assert.ErrorAs(t, err, &unverified)
 		assert.NotErrorIs(t, err, ErrTimeout)
 	}
 }
