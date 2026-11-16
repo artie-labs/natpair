@@ -38,17 +38,21 @@ type benchLab struct {
 	out    netip.Addr
 }
 
-// newBenchLab builds the namespaces. firewall "" leaves the NAT without
-// rules.
+// newBenchLab builds the namespaces.
 func newBenchLab(b *testing.B, firewall config.Firewall) *benchLab {
+	// Cleanups run after b.Context is cancelled.
+	ctx := context.WithoutCancel(b.Context())
 	run := func(args ...string) string {
-		output, err := command.Run(context.Background(), time.Minute, args[0], args[1:]...)
+		output, err := command.Run(ctx, time.Minute, args[0], args[1:]...)
 		require.NoError(b, err)
 		return output
 	}
 	for _, namespace := range []string{"bn-worker", "bn-nat", "bn-out"} {
+		// The benchmark framework can call a benchmark again before the
+		// cleanups of its earlier call run.
+		_, _ = command.Run(ctx, 5*time.Second, "ip", "netns", "del", namespace)
 		run("ip", "netns", "add", namespace)
-		b.Cleanup(func() { _, _ = command.Run(context.Background(), 5*time.Second, "ip", "netns", "del", namespace) })
+		b.Cleanup(func() { _, _ = command.Run(ctx, 5*time.Second, "ip", "netns", "del", namespace) })
 	}
 	run("ip", "link", "add", "lan", "netns", "bn-nat", "type", "veth", "peer", "name", "lan", "netns", "bn-worker")
 	run("ip", "link", "add", "wan", "netns", "bn-nat", "type", "veth", "peer", "name", "wan", "netns", "bn-out")
@@ -95,18 +99,15 @@ func newBenchLab(b *testing.B, firewall config.Firewall) *benchLab {
 // install installs the fence and every rule Bootstrap and a takeover
 // install, then opens the fence for an hour.
 func (l *benchLab) install(b *testing.B) {
-	if l.fence == nil {
-		return
-	}
 	n := network.New(l.cfg, l.fence, network.SystemRunner{})
 	require.NoError(b, netns.Do("bn-nat", func() error {
-		if err := l.fence.Install(context.Background()); err != nil {
+		if err := l.fence.Install(b.Context()); err != nil {
 			return err
 		}
-		if err := n.InstallFirewall(context.Background()); err != nil {
+		if err := n.InstallFirewall(b.Context()); err != nil {
 			return err
 		}
-		if err := n.PrepareNetwork(context.Background()); err != nil {
+		if err := n.PrepareNetwork(b.Context()); err != nil {
 			return err
 		}
 		return l.fence.Arm(bootclock.Now() + time.Hour)
@@ -146,7 +147,7 @@ func BenchmarkPrepareNetwork(b *testing.B) {
 			b.ResetTimer()
 			require.NoError(b, netns.Do("bn-nat", func() error {
 				for range b.N {
-					if err := n.PrepareNetwork(context.Background()); err != nil {
+					if err := n.PrepareNetwork(b.Context()); err != nil {
 						return err
 					}
 				}
@@ -178,16 +179,13 @@ func BenchmarkArm(b *testing.B) {
 
 // BenchmarkForwarding measures how many small UDP packets a second, and how
 // much TCP, the NAT forwards from the worker to the host outside, with each
-// firewall's full rules and with none. The worker, the NAT and the host share
-// the machine's CPUs, so the numbers compare the firewalls on this machine
-// only. It needs iperf3, and runs once per count: -benchtime 1x.
+// firewall's full rules. The worker, the NAT and the host share the
+// machine's CPUs, so the numbers compare the firewalls on this machine only.
+// It needs iperf3, and runs once per count: -benchtime 1x. Run it several
+// times rather than with -count, so the firewalls alternate.
 func BenchmarkForwarding(b *testing.B) {
-	for _, firewall := range append([]config.Firewall{""}, firewalls...) {
-		name := string(firewall)
-		if name == "" {
-			name = "none"
-		}
-		b.Run(name, func(b *testing.B) {
+	for _, firewall := range firewalls {
+		b.Run(string(firewall), func(b *testing.B) {
 			l := newBenchLab(b, firewall)
 			l.install(b)
 			server := exec.Command("ip", "netns", "exec", "bn-out", "iperf3", "-s", "-B", l.out.String())
@@ -198,7 +196,7 @@ func BenchmarkForwarding(b *testing.B) {
 			})
 			// The server takes a moment to listen.
 			require.Eventually(b, func() bool {
-				output, err := command.Run(context.Background(), time.Second, "ip", "netns", "exec", "bn-out", "ss", "-Htln", "sport", "=", ":5201")
+				output, err := command.Run(b.Context(), time.Second, "ip", "netns", "exec", "bn-out", "ss", "-Htln", "sport", "=", ":5201")
 				return err == nil && strings.Contains(output, "5201")
 			}, 5*time.Second, 50*time.Millisecond)
 			iperf := func(args ...string) map[string]any {
