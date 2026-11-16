@@ -30,14 +30,19 @@ const (
 	// configuration doesn't set release_url: natpair's GitHub releases.
 	DefaultReleaseURL = "https://github.com/artie-labs/natpair/releases/download"
 	// DefaultMaxConnections is the connection limit when the configuration
-	// doesn't set max_connections.
-	DefaultMaxConnections = 262144
+	// doesn't set max_connections. At its peak, a takeover, a NAT used about
+	// 2.6 KB of memory per connection on AWS, so 524,288 connections take
+	// about 1.4 GB, under half of a 4 GiB instance.
+	DefaultMaxConnections = 524288
 )
 
-// maxConnectionsAllowed lists the limits max_connections accepts. The hash
-// tables are a quarter of the limit, so powers of two keep them even. A full
-// table costs about 80 MB in the kernel per 262,144 connections, and about
-// as much again in conntrackd.
+// maxConnectionsAllowed lists the limits max_connections accepts. The owner
+// holds its table twice: in the kernel, about 0.4 KB a connection on AWS, and
+// in conntrackd's cache, about 0.55 KB. The standby holds conntrackd's copy.
+// During a takeover the NAT that steps down still holds its whole table while
+// it takes in the new owner's whole copy, so it peaks at about 2.6 KB a
+// connection, natpair's own memory included. On AWS, 2,097,152 connections on
+// a 4 GiB NAT got conntrackd killed for lack of memory.
 var maxConnectionsAllowed = []int{65536, 131072, 262144, 524288, 1048576, 2097152, 4194304}
 
 // The canary subnets come from 198.18.0.0/15, which is reserved for network

@@ -72,9 +72,9 @@ func TestReleases(t *testing.T) {
 func TestConnectionLimit(t *testing.T) {
 	{
 		// Unset uses the default, so configurations without the setting still load
-		assert.Equal(t, 262144, NAT{}.ConnectionLimit())
+		assert.Equal(t, 524288, NAT{}.ConnectionLimit())
 	}
 	{
-		assert.Equal(t, 524288, NAT{MaxConnections: 524288}.ConnectionLimit())
+		assert.Equal(t, 262144, NAT{MaxConnections: 262144}.ConnectionLimit())
 	}
 }

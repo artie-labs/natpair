@@ -205,11 +205,15 @@ func (n *Network) EnsurePeerRoute(ctx context.Context) (bool, error) {
 // limit. The kernel sizes the table and its hash buckets from memory, 7,680 on
 // a t4g.micro. Closed connections stay in the table for 120 s, so about 1,000
 // new connections a second fill it, and then the NAT's own DNS lookups fail.
-// A quarter as many buckets as entries keeps lookups short.
+//
+// The table gets one hash bucket per entry. Every forwarded packet looks its
+// connection up in one bucket's list, so in a full table this keeps that list
+// about one entry long, against four with a quarter as many buckets. A bucket
+// costs 8 bytes, 4 MB at 524,288.
 func (n *Network) sizeConnectionTable(ctx context.Context) error {
 	_, err := n.run.Run(ctx, commandTimeout, "sysctl", "-qw",
 		fmt.Sprintf("net.netfilter.nf_conntrack_max=%d", n.cfg.ConnectionLimit()),
-		fmt.Sprintf("net.netfilter.nf_conntrack_buckets=%d", n.cfg.ConnectionLimit()/4))
+		fmt.Sprintf("net.netfilter.nf_conntrack_buckets=%d", n.cfg.ConnectionLimit()))
 	// Only the host's network namespace can change these. In a container,
 	// such as natpair's own tests, the host's setting applies.
 	if info, statErr := os.Stat("/proc/sys/net/netfilter/nf_conntrack_max"); err != nil && statErr == nil && info.Mode().Perm()&0o222 == 0 {

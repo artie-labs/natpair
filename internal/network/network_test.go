@@ -97,7 +97,7 @@ func TestBootstrap(t *testing.T) {
 	conntrackSettings := slices.IndexFunc(log.commands, func(c string) bool { return strings.Contains(c, "nf_conntrack_tcp_loose") })
 	require.Contains(t, log.commands, "modprobe nf_conntrack")
 	// The connection table matches conntrackd's limit, not the kernel's default from memory.
-	assert.Contains(t, log.commands, "sysctl -qw net.netfilter.nf_conntrack_max=262144 net.netfilter.nf_conntrack_buckets=65536")
+	assert.Contains(t, log.commands, "sysctl -qw net.netfilter.nf_conntrack_max=524288 net.netfilter.nf_conntrack_buckets=524288")
 	// New inbound connections to the NAT itself come only from the VPC or the
 	// peer, because its security group lets the whole Internet through.
 	require.NotEmpty(t, log.inputs)

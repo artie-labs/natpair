@@ -47,12 +47,12 @@ variable "instance_type" {
 }
 
 variable "max_connections" {
-  description = "Most connections each NAT tracks and copies to its peer, a power of two from 65,536 to 4,194,304. Null uses natpair's default, 262,144. A full table costs about 80 MB per 262,144 connections in the kernel, and as much again in conntrackd. NATs read it at first boot, so changing it needs new NATs."
+  description = "Most connections each NAT tracks and copies to its peer, a power of two from 65,536 to 4,194,304. Null uses natpair's default, 524,288. Each connection in the table costs the owner about 1.9 KB of memory, and up to 2.6 KB during a takeover, so keep max_connections times 2.6 KB under half the instance's memory: 262,144 for 2 GiB, the default for 4 GiB, 1,048,576 for 8 GiB. NATs read it at first boot, so changing it needs new NATs."
   type        = number
   default     = null
 
   validation {
-    condition     = contains([65536, 131072, 262144, 524288, 1048576, 2097152, 4194304], coalesce(var.max_connections, 262144))
+    condition     = contains([65536, 131072, 262144, 524288, 1048576, 2097152, 4194304], coalesce(var.max_connections, 524288))
     error_message = "max_connections must be a power of two from 65,536 to 4,194,304."
   }
 }
