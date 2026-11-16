@@ -236,8 +236,6 @@ func (c *Client) sign(ctx context.Context, request *http.Request, payloadDigest 
 	return nil
 }
 
-// resolve returns the receiver's address, or the host's last resolved
-// address if the lookup fails.
 // Port returns the receiver's port in address, or 443 when it names none.
 // The overload guard matches the probe's replies by this port.
 func Port(address *url.URL) (uint16, error) {
@@ -252,6 +250,8 @@ func Port(address *url.URL) (uint16, error) {
 	return uint16(port), nil
 }
 
+// resolve returns the receiver's address, or the host's last resolved
+// address if the lookup fails.
 func (c *Client) resolve(ctx context.Context, address *url.URL) (netip.AddrPort, error) {
 	port, err := Port(address)
 	if err != nil {
