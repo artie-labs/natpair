@@ -35,6 +35,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -56,6 +57,7 @@ var (
 	outFlag      = flag.String("out", "", "directory for results and logs (default: a temporary directory)")
 	casesFlag    = flag.String("cases", "", "comma-separated case names to run (default: all)")
 	firewallFlag = flag.String("firewall", string(config.FirewallIPTables), "how the NATs install their rules: iptables or nftables")
+	offloadFlag  = flag.Bool("offload", false, "offload established worker connections to a flowtable, which needs -firewall nftables")
 )
 
 const (
@@ -102,6 +104,8 @@ type lab struct {
 	dynamo     *fakeDynamoDB
 	all        []*process
 	results    []map[string]any
+	// uploadPort is the worker's port of the last upload stream started.
+	uploadPort int
 }
 
 func TestCampaign(t *testing.T) {
@@ -361,6 +365,35 @@ func TestCampaign(t *testing.T) {
 		return map[string]any{"local_takeover_s": recovery, "old_owner_closed_after_service_returned": true, "upload": result}
 	})
 
+	if *offloadFlag {
+		// An offloaded connection skips the forward chain, so only the
+		// fence's ingress chain can stop it. b is down, so nothing moves the
+		// worker's traffic away from the frozen a.
+		l.runCase("offloaded-connection-stops-with-frozen-owner", func() map[string]any {
+			l.restartPair()
+			l.daemons["b"].stop()
+			upload := l.stream()
+			before := l.fastPathDrops("a")
+			l.daemons["a"].signal(l.t, syscall.SIGSTOP)
+			frozen := bootclock.Now()
+			// The grant ends at most 4 s after the last renewal, and the wall
+			// clock cap's rounding adds less than 1 s.
+			l.wait(func() bool { return l.fastPathDrops("a") > before }, 6*time.Second, "a's fence drops the offloaded upload")
+			stoppedAfter := (bootclock.Now() - frozen).Seconds()
+			l.require(l.offloaded("a", l.uploadPort), "the upload is still in a's flowtable while its packets are dropped")
+			var result uploadResult
+			select {
+			case result = <-upload:
+			case <-time.After(45 * time.Second):
+				l.t.Fatalf("%s: upload neither failed nor finished", l.caseName)
+			}
+			l.daemons["a"].signal(l.t, syscall.SIGCONT)
+			l.require(!result.OK, fmt.Sprintf("the upload stops with a frozen: %+v", result))
+			l.launch("b")
+			return map[string]any{"fence_dropped_offloaded_after_s": stoppedAfter, "upload_stopped": true, "upload_error": result.Error}
+		})
+	}
+
 	l.runCase("kernel-expiry-without-controller", func() map[string]any {
 		owner := "b"
 		if l.active("a") {
@@ -380,6 +413,13 @@ func TestCampaign(t *testing.T) {
 			rules = l.ns(owner, "nft", "list", "table", "ip", "natpair_fence")
 			jumps = 2
 			l.require(strings.Count(rules, " drop\n") == jumps, "guard rules do not stack after restarts: "+rules)
+			if *offloadFlag {
+				// The ingress chain stays on the flowtable's devices.
+				ingress := l.ns(owner, "nft", "list", "chain", "netdev", "natpair_fence", "ingress")
+				l.require(strings.Contains(ingress, `devices = { "lan", "wan" }`) || strings.Contains(ingress, `devices = { lan, wan }`), "the ingress chain still covers the flowtable's devices: "+ingress)
+				check := l.ns(owner, "nft", "list", "chain", "netdev", "natpair_fence", "check")
+				l.require(strings.Count(check, " drop\n") == 2 && !strings.Contains(check, "accept"), "the ingress chain is closed and its rules do not stack: "+check)
+			}
 		} else {
 			rules = l.ns(owner, "iptables", "-S", "FORWARD")
 			jumps = 2 * len(l.configs[owner].ProtectedCIDRs)
@@ -515,6 +555,7 @@ func (l *lab) setup() {
 			ProbeURL:       "https://" + receiverAddr + "/nat",
 			PeerIP:         netip.MustParseAddr(fmt.Sprintf("10.94.2.%d", nat.peer)),
 			Firewall:       config.Firewall(*firewallFlag),
+			FlowOffload:    *offloadFlag,
 		}
 		l.paths[nat.name] = filepath.Join(l.out, nat.name+".json")
 		l.writeConfig(nat.name, "setup")
@@ -554,6 +595,7 @@ func (l *lab) setup() {
 
 	environment, _ := json.MarshalIndent(map[string]string{
 		"firewall":   *firewallFlag,
+		"offload":    strconv.FormatBool(*offloadFlag),
 		"kernel":     l.run("uname", "-r"),
 		"conntrackd": l.run("conntrackd", "-v"),
 		"go":         l.run("go", "version"),
@@ -587,6 +629,9 @@ func (l *lab) launch(name string) {
 	env := []string{
 		"NATPAIR_FIXTURE_NEIGHBORS=" + filepath.Join(config.StateDir, "neighbors.json"),
 	}
+	if *offloadFlag {
+		env = append(env, "NATPAIR_FIXTURE_OFFLOAD_DEVICES=lan,wan")
+	}
 	l.daemons[name] = l.spawn(name, l.caseName+"-"+name+".log", env, l.binary, "run", "--config", l.paths[name])
 }
 
@@ -604,8 +649,51 @@ func (l *lab) stream() chan uploadResult {
 	case result := <-results:
 		l.t.Fatalf("%s: upload failed to start: %s", l.caseName, result.Error)
 	}
+	l.uploadPort = port
 	l.waitCopied(port)
+	if *offloadFlag {
+		l.wait(func() bool { return l.offloaded("a", port) }, 5*time.Second, "a offloads the upload")
+		// The copy came from conntrack events before the offload, which
+		// carry the connection's TCP state. A copy without it would be
+		// committed without state on a takeover.
+		cache := l.ns("b", "conntrackd", "-C", config.ConntrackdConfigPath, "-e")
+		var copied string
+		for line := range strings.SplitSeq(cache, "\n") {
+			if strings.Contains(line, fmt.Sprintf("sport=%d ", port)) {
+				copied = line
+			}
+		}
+		l.require(strings.Contains(copied, " ESTABLISHED "), "b's copy of the offloaded upload is established: "+copied)
+	}
 	return results
+}
+
+// offloaded reports whether a NAT's flowtable holds the worker connection
+// from port.
+func (l *lab) offloaded(name string, port int) bool {
+	output, err := command.Run(l.t.Context(), 2*time.Second, "nsenter", append(l.enter(name), "conntrack", "-L", "-p", "tcp", "--orig-port-src", strconv.Itoa(port))...)
+	return err == nil && strings.Contains(output, "[OFFLOAD]")
+}
+
+// fastPathDrops returns how many packets a NAT's fence dropped at the
+// flowtable's devices' ingress.
+func (l *lab) fastPathDrops(name string) int {
+	output := l.ns(name, "nft", "-j", "list", "counter", "netdev", "natpair_fence", "dropped")
+	var listing struct {
+		NFTables []struct {
+			Counter *struct {
+				Packets int `json:"packets"`
+			} `json:"counter"`
+		} `json:"nftables"`
+	}
+	require.NoError(l.t, json.Unmarshal([]byte(output), &listing))
+	for _, object := range listing.NFTables {
+		if object.Counter != nil {
+			return object.Counter.Packets
+		}
+	}
+	l.t.Fatalf("%s: no fast path counter in %s", l.caseName, output)
+	return 0
 }
 
 // waitCopied waits until b holds a copy of the worker connection from port.
@@ -760,6 +848,15 @@ func (l *lab) writeDeadline(name string, deadline time.Duration, wall time.Time)
 			"flush chain ip natpair_fence forward; add rule ip natpair_fence forward ip version @grant meta time < %d accept; "+
 			`add rule ip natpair_fence forward ip saddr @protected counter name "dropped" drop; `+
 			`add rule ip natpair_fence forward ip daddr @protected counter name "dropped" drop`, remaining.Milliseconds(), wall.Add(remaining).Unix()))
+		if *offloadFlag {
+			// The ingress chain on the flowtable's devices drops every worker
+			// connection while its own grant is empty, offloaded or not.
+			l.ns(name, "nft", fmt.Sprintf("flush set netdev natpair_fence grant; add element netdev natpair_fence grant { 4 timeout %dms }; "+
+				"flush chain netdev natpair_fence check; add rule netdev natpair_fence check ip version @grant meta time < %d accept; "+
+				`add rule netdev natpair_fence check ip saddr @protected ip daddr != %s meta l4proto { tcp, udp } counter name "dropped" drop; `+
+				`add rule netdev natpair_fence check ip daddr %[3]s meta l4proto { tcp, udp } th dport != 61000-65535 counter name "dropped" drop`,
+				remaining.Milliseconds(), wall.Add(remaining).Unix(), sharedWAN))
+		}
 		return
 	}
 	deadlines, err := ebpf.LoadPinnedMap(l.deadlinePath(name), nil)

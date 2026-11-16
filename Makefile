@@ -28,12 +28,13 @@ test-privileged: generate
 # Fault campaign: two real NATs, conntrackd and the kernel deadline inside one
 # disposable privileged container, with each NAT in its own network and mount
 # namespaces. Results and logs go to campaign-results/. CASES="a,b" runs only
-# the named cases. FIREWALL=nftables runs the NATs on native nftables.
+# the named cases. FIREWALL=nftables runs the NATs on native nftables, and
+# OFFLOAD=1 with it offloads worker connections to a flowtable.
 .PHONY: test-campaign
 test-campaign: generate
 	docker build -q -t natpair-test -f test.Dockerfile .
 	docker run --rm --privileged -v "$(CURDIR):/src" -v natpair-go-cache:/root/.cache -v natpair-go-mod:/go/pkg/mod \
-		natpair-test go test -tags campaign -timeout 20m -v -count=1 ./test/campaign/ -args -out /src/campaign-results -cases "$(CASES)" -firewall "$(or $(FIREWALL),iptables)"
+		natpair-test go test -tags campaign -timeout 20m -v -count=1 ./test/campaign/ -args -out /src/campaign-results -cases "$(CASES)" -firewall "$(or $(FIREWALL),iptables)" -offload=$(if $(OFFLOAD),true,false)
 
 .PHONY: lint
 lint:
