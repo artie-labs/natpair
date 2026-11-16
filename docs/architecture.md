@@ -100,6 +100,53 @@ packets it couldn't track since the last round while the table was at least
 rounds came between them. A NAT taking over also doesn't stop for such a
 round, because the copies it loads can fill its table.
 
+When the owner's upload times out, it then tries 40 TCP handshakes with the
+probe receiver at once, through the shared Elastic IP like the upload, and
+closes each one as soon as it connects:
+
+- **Some complete and some don't.** The path works but loses packets, as
+  when workers send more than the owner can forward. On AWS, small UDP
+  packets beyond what the CPU could process lost up to 87% of the packets
+  through the NAT. The standby would get the same traffic on taking over,
+  and the pair used to move 2 to 4 times a minute, pausing forwarding each
+  time. So the round doesn't count as failed, and it ends any run of failed
+  rounds. No upload passed, so the owner stops offering to take over until
+  two pass again, so the standby's updater doesn't reboot the standby meanwhile.
+- **None complete.** The path is dead, and the round counts as failed.
+- **All complete.** Small packets got through, so lost packets may not be
+  what failed the upload, as on a path that drops full-size packets. The
+  round counts as failed, as it did before the check. Under light loss all
+  40 can still complete, so a slightly overloaded owner can still step
+  down.
+
+The check runs only for an owner whose upload timed out while its
+connection table wasn't full. A failure that came back over the path, such
+as a reply showing the wrong source address, always counts. Only an attempt
+that runs out of time counts as lost. If one fails any other way, such as
+a refused connection or one the NAT couldn't start, the check fails and the
+round counts as failed.
+
+The check can't tell why the path loses packets. Loss on the owner's path
+alone, such as from a fault in its host, also counts as congested, so the
+owner keeps serving while some handshakes complete. So once the owner's
+path has been congested for `congestion_handover_minutes`, 10 by default,
+it hands over to a standby that has proven its own path. The time starts
+again only once the owner goes a minute without a congested round, or
+stands by. Passing, failed and full-table rounds in between don't restart
+it, so a fault that still lets some uploads through can't hold the owner
+past the limit. A flood congests
+whichever NAT owns, so the new owner also waits that long, and the pair
+moves at most once per limit instead of several times a minute. An owner
+whose standby can't take over keeps serving and keeps warning. Run
+`natpair maintenance` on the owner to hand over sooner.
+
+A congested owner publishes no probe flows, so its standby can't show it
+copied them. So both handovers from a congested owner, after the time
+limit or for maintenance, go to a standby that has proven its own path
+without waiting for the standby to verify its copied connections.
+Connections the standby hasn't copied may reset. Upgrades still wait for a
+ready standby.
+
 ## Taking over
 
 When the standby takes the lease, it:
@@ -242,6 +289,29 @@ newer kernels. If something else writes 0, the daemon writes 1 again within
   the VPC's address ranges, such as one reached through peering or on
   premises and set in the VPC's DHCP options, stays tracked, so a full table
   still breaks those lookups.
+- **Congested paths.** A failed upload that the handshake check calls
+  congested keeps the owner serving, so traffic can't hold a broken owner
+  in place unless its path still carries some packets. A completed
+  handshake can't be forged from off the path: the answer must acknowledge
+  the random 32-bit sequence number the kernel chose for that SYN, and
+  reach the source port the kernel chose for it. Flooding the NAT, from
+  workers or from the internet to the shared address, can only make
+  handshakes fail, which counts toward failing over. The limit: a path
+  that a fault leaves degraded but not dead, such as one losing up to
+  about 90% of packets, or one that drops only full-size packets while a
+  flood loses some small ones, counts as congested. At 99% loss, all 40
+  handshakes usually fail, and the owner fails over. An attacker can't
+  cause such a fault, only add a flood while it lasts. Once the owner has
+  been congested for `congestion_handover_minutes`, with no minute free of
+  congestion, it hands over to a standby that has proven its own path,
+  and `natpair maintenance` hands over sooner. The time limit only adds a
+  way to hand over. It can't keep an owner that would otherwise step
+  down. A flood can't extend it either. A minute free of congestion needs
+  uploads that pass, which a flood can't cause, or rounds that fail, which
+  count toward stepping down. At worst, a flood makes the pair move once
+  per limit. The standby's copied connections
+  aren't verified on these handovers, which only risks resetting the ones
+  it hasn't copied.
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
   of its connections. Linux acts on one only if it matches a socket's
   addresses and ports. For TCP, its sequence number must also fall inside

@@ -121,7 +121,10 @@ To go back, point the routes at the NAT Gateway again.
 To reboot, stop or replace the owner, hand over first:
 
 1. On the owner, run `sudo natpair maintenance`. It hands over once the
-   standby passes its checks.
+   standby passes its checks. If the owner's path is congested (see
+   [troubleshooting](troubleshooting.md#the-health-probe-failed-but-the-path-is-alive)),
+   it hands over as soon as the standby has proven its own path, and
+   connections the standby hasn't copied may reset.
 2. Wait for the other NAT to log `forwarding open`, and check that worker
    traffic works.
 3. Reboot, stop or replace the old owner. It no longer holds the shared ENI.
@@ -205,9 +208,9 @@ pair fails, even though running NATs keep their image.
 Running NATs keep the image, configuration and boot script they launched
 with. These changes need new NATs:
 
-- `worker_cidrs`, `max_connections`, `release_url`,
-  `datadog_api_key_secret_arn`, `datadog_site` and `kernel`, and a new CIDR
-  on the VPC when `worker_cidrs` is left at its default
+- `worker_cidrs`, `max_connections`, `congestion_handover_minutes`,
+  `release_url`, `datadog_api_key_secret_arn`, `datadog_site` and `kernel`,
+  and a new CIDR on the VPC when `worker_cidrs` is left at its default
 - a newer Amazon Linux image
 - a module upgrade whose changelog says so
 
@@ -264,6 +267,8 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `update` lines continue for more than an hour | An upgrade is stuck. The `reason` field says why. |
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |
 | `the connection table is full` is logged | The kernel is dropping new worker connections. `the connection table is nearly full` warns earlier, at 90%. See [troubleshooting](troubleshooting.md#the-connection-table-is-full). |
+| `the health probe failed, but the path is alive` is logged | The owner loses packets, usually because more traffic arrives than it can forward, so it stays the owner instead of stepping down. See [troubleshooting](troubleshooting.md#the-health-probe-failed-but-the-path-is-alive). |
+| `handing over because this NAT's path has been congested for longer than congestion_handover_minutes` is logged | The owner lost packets for 10 minutes, the default, and handed over. Connections the new owner hadn't copied may have reset. See [troubleshooting](troubleshooting.md#handing-over-because-this-nats-path-has-been-congested-for-longer-than-congestion_handover_minutes). |
 | `the health probe failed because this NAT's connection table is full` is logged | The owner's uploads fail because of the full table, not its path, so it stays the owner instead of stepping down. Workers' new connections fail the same way. See [troubleshooting](troubleshooting.md#the-health-probe-failed-because-this-nats-connection-table-is-full). |
 
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.

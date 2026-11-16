@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/artie-labs/natpair/internal/instance"
 	"github.com/artie-labs/natpair/internal/probe"
@@ -32,6 +33,14 @@ const (
 	// DefaultMaxConnections is the connection limit when the configuration
 	// doesn't set max_connections.
 	DefaultMaxConnections = 262144
+	// DefaultCongestionHandoverMinutes is how long an owner's path may stay
+	// congested when the configuration doesn't set
+	// congestion_handover_minutes.
+	DefaultCongestionHandoverMinutes = 10
+	// maxCongestionHandoverMinutes is the longest congestion_handover_minutes
+	// accepted, a day. It keeps the limit far from overflowing a
+	// time.Duration.
+	maxCongestionHandoverMinutes = 24 * 60
 )
 
 // maxConnectionsAllowed lists the limits max_connections accepts. The hash
@@ -107,6 +116,13 @@ type NAT struct {
 	// DefaultReleaseURL.
 	ReleaseURL string `json:"release_url,omitempty"`
 
+	// CongestionHandoverMinutes is how many minutes an owner's path may stay
+	// congested before the owner hands over to a peer that can take over.
+	// Zero means DefaultCongestionHandoverMinutes. The minimum, 1, means a
+	// flood that congests whichever NAT owns moves the pair at most once a
+	// minute.
+	CongestionHandoverMinutes int `json:"congestion_handover_minutes,omitempty"`
+
 	// Instance holds facts read from the instance metadata service at
 	// startup. It is not part of the file.
 	Instance instance.Facts `json:"-"`
@@ -151,6 +167,9 @@ func (c NAT) Validate() error {
 	if c.MaxConnections != 0 && !slices.Contains(maxConnectionsAllowed, c.MaxConnections) {
 		return fmt.Errorf("max_connections must be one of %v", maxConnectionsAllowed)
 	}
+	if c.CongestionHandoverMinutes < 0 || c.CongestionHandoverMinutes > maxCongestionHandoverMinutes {
+		return fmt.Errorf("congestion_handover_minutes must be from 1 to %d", maxCongestionHandoverMinutes)
+	}
 	if !c.SharedAddress.Addr().Is4() || c.SharedAddress.Bits() < 16 || c.SharedAddress.Bits() > 28 {
 		return fmt.Errorf("shared_address must be an IPv4 address with its subnet prefix length, such as 10.0.1.100/24")
 	}
@@ -172,6 +191,15 @@ func (c NAT) ConnectionLimit() int {
 		return DefaultMaxConnections
 	}
 	return c.MaxConnections
+}
+
+// CongestionHandover returns CongestionHandoverMinutes as a duration, or
+// DefaultCongestionHandoverMinutes if unset.
+func (c NAT) CongestionHandover() time.Duration {
+	if c.CongestionHandoverMinutes == 0 {
+		return DefaultCongestionHandoverMinutes * time.Minute
+	}
+	return time.Duration(c.CongestionHandoverMinutes) * time.Minute
 }
 
 // OwnCanary sends probes out through this NAT's own public IP.

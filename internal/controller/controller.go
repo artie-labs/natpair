@@ -72,6 +72,7 @@ var (
 	errHandover    = errors.New("handover requested")
 	errDemoted     = errors.New("stepped down after corroborated path failure")
 	errTakeover    = errors.New("takeover failed")
+	errCongested   = errors.New("handed over after a long congestion")
 )
 
 // Fence opens and closes worker forwarding.
@@ -97,6 +98,10 @@ type Config struct {
 	StateDir string
 	// PrepareTimeout bounds a takeover.
 	PrepareTimeout time.Duration
+	// CongestionHandover is how long this NAT's path may stay congested
+	// while it owns before it hands over to a peer that can take over. It
+	// must be positive.
+	CongestionHandover time.Duration
 }
 
 // Dependencies connect the controller to the system.
@@ -181,7 +186,10 @@ func (c *Controller) Run(ctx context.Context) error {
 		// API comes back, and the 12 s cooldown would then delay its next attempt.
 		// The cooldown starts before the release and before this NAT reports
 		// that it stopped serving, so the peer never sees it as both idle and
-		// ready to take over.
+		// ready to take over. A handover after a long congestion needs none,
+		// like maintenance: no upload of this NAT passed recently, so it
+		// could contend only as a last resort, after its peer, which has
+		// proven its path, takes the released lease.
 		if errors.Is(err, errDemoted) || (errors.Is(err, errTakeover) && c.deps.Health.Latest().PeerCanTakeover) {
 			c.startCooldown()
 		}
@@ -299,13 +307,41 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 			}
 		} else {
 			// Maintenance and a handover request hand over only to a peer that
-			// passes its forwarding and copied-connection checks.
+			// passes its forwarding and copied-connection checks. A congested
+			// owner's uploads time out, so it publishes no probe flows, and its
+			// peer can never show it copied them. So while this NAT is
+			// congested, maintenance needs only a peer that can take over.
+			// Handover requests come from upgrades, which wait for a ready
+			// peer.
+			//
+			// The check can't tell a flood from a fault that damaged this
+			// NAT's path, such as one losing 90% of packets, which still lets
+			// some handshakes through. So a congested owner also hands over
+			// once its path has been congested for CongestionHandover. A flood
+			// congests the new owner too, which then waits as long, so the
+			// pair moves at most once per CongestionHandover. A congested peer
+			// never gets it: no upload of its passed either, so it can't take
+			// over. A ready peer can, so it gets it too. With a fault that still
+			// lets some uploads through, the peer copies their flows and can
+			// stay ready for most of the congestion.
 			if !report.Stale && report.PeerReady {
 				if c.maintenanceRequested() {
 					return errMaintenance
 				}
 				if c.handover.Load() {
 					return errHandover
+				}
+			}
+			if !report.Stale && report.Congested && report.PeerCanTakeover {
+				// A ready peer already got maintenance above.
+				if c.maintenanceRequested() {
+					slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
+					return errMaintenance
+				}
+				if report.CongestedFor >= c.cfg.CongestionHandover {
+					slog.Warn("handing over because this NAT's path has been congested for longer than congestion_handover_minutes, so connections the peer hasn't copied may reset",
+						slog.Duration("congested_for", report.CongestedFor), slog.Duration("limit", c.cfg.CongestionHandover))
+					return errCongested
 				}
 			}
 			if !storeDown {
@@ -425,7 +461,8 @@ func (c *Controller) SetHandover(want bool) {
 
 // RequestMaintenance takes the NAT in stateDir out of rotation. An owner hands
 // ownership to its peer once the peer passes its forwarding and
-// copied-connection checks, and a standby stops offering to take over. The
+// copied-connection checks, or, while the owner is congested, once the peer
+// can take over. A standby stops offering to take over. The
 // request persists until [Resume].
 func RequestMaintenance(stateDir string) error {
 	if err := os.WriteFile(filepath.Join(stateDir, maintenanceFile), nil, 0o600); err != nil {
