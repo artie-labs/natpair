@@ -62,9 +62,10 @@ timeout in its own table, `natpair_fence`. The kernel checks the timeout on
 every packet, so the fence still closes on its own when the daemon is frozen
 or killed. The timeout counts from when the kernel stores it, so a write
 delayed between computing it and storing it would extend the grant. The rule
-also compares the wall clock with the grant's end, which caps that. The cap
-is in whole seconds, rounded down, so once renewals stop the fence can close
-up to 1 s before the 4 s are up.
+also compares the wall clock with the grant's end, which caps that. nftables
+takes only whole seconds for the cap, so it's rounded up: a delayed write can
+extend the grant by less than 1 s, which the 2 s between the 4 s hold and the
+6 s takeover wait still covers.
 
 ## Keeping connections across a takeover: conntrackd
 

@@ -108,9 +108,8 @@ func TestNFTablesFence(t *testing.T) {
 		assert.False(t, forwards())
 	}
 	{
-		// A grant from Arm closes by the deadline at the latest. The cap is
-		// in whole seconds, rounded down, so it can close up to 1 s sooner.
-		deadline := bootclock.Now() + 2500*time.Millisecond
+		// A grant from Arm closes at its deadline
+		deadline := bootclock.Now() + time.Second
 		inNAT(func() error { return f.Arm(deadline) })
 		assert.True(t, forwards())
 		time.Sleep(deadline - bootclock.Now() + 100*time.Millisecond)

@@ -35,11 +35,15 @@ const (
 // counts from when the kernel commits the element, though, so a write that
 // is delayed after Arm computed it, such as by a freeze in between, would
 // extend the grant by the delay. The wall clock deadline in the rule is
-// absolute, so it caps that. The nft command only takes whole seconds, so it's
-// rounded down, and the cap closes forwarding up to 1 s before the grant ends
-// once renewals stop. A wall clock step backwards can only extend the grant
-// if a write is delayed too. A step forwards closes forwarding until the next
-// renewal writes a new cap.
+// absolute, so it caps that. nft only takes whole seconds for it, so it's
+// rounded up: the timeout still ends a grant on time, and a delayed write
+// extends it by less than 1 s, within the 2 s between the lease's hold and
+// the peer's takeover wait. Rounded down, it closed forwarding up to 1 s
+// early whenever renewals stopped, and in the local fault campaign 3 of 6
+// crashed or frozen owners then paused an upload for 6.4 s instead of 3.2 s,
+// because TCP's next retry came after the takeover. A wall clock step
+// backwards can only extend the grant if a write is delayed too. A step
+// forwards closes forwarding until the next renewal writes a new cap.
 type NFTables struct {
 	protected []netip.Prefix
 }
@@ -112,10 +116,15 @@ var closedRules = []string{
 // only ends this chain: the network package's forward chain still decides
 // what is forwarded.
 func armCommands(remaining time.Duration, wall time.Time) string {
+	end := wall.Add(remaining)
+	limit := end.Unix()
+	if end.Nanosecond() > 0 {
+		limit++
+	}
 	script := fmt.Sprintf("flush set ip %[1]s grant\n"+
 		"add element ip %[1]s grant { 4 timeout %[2]dms }\n"+
 		"flush chain ip %[1]s forward\n"+
-		"add rule ip %[1]s forward ip version @grant meta time < %[3]d accept\n", nftTable, remaining.Milliseconds(), wall.Add(remaining).Unix())
+		"add rule ip %[1]s forward ip version @grant meta time < %[3]d accept\n", nftTable, remaining.Milliseconds(), limit)
 	for _, rule := range closedRules {
 		script += "add rule ip " + nftTable + " forward " + rule + "\n"
 	}

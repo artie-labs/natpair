@@ -34,20 +34,22 @@ func TestNFTablesArmCommands(t *testing.T) {
 	wall := time.Unix(1794823200, 700_000_000)
 	{
 		// The element times out after the grant's remaining time, and the
-		// wall clock cap, in whole seconds, is rounded down: 10:00:04.200
-		// becomes 10:00:04.
+		// wall clock cap, in whole seconds, is rounded up: 10:00:04.200
+		// becomes 10:00:05.
 		assert.Equal(t, "flush set ip natpair_fence grant\n"+
 			"add element ip natpair_fence grant { 4 timeout 3500ms }\n"+
 			"flush chain ip natpair_fence forward\n"+
-			"add rule ip natpair_fence forward ip version @grant meta time < 1794823204 accept\n"+
+			"add rule ip natpair_fence forward ip version @grant meta time < 1794823205 accept\n"+
 			"add rule ip natpair_fence forward ip saddr @protected counter name \"dropped\" drop\n"+
 			"add rule ip natpair_fence forward ip daddr @protected counter name \"dropped\" drop\n", armCommands(3500*time.Millisecond, wall))
 	}
 	{
-		// Under a second left, the cap can already be past, which keeps
-		// forwarding closed rather than open past the grant
-		assert.Contains(t, armCommands(200*time.Millisecond, wall), "{ 4 timeout 200ms }")
-		assert.Contains(t, armCommands(200*time.Millisecond, wall), "meta time < 1794823200 accept")
+		// A grant that ends on a whole second keeps that second
+		assert.Contains(t, armCommands(300*time.Millisecond, wall), "{ 4 timeout 300ms }")
+		assert.Contains(t, armCommands(300*time.Millisecond, wall), "meta time < 1794823201 accept")
+	}
+	{
+		assert.Contains(t, armCommands(301*time.Millisecond, wall), "meta time < 1794823202 accept")
 	}
 }
 

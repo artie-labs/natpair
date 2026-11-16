@@ -386,12 +386,7 @@ func TestCampaign(t *testing.T) {
 			l.require(strings.Count(rules, "-j NATPAIR") == jumps, "guard jumps do not stack after restarts: "+rules)
 		}
 		l.require(!l.fresh(), "the fence starts closed")
-		// The nftables fence's wall clock cap is in whole seconds, rounded
-		// down, so its grant needs more than a second to be sure to open.
 		deadline := bootclock.Now() + 1500*time.Millisecond
-		if l.nftables() {
-			deadline = bootclock.Now() + 2500*time.Millisecond
-		}
 		wall := time.Now()
 		l.writeDeadline(owner, deadline, wall)
 		l.require(l.fresh(), "forwarding works before the deadline")
