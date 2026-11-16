@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot and at every takeover, and check it every 5 s, putting it back and
   logging a warning if it's missing or wrong. Pairs pick it up when they roll
   to a release with this fix.
+- On Linux 6.5 and later, such as the Amazon Linux 2023 6.18 kernel, a NAT
+  whose forwarding filled its CPU did that forwarding inside its daemon's
+  system calls, so its lease renewals and DNS lookups timed out. The daemon
+  now turns on threaded NAPI for every ENI, so receive processing runs in
+  kernel threads that the scheduler shares with the daemon. It does this at
+  start, when the shared ENI comes up during a takeover, and every 5 s. Each
+  forwarded packet costs 4 to 7.5% more CPU below saturation. On Linux 6.1,
+  which doesn't have the problem, that cost buys nothing.
 
 ### Security
 
