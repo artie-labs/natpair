@@ -53,8 +53,9 @@ import (
 )
 
 var (
-	outFlag   = flag.String("out", "", "directory for results and logs (default: a temporary directory)")
-	casesFlag = flag.String("cases", "", "comma-separated case names to run (default: all)")
+	outFlag      = flag.String("out", "", "directory for results and logs (default: a temporary directory)")
+	casesFlag    = flag.String("cases", "", "comma-separated case names to run (default: all)")
+	firewallFlag = flag.String("firewall", string(config.FirewallIPTables), "how the NATs install their rules: iptables or nftables")
 )
 
 const (
@@ -371,17 +372,32 @@ func TestCampaign(t *testing.T) {
 		for range 3 {
 			l.ns(owner, l.binary, "fence-close", "--config", l.paths[owner])
 		}
-		rules := l.ns(owner, "iptables", "-S", "FORWARD")
-		// One jump each way per protected CIDR, however often the fence restarts.
-		jumps := 2 * len(l.configs[owner].ProtectedCIDRs)
-		l.require(strings.Count(rules, "-j NATPAIR") == jumps, "guard jumps do not stack after restarts: "+rules)
+		// One jump or drop each way, however often the fence restarts: per
+		// protected CIDR with iptables, and for the set of them with nftables.
+		var rules string
+		var jumps int
+		if l.nftables() {
+			rules = l.ns(owner, "nft", "list", "table", "ip", "natpair_fence")
+			jumps = 2
+			l.require(strings.Count(rules, " drop\n") == jumps, "guard rules do not stack after restarts: "+rules)
+		} else {
+			rules = l.ns(owner, "iptables", "-S", "FORWARD")
+			jumps = 2 * len(l.configs[owner].ProtectedCIDRs)
+			l.require(strings.Count(rules, "-j NATPAIR") == jumps, "guard jumps do not stack after restarts: "+rules)
+		}
 		l.require(!l.fresh(), "the fence starts closed")
+		// The nftables fence's wall clock cap is in whole seconds, rounded
+		// down, so its grant needs more than a second to be sure to open.
 		deadline := bootclock.Now() + 1500*time.Millisecond
-		l.writeDeadline(owner, deadline)
+		if l.nftables() {
+			deadline = bootclock.Now() + 2500*time.Millisecond
+		}
+		wall := time.Now()
+		l.writeDeadline(owner, deadline, wall)
 		l.require(l.fresh(), "forwarding works before the deadline")
 		time.Sleep(deadline - bootclock.Now() + 100*time.Millisecond)
 		l.require(!l.fresh(), "forwarding stops at the deadline without a controller")
-		l.writeDeadline(owner, deadline)
+		l.writeDeadline(owner, deadline, wall)
 		l.require(!l.fresh(), "rewriting the expired deadline keeps forwarding closed")
 		return map[string]any{"guard_jumps_after_three_restarts": jumps, "forwarded_before_deadline": true, "blocked_after_deadline": true, "expired_rewrite_blocked": true, "controller_running": false}
 	})
@@ -503,6 +519,7 @@ func (l *lab) setup() {
 			ProtectedCIDRs: []netip.Prefix{netip.MustParsePrefix("10.94.1.0/24"), netip.MustParsePrefix("10.94.3.0/24")},
 			ProbeURL:       "https://" + receiverAddr + "/nat",
 			PeerIP:         netip.MustParseAddr(fmt.Sprintf("10.94.2.%d", nat.peer)),
+			Firewall:       config.Firewall(*firewallFlag),
 		}
 		l.paths[nat.name] = filepath.Join(l.out, nat.name+".json")
 		l.writeConfig(nat.name, "setup")
@@ -541,6 +558,7 @@ func (l *lab) setup() {
 	}
 
 	environment, _ := json.MarshalIndent(map[string]string{
+		"firewall":   *firewallFlag,
 		"kernel":     l.run("uname", "-r"),
 		"conntrackd": l.run("conntrackd", "-v"),
 		"go":         l.run("go", "version"),
@@ -663,9 +681,17 @@ func (l *lab) leaseRecord() lease.Record {
 	return record
 }
 
+// nftables reports whether the NATs use the native nftables firewall.
+func (l *lab) nftables() bool {
+	return config.Firewall(*firewallFlag) == config.FirewallNFTables
+}
+
 // active reports whether a NAT's fence is open: its kernel forwarding
 // deadline is still ahead.
 func (l *lab) active(name string) bool {
+	if l.nftables() {
+		return l.nftActive(name)
+	}
 	deadlines, err := ebpf.LoadPinnedMap(l.deadlinePath(name), nil)
 	if err != nil {
 		return false
@@ -679,7 +705,68 @@ func (l *lab) deadlinePath(name string) string {
 	return filepath.Join(machinesDir, name, "bpf", "natpair", "deadline")
 }
 
-func (l *lab) writeDeadline(name string, deadline time.Duration) {
+// nftActive reports whether a NAT's nftables fence is open: its grant set
+// holds an element that hasn't timed out, and the wall clock cap in its
+// forward chain is still ahead.
+func (l *lab) nftActive(name string) bool {
+	output, err := command.Run(l.t.Context(), 2*time.Second, "nsenter", append(l.enter(name), "nft", "-j", "list", "table", "ip", "natpair_fence")...)
+	if err != nil {
+		return false
+	}
+	var listing struct {
+		NFTables []struct {
+			Set *struct {
+				Name     string            `json:"name"`
+				Elements []json.RawMessage `json:"elem"`
+			} `json:"set"`
+			Rule *struct {
+				Expressions []struct {
+					Match *struct {
+						Left struct {
+							Meta *struct {
+								Key string `json:"key"`
+							} `json:"meta"`
+						} `json:"left"`
+						Right any `json:"right"`
+					} `json:"match"`
+				} `json:"expr"`
+			} `json:"rule"`
+		} `json:"nftables"`
+	}
+	require.NoError(l.t, json.Unmarshal([]byte(output), &listing))
+	var granted, capped bool
+	for _, object := range listing.NFTables {
+		if object.Set != nil && object.Set.Name == "grant" {
+			granted = len(object.Set.Elements) > 0
+		}
+		if object.Rule == nil {
+			continue
+		}
+		for _, expression := range object.Rule.Expressions {
+			if expression.Match == nil || expression.Match.Left.Meta == nil || expression.Match.Left.Meta.Key != "time" {
+				continue
+			}
+			// nft prints the cap in the local time zone.
+			limit, err := time.ParseInLocation(time.DateTime, fmt.Sprint(expression.Match.Right), time.Local)
+			require.NoError(l.t, err)
+			capped = time.Now().Before(limit)
+		}
+	}
+	return granted && capped
+}
+
+// writeDeadline opens a NAT's fence until deadline, measured on the boot
+// clock, without the checks of its Arm, as a write that reads the clocks at
+// wall and reaches the kernel late would.
+func (l *lab) writeDeadline(name string, deadline time.Duration, wall time.Time) {
+	if l.nftables() {
+		remaining := deadline - (bootclock.Now() - time.Since(wall))
+		l.ns(name, "nft", fmt.Sprintf("flush set ip natpair_fence grant; add element ip natpair_fence grant { 4 timeout %dms }; "+
+			"flush chain ip natpair_fence forward; add rule ip natpair_fence forward ip version @grant meta time < %d accept; "+
+			`add rule ip natpair_fence forward ip saddr @protected counter name "dropped" drop; `+
+			`add rule ip natpair_fence forward ip daddr @protected counter name "dropped" drop`, remaining.Milliseconds(), wall.Add(remaining).Unix()))
+		return
+	}
 	deadlines, err := ebpf.LoadPinnedMap(l.deadlinePath(name), nil)
 	require.NoError(l.t, err)
 	defer deadlines.Close()
