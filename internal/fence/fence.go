@@ -7,6 +7,9 @@
 // pass only before the deadline. The controller writes each grant's deadline,
 // so a delayed write can only restore an already expired deadline, never
 // extend it.
+//
+// With the native nftables firewall, [NFTables] keeps the deadline as a timed
+// nftables set element instead.
 package fence
 
 import (
