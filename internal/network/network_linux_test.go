@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -453,4 +454,21 @@ func TestHostFirewall(t *testing.T) {
 			assert.ErrorIs(t, err, syscall.ECONNREFUSED, "port %s", port)
 		}
 	}
+}
+
+func TestReadLoadFromKernel(t *testing.T) {
+	// The kernel's files parse, with a time for each CPU, and the counters
+	// never go back
+	n := network.New(testConfig(t), &mocks.FakeNetworkFence{}, network.SystemRunner{})
+	first, err := n.ReadLoad(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, first.CPUs, runtime.NumCPU())
+	second, err := n.ReadLoad(t.Context())
+	require.NoError(t, err)
+	require.Len(t, second.CPUs, len(first.CPUs))
+	for i := range second.CPUs {
+		assert.GreaterOrEqual(t, second.CPUs[i].Total, first.CPUs[i].Total)
+		assert.GreaterOrEqual(t, second.CPUs[i].Busy, first.CPUs[i].Busy)
+	}
+	assert.GreaterOrEqual(t, second.RxDrops, first.RxDrops)
 }

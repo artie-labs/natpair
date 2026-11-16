@@ -35,6 +35,7 @@ type fixture struct {
 	prober    *mocks.FakeProber
 	conntrack *mocks.FakeConntrack
 	table     *mocks.FakeConnectionTable
+	load      *mocks.FakeLoadMeter
 	reports   *mocks.FakeReports
 	clock     *fakeClock
 	serving   bool
@@ -48,11 +49,14 @@ func newFixture(t *testing.T) *fixture {
 		prober:    &mocks.FakeProber{},
 		conntrack: &mocks.FakeConntrack{},
 		table:     &mocks.FakeConnectionTable{},
+		load:      &mocks.FakeLoadMeter{},
 		reports:   &mocks.FakeReports{},
 		clock:     &fakeClock{now: 100 * time.Second},
 	}
 	f.prober.UploadReturns(probe.Flow{}, nil)
 	f.table.ReadConnectionTableReturns(network.ConnectionTable{Connections: 1200, Max: 262144}, nil)
+	// Loaded by default, so a congested path counts as congested.
+	f.loadReadings(95, 0)
 	f.reports.ReadCalls(func(context.Context) (*health.Report, error) {
 		return f.peer, nil
 	})
@@ -65,12 +69,32 @@ func newFixture(t *testing.T) *fixture {
 		Prober:    f.prober,
 		Conntrack: f.conntrack,
 		Table:     f.table,
+		Load:      f.load,
 		Reports:   f.reports,
 		Serving:   func() bool { return f.serving },
 		Inhibited: func() bool { return f.inhibited },
 		Now:       f.clock.Now,
 	})
 	return f
+}
+
+// loadReadings makes each reading of the load show, since the last one,
+// the busiest of two CPUs busy for busiestPercent of the time, the other
+// for 5%, and dropped more packets dropped on receive.
+func (f *fixture) loadReadings(busiestPercent int, dropped uint64) {
+	var load network.Load
+	f.load.ReadLoadCalls(func(context.Context) (network.Load, error) {
+		next := network.Load{CPUs: []network.CPUTime{{Busy: uint64(busiestPercent), Total: 100}, {Busy: 5, Total: 100}}, RxDrops: dropped}
+		if load.CPUs != nil {
+			for i := range next.CPUs {
+				next.CPUs[i].Busy += load.CPUs[i].Busy
+				next.CPUs[i].Total += load.CPUs[i].Total
+			}
+			next.RxDrops += load.RxDrops
+		}
+		load = next
+		return load, nil
+	})
 }
 
 // rounds runs count rounds, advancing the clock by the round interval after
@@ -425,6 +449,71 @@ func (f *fixture) roundsOf(t *testing.T, kinds string) (health.Report, bool) {
 	return report, reached
 }
 
+func TestRoundLoad(t *testing.T) {
+	// newOwner returns an owner that has run a healthy round, whose uploads
+	// now time out while 5 of 40 handshakes complete, and whose standby
+	// proved its own path meanwhile.
+	newOwner := func(t *testing.T) *fixture {
+		f := newFixture(t)
+		f.serving = true
+		f.rounds(t, 1)
+		f.peer = &health.Report{CanTakeover: true, ProvenWhilePeerFailing: true}
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		return f
+	}
+	{
+		// An owner that isn't loaded counts a timed-out probe as a failure,
+		// without the check, as on a host fault that loses most packets, so
+		// it steps down as before
+		f := newOwner(t)
+		f.loadReadings(20, 0)
+		report := f.rounds(t, 2)
+		assert.False(t, report.Congested)
+		assert.True(t, controller.ShouldDemote(report))
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// The busiest CPU busy for 85% of the round is loaded
+		f := newOwner(t)
+		f.loadReadings(85, 0)
+		assert.True(t, f.rounds(t, 1).Congested)
+	}
+	{
+		// 84% isn't
+		f := newOwner(t)
+		f.loadReadings(84, 0)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+	}
+	{
+		// 100 packets dropped on receive over the round is loaded, even with
+		// idle CPUs
+		f := newOwner(t)
+		f.loadReadings(10, 100)
+		assert.True(t, f.rounds(t, 1).Congested)
+	}
+	{
+		// 99 isn't
+		f := newOwner(t)
+		f.loadReadings(10, 99)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+	}
+	{
+		// Without a reading of the load, the failure counts
+		f := newOwner(t)
+		f.load.ReadLoadReturns(network.Load{}, errors.New("failed to read CPU times: permission denied"))
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 2)))
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// A standby's failures always count, so it doesn't read its load
+		f := newFixture(t)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.rounds(t, 2)
+		assert.Zero(t, f.load.ReadLoadCallCount())
+	}
+}
+
 func TestRoundCongestionWindow(t *testing.T) {
 	// newOwner returns a NAT that just started serving, with a 10 minute
 	// congestion window and 1 s rounds.
@@ -510,56 +599,85 @@ func TestVerifyPath(t *testing.T) {
 	target := probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-shared"}
 	{
 		// A passing upload verifies the path without a check
-		prober := &mocks.FakeProber{}
-		require.NoError(t, health.VerifyPath(t.Context(), prober, target))
+		f := newFixture(t)
+		prober := f.prober
+		require.NoError(t, health.VerifyPath(t.Context(), prober, f.load, target))
 		assert.Zero(t, prober.HandshakesCallCount())
 	}
 	{
 		// An upload that ran out of time while some handshakes complete
 		// means the path is congested, as under a flood that follows the
 		// shared Elastic IP, so it is verified
-		prober := &mocks.FakeProber{}
+		f := newFixture(t)
+		prober := f.prober
 		prober.UploadReturns(probe.Flow{}, errTimeout)
 		prober.HandshakesReturns(5, nil)
-		require.NoError(t, health.VerifyPath(t.Context(), prober, target))
+		require.NoError(t, health.VerifyPath(t.Context(), prober, f.load, target))
 		_, checked, attempts := prober.HandshakesArgsForCall(0)
 		assert.Equal(t, target, checked)
 		assert.Equal(t, 40, attempts)
 	}
 	{
 		// None completing means the path is dead
-		prober := &mocks.FakeProber{}
+		f := newFixture(t)
+		prober := f.prober
 		prober.UploadReturns(probe.Flow{}, errTimeout)
 		prober.HandshakesReturns(0, nil)
-		err := health.VerifyPath(t.Context(), prober, target)
+		err := health.VerifyPath(t.Context(), prober, f.load, target)
 		assert.ErrorIs(t, err, probe.ErrTimeout)
 		assert.ErrorContains(t, err, "0 of 40 handshakes completed")
 	}
 	{
 		// All completing means lost packets don't explain the failure
-		prober := &mocks.FakeProber{}
+		f := newFixture(t)
+		prober := f.prober
 		prober.UploadReturns(probe.Flow{}, errTimeout)
 		prober.HandshakesReturns(40, nil)
-		assert.ErrorIs(t, health.VerifyPath(t.Context(), prober, target), probe.ErrTimeout)
+		assert.ErrorIs(t, health.VerifyPath(t.Context(), prober, f.load, target), probe.ErrTimeout)
 	}
 	{
 		// Without an answer from the check, the failure stands
-		prober := &mocks.FakeProber{}
+		f := newFixture(t)
+		prober := f.prober
 		prober.UploadReturns(probe.Flow{}, errTimeout)
 		prober.HandshakesReturns(0, errors.New("connection refused"))
-		err := health.VerifyPath(t.Context(), prober, target)
+		err := health.VerifyPath(t.Context(), prober, f.load, target)
 		assert.ErrorIs(t, err, probe.ErrTimeout)
 		assert.ErrorContains(t, err, "connection refused")
 	}
 	{
 		// A failure that came back over the path, such as a reply from the
 		// wrong address, fails without a check
-		prober := &mocks.FakeProber{}
+		f := newFixture(t)
+		prober := f.prober
 		wrong := errors.New("probe receiver saw source IP 192.0.2.7, expected 192.0.2.10")
 		prober.UploadReturns(probe.Flow{}, wrong)
 		prober.HandshakesReturns(5, nil)
-		assert.ErrorIs(t, health.VerifyPath(t.Context(), prober, target), wrong)
+		assert.ErrorIs(t, health.VerifyPath(t.Context(), prober, f.load, target), wrong)
 		assert.Zero(t, prober.HandshakesCallCount())
+	}
+	{
+		// A NAT that isn't loaded fails without the check, as on a fault
+		// that loses most packets on the shared path
+		f := newFixture(t)
+		f.loadReadings(20, 0)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		err := health.VerifyPath(t.Context(), f.prober, f.load, target)
+		assert.ErrorIs(t, err, probe.ErrTimeout)
+		assert.ErrorContains(t, err, "this NAT isn't loaded: busiest CPU 20%, 0 packets dropped on receive")
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// Without a reading of the load, the failure stands
+		f := newFixture(t)
+		f.load.ReadLoadReturns(network.Load{}, errors.New("failed to read CPU times: permission denied"))
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		err := health.VerifyPath(t.Context(), f.prober, f.load, target)
+		assert.ErrorIs(t, err, probe.ErrTimeout)
+		assert.ErrorContains(t, err, "permission denied")
+		assert.Zero(t, f.prober.HandshakesCallCount())
 	}
 }
 

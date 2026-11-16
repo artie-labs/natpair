@@ -120,14 +120,21 @@ closes each one as soon as it connects:
   down.
 
 The check runs only for an owner whose upload timed out while its
-connection table wasn't full. A failure that came back over the path, such
+connection table wasn't full and while it was loaded: over the round, its
+busiest CPU was busy at least 85% of the time, or its network devices
+dropped at least 100 packets on receive. The kernel forwards in softirq
+time, so more traffic than a NAT can forward keeps a CPU busy, or the
+device drops what the host can't take in. A fault that loses packets on an
+idle host shows neither, so its failed rounds count, and the owner fails
+over in about 15 s as for a broken path. If the load can't be read, the
+round counts too. A failure that came back over the path, such
 as a reply showing the wrong source address, always counts. Only an attempt
 that runs out of time counts as lost. If one fails any other way, such as
 a refused connection or one the NAT couldn't start, the check fails and the
 round counts as failed.
 
-The check can't tell why the path loses packets. Loss on the owner's path
-alone, such as from a fault in its host, also counts as congested, so the
+The check can't tell why a loaded owner loses packets. A fault on the
+owner alone, while traffic also loads it, also counts as congested, so the
 owner keeps serving while some handshakes complete. So the owner keeps a
 window of its health rounds over the last `congestion_handover_minutes`,
 10 by default. Once it has served for the whole window and at least half
@@ -163,12 +170,23 @@ When the standby takes the lease, it:
 3. checks an upload through the shared Elastic IP,
 4. and only then opens its fence and starts forwarding.
 
-If the upload times out, the new owner runs the same handshake check as a
-serving owner. If some handshakes complete and some don't, the path is
-congested, as under a flood that follows the shared Elastic IP, so the
-takeover counts it as verified and opens forwarding. Otherwise the new
-owner retries the upload until the takeover runs out of time, as when
-none complete because AWS is still moving the ENI.
+If the upload times out while the new owner is loaded, it runs the same
+handshake check as a serving owner. If some handshakes complete and some
+don't, the path is congested, as under a flood that follows the shared
+Elastic IP, so the takeover counts it as verified and opens forwarding.
+Otherwise the new owner retries the upload until the takeover runs out of
+time, as when none complete because AWS is still moving the ENI.
+
+A handshake doesn't show the source address the receiver saw, as the
+upload does, but it still proves the shared path. The handshakes start
+from the shared canary, whose address the new owner translates to the
+shared ENI's private address and routes by the shared ENI's route table.
+The Internet gateway maps that private address to the shared Elastic IP
+only for packets leaving through the shared ENI, and the receiver's answer
+goes to the Elastic IP, which reaches only the NAT holding the shared ENI.
+So a handshake completes only once the shared ENI and its Elastic IP work
+for the new owner. While the ENI is still attached to the old owner,
+answers go there, and no handshake of the new owner completes.
 
 ## Upgrading itself
 
@@ -268,32 +286,30 @@ old release. See [operations](operations.md#upgrade) for the steps.
   the random 32-bit sequence number the kernel chose for that SYN, and
   reach the source port the kernel chose for it. Flooding the NAT, from
   workers or from the internet to the shared address, can only make
-  handshakes fail, which counts toward failing over. The limit: a path
-  that a fault leaves degraded but not dead, such as one losing up to
-  about 90% of packets, or one that drops only full-size packets while a
-  flood loses some small ones, counts as congested. At 99% loss, all 40
-  handshakes usually fail, and the owner fails over. An attacker can't
-  cause such a fault, only add a flood while it lasts. Once at least half
-  of the owner's rounds over its whole congestion window were congested
-  or failed, it hands over to a standby that has proven its own path, and
-  `natpair maintenance` hands over sooner. The window only adds a way to
-  hand over. It can't keep an owner that would otherwise step down. A
-  flood can't keep a damaged owner either: it can only turn rounds
-  congested or failed, which both count toward the handover, and the
-  share of bad rounds has no reset that an attacker could trigger. Only
-  uploads that pass, which a flood can't cause, lower it. At worst, a
-  flood that congests whichever NAT owns makes the pair move once per
-  window, because a new owner must serve a whole window first. Bursts
-  that leave most rounds healthy can't move the pair at all. The standby's copied connections
-  aren't verified on these handovers, which only risks resetting the ones
-  it hasn't copied. A takeover counts a congested shared path as verified
-  by the same check, so it too opens forwarding only after a handshake
-  from the shared canary completed, which a dead path or an off-path host
-  can't produce. Unlike a passing upload, a handshake doesn't show the
-  source address the receiver saw. The canary's traffic is translated to
-  the shared ENI's private address, which reaches the internet only
-  through the shared Elastic IP, so a completed handshake still shows that
-  path works.
+  handshakes fail, which counts toward failing over. The check runs only
+  while the owner is loaded, so a fault on an idle owner fails over in
+  about 15 s as before. An attacker can make a NAT look loaded, by
+  flooding it, and so make a fault that leaves its path degraded but not
+  dead count as congested. That only delays failing over, never
+  indefinitely: once at least half of the owner's rounds over its
+  congestion window were congested or failed, it hands over to a standby
+  that has proven its own path, and the window is at most 60 minutes, 10
+  by default. The window only adds a way to hand over. It can't keep an
+  owner that would otherwise step down, and the share of bad rounds has no
+  reset an attacker could trigger: a flood can only turn rounds congested
+  or failed, which both count, and only uploads that pass, which a flood
+  can't cause, lower it. At worst, a flood that congests whichever NAT
+  owns makes the pair move once per window, because a new owner must serve
+  a whole window first. Bursts that leave most rounds healthy can't move
+  the pair at all. At 99% loss, all 40 handshakes usually fail, and the
+  owner fails over as for a dead path. `natpair maintenance` hands over
+  sooner. The standby's copied connections aren't verified on these
+  handovers, which only risks resetting the ones it hasn't copied. A
+  takeover counts a congested shared path as verified by the same rules,
+  so it too needs load and a completed handshake from the shared canary,
+  which a dead path or an off-path host can't produce, and which proves
+  the shared ENI and its Elastic IP work for the new owner, as described
+  in [Taking over](#taking-over).
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
   of its connections. Linux acts on one only if it matches a socket's
   addresses and ports. For TCP, its sequence number must also fall inside

@@ -34,7 +34,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -220,8 +222,10 @@ func TestCampaign(t *testing.T) {
 		// traffic arrived than the owner could forward. Its uploads time out,
 		// but some handshakes complete, so it keeps serving instead of
 		// handing b the same traffic. Only forwarded packets are dropped, so
-		// a's lease renewals and copies to b still work.
+		// a's lease renewals and copies to b still work. A busy CPU stands in
+		// for the load that causes the loss on AWS.
 		l.restartPair()
+		defer l.loadCPU()()
 		lossy := []string{"FORWARD", "-o", "wan", "-m", "statistic", "--mode", "random", "--probability", "0.8", "-j", "DROP"}
 		l.ns("a", append([]string{"iptables", "-I"}, lossy...)...)
 		l.wait(func() bool { return l.report("a").Congested }, 10*time.Second, "a reports its path congested")
@@ -235,8 +239,24 @@ func TestCampaign(t *testing.T) {
 		return map[string]any{"owner_kept_while_congested": true}
 	})
 
+	l.runCase("lossy-path-without-load-fails-over", func() map[string]any {
+		// The same loss on an idle NAT, as from a fault on its host: a isn't
+		// loaded, so its failed rounds count, and b takes over as for a dead
+		// path.
+		l.restartPair()
+		injected := bootclock.Now()
+		lossy := []string{"FORWARD", "-o", "wan", "-m", "statistic", "--mode", "random", "--probability", "0.8", "-j", "DROP"}
+		l.ns("a", append([]string{"iptables", "-I"}, lossy...)...)
+		l.wait(func() bool { return l.active("b") }, 16*time.Second, "b takes over from an idle owner losing 80% of its packets")
+		recovery := (bootclock.Now() - injected).Seconds()
+		l.ns("a", append([]string{"iptables", "-D"}, lossy...)...)
+		l.require(l.fresh(), "new connections work through b")
+		return map[string]any{"unloaded_lossy_path_failed_over": true, "local_takeover_s": recovery}
+	})
+
 	l.runCase("lossy-path-hands-over-after-limit", func() map[string]any {
-		// The same loss, but as from a fault on a alone: b's path is clean.
+		// The same loss under load, but as from a fault on a alone: b's path
+		// is clean.
 		// With congestion_handover_minutes at its minimum, 1, a hands over
 		// once it has served a whole minute and at least half of its rounds
 		// in the last minute were congested or failed: about 30 s into the
@@ -251,6 +271,7 @@ func TestCampaign(t *testing.T) {
 		setLimit(1)
 		defer setLimit(0)
 		l.restartPair()
+		defer l.loadCPU()()
 		lossy := []string{"FORWARD", "-o", "wan", "-m", "statistic", "--mode", "random", "--probability", "0.8", "-j", "DROP"}
 		l.ns("a", append([]string{"iptables", "-I"}, lossy...)...)
 		l.wait(func() bool { return l.report("a").Congested }, 10*time.Second, "a reports its path congested")
@@ -269,8 +290,10 @@ func TestCampaign(t *testing.T) {
 		// that follows the shared Elastic IP. Its takeover's uploads through
 		// the shared address time out, but some handshakes complete, so the
 		// takeover counts the path as verified and opens forwarding instead
-		// of retrying until it times out.
+		// of retrying until it times out. A busy CPU stands in for the
+		// flood's load.
 		l.restartPair()
+		defer l.loadCPU()()
 		lossy := []string{"FORWARD", "-s", l.configs["b"].SharedCanary().CIDR.String(), "-o", "wan", "-m", "statistic", "--mode", "random", "--probability", "0.8", "-j", "DROP"}
 		l.ns("b", append([]string{"iptables", "-I"}, lossy...)...)
 		injected := bootclock.Now()
@@ -467,6 +490,18 @@ func TestCampaign(t *testing.T) {
 		l.require(!l.fresh(), "rewriting the expired deadline keeps forwarding closed")
 		return map[string]any{"guard_jumps_after_three_restarts": jumps, "forwarded_before_deadline": true, "blocked_after_deadline": true, "expired_rewrite_blocked": true, "controller_running": false}
 	})
+}
+
+// loadCPU keeps the last CPU busy, as more traffic than a NAT can forward
+// does, until the returned function stops it. The NATs share the lab's
+// kernel, so each one reads its busiest CPU as busy.
+func (l *lab) loadCPU() func() {
+	busy := exec.Command("taskset", "-c", strconv.Itoa(runtime.NumCPU()-1), "sh", "-c", "while :; do :; done")
+	require.NoError(l.t, busy.Start())
+	return func() {
+		_ = busy.Process.Kill()
+		_ = busy.Wait()
+	}
 }
 
 // runCase runs one fault case and records its result.

@@ -201,16 +201,19 @@ logs this, and the `health round` line, at most once a minute.
 ### `the health probe failed, but the path is alive`
 
 The full message ends with `so forwarding is congested and it doesn't count
-as a path failure`. The owner's upload timed out, and of the 40 TCP
-handshakes it then tried with the probe receiver through the shared Elastic
-IP, the `handshakes` field's count completed and the rest were lost. The
-path works but loses packets, usually because more traffic arrives than the
-NAT can forward, so the owner keeps serving: the standby would get the same
-traffic. Its `health round` lines show `"congested":true`. Check the NAT's
-CPU with `top` (high `si` means the kernel is busy forwarding) and its
-[network limits](#the-nat-is-too-small). If neither is high, the loss is
-likely the owner's own, such as a fault in its host, so run `sudo natpair
-maintenance` on it to hand over. While the owner is congested, it hands
+as a path failure`. The owner's upload timed out while it was loaded, and
+of the 40 TCP handshakes it then tried with the probe receiver through the
+shared Elastic IP, the `handshakes` field's count completed and the rest
+were lost. The path works but loses packets, usually because more traffic
+arrives than the NAT can forward, so the owner keeps serving: the standby
+would get the same traffic. Its `health round` lines show
+`"congested":true`, with `busiest_cpu_percent`, the busiest CPU's busy
+share over the round, and `rx_drops`, the packets its network devices
+dropped on receive. It counts as loaded at 85% or 100 drops. Check the
+NAT's CPU with `top` (high `si` means the kernel is busy forwarding) and
+its [network limits](#the-nat-is-too-small). If the loss looks like the
+owner's own, such as a fault in its host, run `sudo natpair maintenance`
+on it to hand over. While the owner is congested, it hands
 over to a standby that has proven its own path, without waiting for the
 standby to verify its copied connections, and logs `handing over to a peer
 that hasn't verified its copied connections`. Connections the standby
@@ -241,6 +244,14 @@ either NAT can forward, and the pair moves again at most once per window. See
 If the standby can't take over, because it hasn't proven its own path or is
 in maintenance or cooldown, the owner keeps serving and keeps logging `the
 health probe failed, but the path is alive`.
+
+### `failed to read this NAT's load, so the failed probe counts`
+
+After an upload timed out, the owner couldn't read its CPU times from
+`/proc/stat` or its network devices' statistics from `/sys/class/net`. The
+`err` field says which. Without them it can't tell load from a fault, so
+the failed round counts toward stepping down, as for an idle NAT. natpair
+logs this at most once a minute.
 
 ### `failed to check whether the path is alive, so the failed probe counts`
 

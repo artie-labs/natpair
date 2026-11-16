@@ -11,6 +11,7 @@
 package health
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -89,6 +90,18 @@ const (
 	// entry in the connection table for up to 2 minutes, a few thousand
 	// entries while an overload lasts.
 	handshakeAttempts = 40
+	// loadedCPUPercent and loadedDrops decide whether an owner is loaded
+	// over a round: its busiest CPU was busy for at least loadedCPUPercent
+	// of the round, or its network devices dropped at least loadedDrops
+	// packets on receive. Only a loaded owner runs the handshake check, so
+	// only load can excuse a timed-out probe as congestion. The kernel
+	// forwards in softirq time, so an owner getting more than it can forward
+	// keeps at least one CPU busy, or its device drops what the host can't
+	// take in, thousands of packets a second on AWS. A fault that loses
+	// packets on an idle host shows neither, so its failed rounds count and
+	// the owner fails over in about 15 s, as before.
+	loadedCPUPercent = 85
+	loadedDrops      = 100
 )
 
 // StaleAfter returns how old a report from rounds of the given interval may
@@ -201,6 +214,11 @@ type ConnectionTable interface {
 	ReadConnectionTable(ctx context.Context) (network.ConnectionTable, error)
 }
 
+// LoadMeter reads how busy this NAT is.
+type LoadMeter interface {
+	ReadLoad(ctx context.Context) (network.Load, error)
+}
+
 // Reports exchanges reports with the peer NAT.
 type Reports interface {
 	Publish(ctx context.Context, report any, interval time.Duration) error
@@ -214,6 +232,7 @@ type Dependencies struct {
 	Prober    Prober
 	Conntrack Conntrack
 	Table     ConnectionTable
+	Load      LoadMeter
 	Reports   Reports
 	// Serving reports whether this NAT currently forwards worker traffic.
 	Serving func() bool
@@ -276,7 +295,7 @@ type Monitor struct {
 	// These limit how often each warning about the connection table repeats.
 	tableUnread, nearlyFull, full, fullProbe warning
 	// These limit how often each warning about the handshake check repeats.
-	unchecked, congestedProbe warning
+	unchecked, congestedProbe, loadUnread warning
 	// logged is the state of the last logged round, logged at loggedAt.
 	logged    roundState
 	loggedAt  time.Duration
@@ -372,6 +391,13 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	if serving {
 		target = m.config.ServingProbe
 	}
+	// The load over the round runs from here to after the upload. Only an
+	// owner needs it.
+	var before network.Load
+	var beforeErr error
+	if serving {
+		before, beforeErr = m.deps.Load.ReadLoad(ctx)
+	}
 	flow, probeErr := m.deps.Prober.Upload(ctx, target)
 	healthy := probeErr == nil
 	now := m.deps.Now()
@@ -384,7 +410,11 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	// A standby's load doesn't move with the shared ENI, so its failures
 	// count too.
 	completed, checked := 0, false
+	var load roundLoad
 	if serving && !tableFull && errors.Is(probeErr, probe.ErrTimeout) {
+		load = m.readLoad(ctx, before, beforeErr, now)
+	}
+	if load.loaded() {
 		completed, checked = m.handshakes(ctx, target, now)
 		// The check takes up to half a second, and the report should be as
 		// old as the round's end.
@@ -561,6 +591,9 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
 			slog.String("release", m.config.Release),
 		}
+		if load.measured {
+			attrs = append(attrs, slog.Int("busiest_cpu_percent", load.busiestCPUPercent), slog.Uint64("rx_drops", load.drops))
+		}
 		if checked {
 			attrs = append(attrs, slog.Int("handshakes", completed))
 		}
@@ -682,16 +715,38 @@ func congestedPath(completed int) bool {
 
 // VerifyPath sends an upload through target, as a takeover does through
 // the shared Elastic IP before it opens forwarding. It also passes when the
-// upload ran out of time but the path is congested, by the same check as a
-// serving NAT's rounds. Under a flood that follows the shared Elastic IP,
-// uploads can time out for as long as the flood lasts. Without this, a NAT
-// taking over then kept retrying until its takeover timed out, with no NAT
-// forwarding. Only completed handshakes count, and an off-path host can't
-// complete one. A dead path completes none, so it still fails.
-func VerifyPath(ctx context.Context, prober Prober, target probe.Target) error {
+// upload ran out of time while this NAT was loaded and the path is
+// congested, by the same rule as a serving NAT's rounds. Under a flood that
+// follows the shared Elastic IP, uploads can time out for as long as the
+// flood lasts. Without this, a NAT taking over kept retrying until its
+// takeover timed out, with no NAT forwarding. A NAT that isn't loaded, or a
+// dead path, which completes no handshake, still fails.
+//
+// A handshake doesn't show the source address the receiver saw, as the
+// upload does, but it still proves the shared path. The takeover's target
+// is the shared canary, so the handshakes start from the canary's address
+// in its namespace (see probe.Client.Handshakes). This NAT translates that
+// address to the shared ENI's private address and routes it by the shared
+// ENI's route table (network.PrepareNetwork). The Internet gateway maps
+// that private address to the shared Elastic IP only for packets leaving
+// through the shared ENI, and the receiver's answer goes to the Elastic IP,
+// which reaches only the NAT that holds the shared ENI. So a handshake
+// completes only if the mapping works for this NAT. While the shared ENI
+// is still attached to the other NAT, answers go there, and none of this
+// NAT's handshakes completes.
+func VerifyPath(ctx context.Context, prober Prober, meter LoadMeter, target probe.Target) error {
+	before, beforeErr := meter.ReadLoad(ctx)
 	_, err := prober.Upload(ctx, target)
 	if err == nil || !errors.Is(err, probe.ErrTimeout) {
 		return err
+	}
+	after, afterErr := meter.ReadLoad(ctx)
+	if loadErr := cmp.Or(beforeErr, afterErr); loadErr != nil {
+		return fmt.Errorf("%w, and this NAT's load couldn't be read: %w", err, loadErr)
+	}
+	load := loadBetween(before, after)
+	if !load.loaded() {
+		return fmt.Errorf("%w, and this NAT isn't loaded: busiest CPU %d%%, %d packets dropped on receive", err, load.busiestCPUPercent, load.drops)
 	}
 	completed, checkErr := prober.Handshakes(ctx, target, handshakeAttempts)
 	if checkErr != nil {
@@ -701,8 +756,54 @@ func VerifyPath(ctx context.Context, prober Prober, target probe.Target) error {
 		return fmt.Errorf("%w, and %d of %d handshakes completed", err, completed, handshakeAttempts)
 	}
 	slog.Warn("the upload through the shared Elastic IP timed out, but the path is alive, so forwarding is congested and the path counts as verified",
-		slog.Any("probe_error", err), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts))
+		slog.Any("probe_error", err), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts),
+		slog.Int("busiest_cpu_percent", load.busiestCPUPercent), slog.Uint64("rx_drops", load.drops))
 	return nil
+}
+
+// roundLoad is how busy this NAT was over a round, if measured.
+type roundLoad struct {
+	busiestCPUPercent int
+	drops             uint64
+	measured          bool
+}
+
+// loaded reports whether the load was measured and high enough that a
+// timed-out probe may be congestion. See loadedCPUPercent.
+func (l roundLoad) loaded() bool {
+	return l.measured && (l.busiestCPUPercent >= loadedCPUPercent || l.drops >= loadedDrops)
+}
+
+// loadBetween returns the load between two readings.
+func loadBetween(before, after network.Load) roundLoad {
+	load := roundLoad{measured: true}
+	for i := range min(len(before.CPUs), len(after.CPUs)) {
+		start, end := before.CPUs[i], after.CPUs[i]
+		if end.Total <= start.Total || end.Busy < start.Busy {
+			continue
+		}
+		total := end.Total - start.Total
+		busy := min(end.Busy-start.Busy, total)
+		load.busiestCPUPercent = max(load.busiestCPUPercent, int(busy*100/total))
+	}
+	if after.RxDrops > before.RxDrops {
+		load.drops = after.RxDrops - before.RxDrops
+	}
+	return load
+}
+
+// readLoad returns this NAT's load from before, read at the start of the
+// round, to now. Without both readings, it reports the load unmeasured, so
+// the failed round counts.
+func (m *Monitor) readLoad(ctx context.Context, before network.Load, beforeErr error, now time.Duration) roundLoad {
+	after, err := m.deps.Load.ReadLoad(ctx)
+	if err = cmp.Or(beforeErr, err); err != nil {
+		if m.loadUnread.due(now) {
+			slog.Warn("failed to read this NAT's load, so the failed probe counts", slog.Any("err", err))
+		}
+		return roundLoad{}
+	}
+	return loadBetween(before, after)
 }
 
 // warning limits a repeated warning to one each tableWarnInterval.
