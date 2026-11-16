@@ -279,8 +279,12 @@ old release. See [operations](operations.md#upgrade) for the steps.
   aren't verified on these handovers, which only risks resetting the ones
   it hasn't copied. A takeover counts a congested shared path as verified
   by the same check, so it too opens forwarding only after a handshake
-  through the shared address completed, which a dead path or an off-path
-  host can't produce.
+  from the shared canary completed, which a dead path or an off-path host
+  can't produce. Unlike a passing upload, a handshake doesn't show the
+  source address the receiver saw. The canary's traffic is translated to
+  the shared ENI's private address, which reaches the internet only
+  through the shared Elastic IP, so a completed handshake still shows that
+  path works.
 - **Forged ICMP errors.** Anyone can send the NAT ICMP errors that name one
   of its connections. Linux acts on one only if it matches a socket's
   addresses and ports. For TCP, its sequence number must also fall inside

@@ -459,13 +459,13 @@ func TestRoundCongestedFor(t *testing.T) {
 	}
 	{
 		// A full table proves nothing about the path, so the run goes on
-		// through it
+		// through it, even for more than a minute
 		f := newOwner(t)
 		f.rounds(t, 5)
 		f.tableReadings(262133, 262144, 40)
-		f.rounds(t, 1)
+		f.rounds(t, 61)
 		f.tableReadings(1200, 262144, 0)
-		assert.Equal(t, 6*time.Second, f.rounds(t, 1).CongestedFor)
+		assert.Equal(t, 66*time.Second, f.rounds(t, 1).CongestedFor)
 	}
 	{
 		// A NAT that hands over and later serves again starts fresh, even if

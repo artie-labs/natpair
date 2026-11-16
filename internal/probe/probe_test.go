@@ -298,8 +298,8 @@ func TestHandshakesUseTheUploadsAddress(t *testing.T) {
 
 func TestUploadTimeout(t *testing.T) {
 	{
-		// A receiver that never answers runs the upload out of time, and
-		// net/http's write error alone wouldn't show it
+		// A receiver that accepts but never answers runs the upload out of
+		// time in the TLS handshake
 		listener, err := net.Listen("tcp4", "127.0.0.1:0")
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = listener.Close() })

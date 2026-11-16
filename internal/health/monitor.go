@@ -91,7 +91,7 @@ const (
 	handshakeAttempts = 40
 	// congestionGap is how long an owner's path must go without a congested
 	// round before a run of congested rounds ends. Passing and failed
-	// rounds in between don't end it. With a fault losing a moderate share
+	// rounds in between don't end it, and full-table rounds keep it going. With a fault losing a moderate share
 	// of this NAT's packets, some uploads still pass every few rounds, and
 	// ending the run at each would keep the owner past the time limit. A
 	// burst of traffic can fail single rounds, and ending the run then
@@ -150,8 +150,8 @@ type Report struct {
 	Congested bool `json:"congested"`
 	// CongestedFor is how long this NAT's path has been congested without a
 	// break, from its first congested round to this one. Only
-	// congestionGap without a congested round, or a round while standing
-	// by, ends the run. Only this NAT reads it, so it isn't sent to the
+	// congestionGap without a congested or full-table round, or a round
+	// while standing by, ends the run. Only this NAT reads it, so it isn't sent to the
 	// peer.
 	CongestedFor time.Duration `json:"-"`
 	// CanTakeover means this NAT can forward and is not in maintenance or cooldown.
@@ -408,6 +408,9 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// path and counts neither way. On AWS, an owner whose table
 		// filled stepped down, and so did the NAT that took over from it.
 		m.uncounted++
+		// It says nothing about congestion either, so it keeps a run of
+		// congested rounds going.
+		m.lastCongested = now
 		if m.uncounted >= failureGapRounds {
 			m.failures = 0
 		}
