@@ -58,13 +58,13 @@ variable "max_connections" {
 }
 
 variable "congestion_handover_minutes" {
-  description = "The window, in minutes, over which the owner judges whether its path is congested, losing some packets but not all. Once the owner has served for the whole window and at least half of its health rounds in it were congested or failed, it hands over to a standby that has proven its own path. A whole number from 1 to 1440. Null uses natpair's default, 10. A NAT that takes over must serve a whole window first, so this is also the shortest time between the moves a flood causes. Releases before the one that added it reject it. NATs read it at first boot, so changing it needs new NATs."
+  description = "The window, in minutes, over which the owner judges whether its path is congested, losing some packets but not all. Once the owner has served for the whole window and at least half of its health rounds in it were congested or failed, it hands over to a standby that has proven its own path. A whole number from 1 to 60. Null uses natpair's default, 10. A NAT that takes over must serve a whole window first, so this is also the shortest time between the moves a flood causes. Releases before the one that added it reject it. NATs read it at first boot, so changing it needs new NATs."
   type        = number
   default     = null
 
   validation {
-    condition     = floor(coalesce(var.congestion_handover_minutes, 10)) == coalesce(var.congestion_handover_minutes, 10) && coalesce(var.congestion_handover_minutes, 10) >= 1 && coalesce(var.congestion_handover_minutes, 10) <= 1440
-    error_message = "congestion_handover_minutes must be a whole number from 1 to 1440."
+    condition     = floor(coalesce(var.congestion_handover_minutes, 10)) == coalesce(var.congestion_handover_minutes, 10) && coalesce(var.congestion_handover_minutes, 10) >= 1 && coalesce(var.congestion_handover_minutes, 10) <= 60
+    error_message = "congestion_handover_minutes must be a whole number from 1 to 60."
   }
 }
 

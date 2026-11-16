@@ -38,9 +38,10 @@ const (
 	// congestion_handover_minutes.
 	DefaultCongestionHandoverMinutes = 10
 	// maxCongestionHandoverMinutes is the longest congestion_handover_minutes
-	// accepted, a day. It keeps the limit far from overflowing a
-	// time.Duration.
-	maxCongestionHandoverMinutes = 24 * 60
+	// accepted, an hour. Load excuses a congested round, and an attacker
+	// who floods a NAT can make it look loaded, so this bounds how long a
+	// flood can delay failing over from a damaged owner.
+	maxCongestionHandoverMinutes = 60
 )
 
 // maxConnectionsAllowed lists the limits max_connections accepts. The hash
