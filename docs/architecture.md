@@ -150,7 +150,10 @@ packet there costs about 100 ns, against about 1,450 ns for the kernel's path.
 - **It clears** once the program drops less than 5% of what it sees over the
   last second and the NIC dropped less than 5% over the last 1.5 s. A budget
   above what the CPU forwards sheds nothing while the NIC drops the rest, so
-  the program's own drops alone can't say the flood is over. The
+  the program's own drops alone can't say the flood is over. It doesn't
+  clear while the busiest CPU is at 95%, or within 1.5 s of a raise: ENA
+  counts its drops once a second, so the overflow a raise causes shows only
+  in the next count. The
   daemon then detaches the program, puts the ring and the threads back, and
   waits at least 1 s before it can engage again.
 

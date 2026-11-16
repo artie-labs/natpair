@@ -164,7 +164,7 @@ keeps up and the CPU has room, it logs `overload guard raised its budget`
 once a second, starting 30 s after the last cut. Under a long flood, a
 raise followed by a cut about every 30 s is expected. It logs `overload
 guard cleared`, with how many packets it `dropped`, once the traffic fits
-the budget and the NIC has stopped dropping.
+the budget, the NIC has stopped dropping and the CPU has room.
 
 Find the worker sending the most packets, often small UDP, and slow it down,
 or move to an instance type with more CPUs, as in

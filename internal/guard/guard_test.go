@@ -155,16 +155,17 @@ func TestControllerEngagesAndClears(t *testing.T) {
 	assert.Equal(t, []uint64{625, 687}, raised(steps(&c, &n, tail, 20)))
 	// It stops. The share over the last second falls below 5% at the fourth
 	// quiet reading: 6 readings shedding 3,000 and 4 shedding 10, of 400,000.
-	// At the third it is 5.3%.
+	// The last raise came 6 readings before the tail ended, and a clear waits
+	// 1.5 s after a raise for the NIC's next count, so it clears at the ninth
 	quiet := load{busyTicks: 5, received: 40_000, passed: [2]uint64{39_990, 0}, shed: [2]uint64{10, 0}}
-	decisions := steps(&c, &n, quiet, 4)
-	assert.Empty(t, changed(decisions[:3]))
-	cleared := decisions[3]
+	decisions := steps(&c, &n, quiet, 9)
+	assert.Empty(t, changed(decisions[:8]))
+	cleared := decisions[8]
 	assert.Equal(t, Unlimited, cleared.Mode)
 	assert.True(t, cleared.Changed)
 	assert.Zero(t, cleared.Budget)
-	// 30 flooding readings shed 45,000 each, 20 tail ones 3,000 and 4 quiet ones 10
-	assert.Equal(t, uint64(30*45_000+20*3_000+4*10), cleared.Shed)
+	// 30 flooding readings shed 45,000 each, 20 tail ones 3,000 and 9 quiet ones 10
+	assert.Equal(t, uint64(30*45_000+20*3_000+9*10), cleared.Shed)
 	assert.Equal(t, Unlimited, c.Mode())
 
 	// Flooded again at once, it waits for a second of readings since it
@@ -480,6 +481,67 @@ func TestControllerHoldsAcrossANICResetWhileLimiting(t *testing.T) {
 	n.received, n.dropped = 0, 0
 	for i := range 30 {
 		require.Equal(t, Limiting, c.Step(n.next(dropping)).Mode, i)
+	}
+}
+
+// raiseThenCount has a limiting controller raise its budget while the
+// program sheds 13% at a busiest CPU of 90%, then feeds after, with the NIC's
+// count of the overflow the raise caused arriving countAt readings later.
+// It returns the decisions after the raise.
+func raiseThenCount(t *testing.T, after load, countAt int) []Decision {
+	var c Controller
+	var n nat
+	steps(&c, &n, flood, 12)
+	c.Step(n.next(load{busyTicks: 10, received: 60_000, dropped: 40_000, passed: [2]uint64{50_000, 10_000}}))
+	require.Equal(t, Limiting, c.Mode())
+	shedding := load{busyTicks: 9, received: 80_000, passed: [2]uint64{69_600, 0}, shed: [2]uint64{10_400, 0}}
+	raised := false
+	for range 30 {
+		if d := c.Step(n.next(shedding)); d.Changed {
+			require.True(t, d.Raised)
+			raised = true
+			break
+		}
+	}
+	require.True(t, raised)
+	counted := after
+	counted.dropped = 70_000
+	var decisions []Decision
+	for i := range 30 {
+		l := after
+		if i == countAt {
+			l = counted
+		}
+		decisions = append(decisions, c.Step(n.next(l)))
+	}
+	return decisions
+}
+
+func TestControllerWaitsForTheNICAfterARaise(t *testing.T) {
+	// On AWS a raise at a busiest CPU of 95% let everything through. The
+	// NIC overflowed at once, but ENA counts its drops once a second, so the
+	// guard cleared 0.7 s after the raise and engaged again 1.3 s after
+	// that, restarting the shared ENI twice. It must hold until the count
+	// comes in, then cut
+	{
+		// At a full CPU it holds however late the count comes
+		decisions := raiseThenCount(t, load{busyTicks: 10, received: 80_000, passed: [2]uint64{80_000, 0}}, 17)
+		for i, d := range decisions {
+			require.Equal(t, Limiting, d.Mode, i)
+		}
+		cuts := changed(decisions)
+		require.Len(t, cuts, 1)
+		assert.False(t, cuts[0].Raised)
+	}
+	{
+		// Just under a full CPU, it waits 1.5 s after the raise
+		decisions := raiseThenCount(t, load{busyTicks: 9, received: 80_000, passed: [2]uint64{80_000, 0}}, 10)
+		for i, d := range decisions[:11] {
+			require.Equal(t, Limiting, d.Mode, i)
+		}
+		cuts := changed(decisions[:11])
+		require.Len(t, cuts, 1)
+		assert.False(t, cuts[0].Raised)
 	}
 }
 

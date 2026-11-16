@@ -85,7 +85,13 @@ const (
 	// clearShedShare and clearReadings: the budget comes off once the
 	// program has dropped less than 5% of the packets it saw over the last
 	// second, so the budget hardly binds, and the NIC dropped less than
-	// engageDropShare over the last overflowReadings. A budget above what
+	// engageDropShare over the last overflowReadings. It also waits while the
+	// busiest CPU is at engageBusy, and for overflowReadings after a raise:
+	// ENA counts its drops only once a second, so a raise that overflows the
+	// NIC shows only in the next count. On AWS, a raise at a busiest CPU of
+	// 95% let everything through, the guard cleared 0.7 s later at a full
+	// CPU, and it engaged again 1.3 s after that, restarting the shared ENI
+	// twice. A budget above what
 	// the CPU forwards sheds nothing while the NIC drops the rest. On AWS,
 	// a rule that let the NIC's drops hold it only while the busiest CPU was
 	// at 95% took the program off in the middle of a 1.2 million packet a
@@ -222,10 +228,10 @@ type Controller struct {
 	engagedBy Decision
 	measuring bool
 	// budget is the current budget and floor the lowest a cut goes.
-	// changedAt and cutAt are the values of since at the last cut or raise,
-	// and at the last cut.
-	budget, floor    uint64
-	changedAt, cutAt int
+	// changedAt, cutAt and raisedAt are the values of since at the last cut
+	// or raise, the last cut and the last raise.
+	budget, floor              uint64
+	changedAt, cutAt, raisedAt int
 	// clearedAt is the time of the reading where the guard last cleared, 0
 	// if it hasn't.
 	clearedAt time.Duration
@@ -270,6 +276,10 @@ func (c *Controller) Step(r Reading) Decision {
 		if !known || overflow >= engageDropShare {
 			// The NIC still drops, or its counters reset too recently to
 			// say, so neither clearing nor a raise is safe.
+			return hold
+		}
+		if share < clearShedShare && (busiest >= engageBusy || c.since-c.raisedAt < overflowReadings) {
+			// The NIC may be overflowing without having counted it yet.
 			return hold
 		}
 		if share >= clearShedShare {
@@ -321,8 +331,9 @@ func (c *Controller) limit(r Reading) Decision {
 	c.mode, c.from, c.since = Limiting, r, 0
 	// A budget of 0 would mean no limit, so it lets at least one through.
 	budget := max(1, uint64(budgetShare*rate*tickSeconds))
-	// A cut-off time in the past lets the first raise come at once.
-	c.budget, c.floor, c.changedAt, c.cutAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), 0, -raiseAfterCut
+	// A cut and a raise far in the past let the first raise, and a clear,
+	// come at once.
+	c.budget, c.floor, c.changedAt, c.cutAt, c.raisedAt = budget, max(1, uint64(cutFloor*rate*tickSeconds)), 0, -raiseAfterCut, -overflowReadings
 	return Decision{Mode: Limiting, Changed: true, Budget: budget, Rate: rate, Busiest: c.engagedBy.Busiest, DropShare: c.engagedBy.DropShare}
 }
 
@@ -335,7 +346,9 @@ func (c *Controller) change(budget uint64, busiest, share float64) Decision {
 	}
 	raised := budget > c.budget
 	c.budget, c.changedAt = budget, c.since
-	if !raised {
+	if raised {
+		c.raisedAt = c.since
+	} else {
 		c.cutAt = c.since
 	}
 	return Decision{Mode: Limiting, Changed: true, Budget: budget, Busiest: busiest, DropShare: share, Raised: raised}
