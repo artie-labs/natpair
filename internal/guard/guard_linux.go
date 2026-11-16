@@ -65,6 +65,10 @@ type Guard struct {
 	// ensureErr and stepErr are the last failures logged by each loop, so
 	// a lasting one is logged once.
 	ensureErr, stepErr string
+	// attachErr is the last attach failure, kept until an attach succeeds.
+	// A refusal, as from ENA above its largest XDP MTU, lasts, and the guard
+	// tries again at each overload, about once a second during a flood.
+	attachErr string
 }
 
 // New returns a guard that does nothing until [Guard.Ensure] or [Guard.Run].
@@ -486,8 +490,10 @@ func (g *Guard) apply(ctx context.Context, reading Reading) error {
 		took, err := g.attach(ctx, decision.Budget)
 		if err != nil {
 			g.ctrl.Reset()
-			return err
+			report(&g.attachErr, err)
+			return nil
 		}
+		g.attachErr = ""
 		slog.Info("overload guard attached", slog.String("interface", g.name),
 			slog.Float64("busiest_cpu", round(decision.Busiest)), slog.Float64("nic_drop_share", round(decision.DropShare)),
 			slog.Int("rx_ring", ringNow(ctx, g.name)), slog.Duration("duration", took))

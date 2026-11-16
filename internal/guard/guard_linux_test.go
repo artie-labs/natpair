@@ -3,7 +3,9 @@
 package guard
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"math"
 	"net/netip"
 	"os"
@@ -240,13 +242,16 @@ func ringChanges(t *testing.T) func() []string {
 	}
 }
 
-// receiveNices returns the nice values of iface's receive threads, or
-// skips the test if this PID namespace doesn't show them.
-func receiveNices(t *testing.T, iface string) []int {
+// assertNices checks that iface's one receive thread runs at nice. Kernel
+// threads belong to the host's PID namespace, so where this one doesn't show
+// them, as in a container, it only logs, and the rest of the test still
+// runs.
+func assertNices(t *testing.T, iface string, nice int) {
 	pids, err := receiveThreads("/proc", iface)
 	require.NoError(t, err)
 	if len(pids) == 0 {
-		t.Skip("no receive threads visible in this PID namespace")
+		t.Log("no receive threads visible in this PID namespace, so their nice values go unchecked")
+		return
 	}
 	var nices []int
 	for _, pid := range pids {
@@ -255,7 +260,7 @@ func receiveNices(t *testing.T, iface string) []int {
 		// The raw value is 20 - nice
 		nices = append(nices, 20-raw)
 	}
-	return nices
+	assert.Equal(t, []int{nice}, nices)
 }
 
 // TestGuardSheds drives the guard through a flood with the controller tests'
@@ -290,7 +295,7 @@ func TestGuardSheds(t *testing.T) {
 	var budgets []uint64
 	require.NoError(t, g.prog.budgets.Lookup(uint32(0), &budgets))
 	assert.Equal(t, uint64(471), budgets[0])
-	assert.Equal(t, []int{-10}, receiveNices(t, name))
+	assertNices(t, name, -10)
 
 	// Once it sheds under 5% for a second and the NIC hasn't dropped for
 	// 1.5 s, it clears: the program comes off and the ring and the threads
@@ -300,7 +305,7 @@ func TestGuardSheds(t *testing.T) {
 	assert.Nil(t, g.attached)
 	assert.False(t, regexp.MustCompile(`prog/xdp id \d+`).MatchString(ip(t, "-d", "link", "show", name)))
 	assert.Equal(t, 512, ringSize(t, name))
-	assert.Equal(t, []int{0}, receiveNices(t, name))
+	assertNices(t, name, 0)
 	// Flooded again at once, it engages after a second of readings since it
 	// cleared, as the controller decided
 	feed(flood, 9)
@@ -320,18 +325,24 @@ func TestGuardRefusedLeavesTheRing(t *testing.T) {
 	g := New(simulatedConfig(t))
 	t.Cleanup(func() { g.close(context.WithoutCancel(t.Context())) })
 	require.NoError(t, g.ensure(t.Context()))
+	var logs bytes.Buffer
+	defer slog.SetDefault(slog.Default())
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 
 	var n nat
 	for range 2 {
 		for range 10 {
 			require.NoError(t, g.apply(t.Context(), n.next(flood)))
 		}
-		assert.ErrorIs(t, g.apply(t.Context(), n.next(flood)), unix.EINVAL)
+		require.NoError(t, g.apply(t.Context(), n.next(flood)))
 		assert.Nil(t, g.attached)
 		assert.Equal(t, Unlimited, g.ctrl.Mode())
 	}
 	assert.Empty(t, changes())
 	assert.Equal(t, 512, ringSize(t, name))
+	// The refusal lasts, so it is logged once
+	failures := regexp.MustCompile(`msg="overload guard failed" err="failed to attach the overload guard to `+name+`: .*invalid argument"`).FindAllString(logs.String(), -1)
+	assert.Len(t, failures, 1, logs.String())
 }
 
 // crashWhileLimiting has a guard engage on the netdevsim interface name and
@@ -368,13 +379,13 @@ func TestGuardRecoversAfterACrash(t *testing.T) {
 	name := simulated(t, "7319")
 	cfg := simulatedConfig(t)
 	crashWhileLimiting(t, cfg, name)
-	assert.Equal(t, []int{-10}, receiveNices(t, name))
+	assertNices(t, name, -10)
 	assert.FileExists(t, cfg.RingPath)
 	require.NoError(t, os.WriteFile(cfg.OffPath, nil, 0o600))
 
 	startGuard(t, cfg)
 	assert.Equal(t, 512, ringSize(t, name))
-	assert.Equal(t, []int{0}, receiveNices(t, name))
+	assertNices(t, name, 0)
 	assert.NoFileExists(t, cfg.RingPath)
 }
 
