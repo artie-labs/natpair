@@ -38,6 +38,10 @@ type fixture struct {
 	inhibited bool
 	// peer is what the fake board returns. nil means no fresh report.
 	peer *health.Report
+	// tracked and copied are this NAT's cache sizes in conntrackd's stats.
+	// While arriving, each read of the stats counts one more copy added.
+	tracked, copied, added int
+	arriving               bool
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -46,8 +50,15 @@ func newFixture(t *testing.T) *fixture {
 		conntrack: &mocks.FakeConntrack{},
 		reports:   &mocks.FakeReports{},
 		clock:     &fakeClock{now: 100 * time.Second},
+		arriving:  true,
 	}
 	f.prober.UploadReturns(probe.Flow{}, nil)
+	f.conntrack.StatsCalls(func(context.Context) (string, error) {
+		if f.arriving {
+			f.added++
+		}
+		return stats(f.tracked, f.copied, f.added), nil
+	})
 	f.reports.ReadCalls(func(context.Context) (*health.Report, error) {
 		return f.peer, nil
 	})
@@ -67,11 +78,13 @@ func newFixture(t *testing.T) *fixture {
 }
 
 // rounds runs count rounds, advancing the clock by the round interval after
-// each, like Run.
+// each, like Run. A pass over conntrackd's caches that a round starts
+// finishes before the next round.
 func (f *fixture) rounds(t *testing.T, count int) health.Report {
 	var report health.Report
 	for range count {
 		report = f.monitor.Round(t.Context())
+		health.WaitForScans(f.monitor)
 		if f.serving {
 			f.clock.now += health.ServingInterval
 		} else {
@@ -147,80 +160,127 @@ func TestRoundTakeoverEligibility(t *testing.T) {
 	}
 }
 
-// stats returns `conntrackd -s` output with the given cache sizes.
-func stats(tracked, copied int) string {
-	return fmt.Sprintf("cache internal:\ncurrent active connections: %d\n\ncache external:\ncurrent active connections: %d\n", tracked, copied)
+// stats returns `conntrackd -s` output with the given cache sizes and count
+// of copies added, in conntrackd 1.4.7's format.
+func stats(tracked, copied, added int) string {
+	return fmt.Sprintf("cache internal:\ncurrent active connections:\t%12d\nconnections created:\t\t%12d\tfailed:\t%12d\n\n"+
+		"cache external:\ncurrent active connections:\t%12d\nconnections created:\t\t%12d\tfailed:\t%12d\n", tracked, tracked, 0, copied, added, 0)
 }
 
 func TestRoundReplication(t *testing.T) {
-	src := netip.MustParseAddr("172.31.94.10")
-	flowA := probe.Flow{Src: src, Dst: netip.MustParseAddr("192.0.2.1"), SrcPort: 40000, DstPort: 443}
-	flowB := probe.Flow{Src: src, Dst: netip.MustParseAddr("192.0.2.2"), SrcPort: 40001, DstPort: 443}
-	cache := "tcp 6 ESTABLISHED src=172.31.94.10 dst=192.0.2.1 sport=40000 dport=443 src=192.0.2.1 dst=192.0.2.200 sport=443 dport=40000\n" +
-		"tcp 6 ESTABLISHED src=172.31.94.10 dst=192.0.2.2 sport=40001 dport=443 src=192.0.2.2 dst=192.0.2.200 sport=443 dport=40001\n"
-
-	f := newFixture(t)
-	f.peer = &health.Report{Ready: true, CanTakeover: true, Flows: []probe.Flow{flowA, flowB}}
-	f.conntrack.ExternalCacheReturns(cache, nil)
-	f.conntrack.StatsReturns(stats(4, 2), nil)
-	report := f.rounds(t, 2)
-	assert.True(t, report.Ready)
-	assert.True(t, report.PeerReady)
-	assert.True(t, report.PeerCanTakeover)
-
-	// Without new copies, one verification keeps the NAT ready for replicationRounds rounds.
-	f.conntrack.ExternalCacheReturns("", nil)
-	assert.True(t, f.rounds(t, 3).Ready)
-	assert.False(t, f.rounds(t, 1).Ready)
-
-	// A copy missing one of the peer's oldest connections is incomplete, for
-	// example after this NAT's conntrackd restarted and churn alone refilled
-	// it. After two such rounds it asks for a full copy, then waits 30 s before
-	// asking again.
-	idle := conntrackd.Tuple{Src: src, Dst: netip.MustParseAddr("192.0.2.3"), SrcPort: 40002, DstPort: 5432}
-	f.conntrack.ExternalCacheReturns(cache, nil)
-	f.peer = &health.Report{Ready: true, CanTakeover: true, Flows: f.peer.Flows, Oldest: []conntrackd.Tuple{idle}}
-	assert.False(t, f.rounds(t, 1).Ready)
-	assert.Zero(t, f.conntrack.RequestResyncCallCount())
-	assert.False(t, f.rounds(t, 1).Ready)
-	assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
-	f.rounds(t, 5)
-	assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
-	f.rounds(t, 1)
-	assert.Equal(t, 2, f.conntrack.RequestResyncCallCount())
-	f.conntrack.ExternalCacheReturns(cache+"tcp 6 ESTABLISHED src=172.31.94.10 dst=192.0.2.3 sport=40002 dport=5432 [ASSURED] [active since 600s]\n", nil)
-	assert.True(t, f.rounds(t, 1).Ready)
-
-	// An owner doesn't ask, because its copy would hold the former owner's old entries.
-	f.serving = true
-	f.conntrack.ExternalCacheReturns(cache, nil)
-	f.rounds(t, 3)
-	assert.Equal(t, 2, f.conntrack.RequestResyncCallCount())
-	f.serving = false
-
-	// A stale peer report is not trusted.
-	f.peer = &health.Report{Ready: true, CanTakeover: true, Stale: true}
-	report = f.rounds(t, 1)
-	assert.False(t, report.PeerReady)
-	assert.False(t, report.PeerCanTakeover)
+	idle := conntrackd.Tuple{Src: netip.MustParseAddr("172.31.94.10"), Dst: netip.MustParseAddr("192.0.2.3"), SrcPort: 40002, DstPort: 5432}
+	// standby returns a standby whose peer's oldest connection is idle, and
+	// whose copy holds it if held.
+	standby := func(t *testing.T, held bool) *fixture {
+		f := newFixture(t)
+		f.peer = &health.Report{Ready: true, CanTakeover: true, Oldest: []conntrackd.Tuple{idle}}
+		f.conntrack.CopiedReturns(map[conntrackd.Tuple]bool{idle: held}, nil)
+		return f
+	}
+	{
+		// conntrackd keeps adding copies of the peer's new connections, and the
+		// copy holds the peer's oldest connection
+		f := standby(t, true)
+		report := f.rounds(t, 2)
+		assert.True(t, report.Ready)
+		assert.True(t, report.PeerReady)
+		assert.True(t, report.PeerCanTakeover)
+		// A pass over the copies reads them all, so the peer's oldest
+		// connection is checked once, not every round.
+		f.rounds(t, 10)
+		require.Equal(t, 1, f.conntrack.CopiedCallCount())
+		_, wanted := f.conntrack.CopiedArgsForCall(0)
+		assert.Equal(t, []conntrackd.Tuple{idle}, wanted)
+		// It's checked again after 5 minutes.
+		f.rounds(t, 50)
+		assert.Equal(t, 2, f.conntrack.CopiedCallCount())
+		assert.True(t, f.rounds(t, 1).Ready)
+	}
+	{
+		// When copies stop arriving, as when the peer's conntrackd stops, the
+		// NAT stays ready for copyWindow and then replicationRounds more
+		f := standby(t, true)
+		require.True(t, f.rounds(t, 2).Ready)
+		f.arriving = false
+		assert.True(t, f.rounds(t, 6).Ready)
+		assert.False(t, f.rounds(t, 1).Ready)
+	}
+	{
+		// A copy missing the peer's oldest connection, for example after this
+		// NAT's conntrackd restarted and churn alone refilled it, isn't ready,
+		// and is checked again every 15 s. After 70 s, longer than the peer
+		// takes to stop reporting a connection that closed, the NAT asks for a
+		// full copy, then waits 30 s before asking again.
+		f := standby(t, false)
+		assert.False(t, f.rounds(t, 3).Ready)
+		assert.Equal(t, 1, f.conntrack.CopiedCallCount())
+		assert.False(t, f.rounds(t, 1).Ready)
+		assert.Equal(t, 2, f.conntrack.CopiedCallCount())
+		f.rounds(t, 10)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
+		f.rounds(t, 1)
+		assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
+		f.rounds(t, 5)
+		assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
+		f.rounds(t, 1)
+		assert.Equal(t, 2, f.conntrack.RequestResyncCallCount())
+		// Once the copy holds it, the next check finds it
+		f.conntrack.CopiedReturns(map[conntrackd.Tuple]bool{idle: true}, nil)
+		f.rounds(t, 2)
+		assert.True(t, f.rounds(t, 1).Ready)
+	}
+	{
+		// An owner doesn't ask, because its copy would hold the former owner's old entries
+		f := standby(t, false)
+		f.serving = true
+		f.rounds(t, 120)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
+	}
+	{
+		// A NAT whose conntrackd restarted, which starts its count of copies
+		// added over, isn't ready until it checks the new copy, even if the
+		// copy refilled before the round
+		f := standby(t, true)
+		require.True(t, f.rounds(t, 2).Ready)
+		f.added = 0
+		f.conntrack.CopiedReturns(map[conntrackd.Tuple]bool{}, nil)
+		assert.False(t, f.rounds(t, 1).Ready)
+		f.rounds(t, 3)
+		assert.Equal(t, 2, f.conntrack.CopiedCallCount())
+	}
+	{
+		// A NAT that steps down isn't ready until it checks the new owner's full copy
+		f := standby(t, true)
+		f.serving = true
+		require.True(t, f.rounds(t, 2).Ready)
+		f.serving = false
+		f.conntrack.CopiedReturns(map[conntrackd.Tuple]bool{}, nil)
+		assert.False(t, f.rounds(t, 1).Ready)
+	}
+	{
+		// A stale peer report is not trusted
+		f := standby(t, true)
+		f.peer.Stale = true
+		report := f.rounds(t, 2)
+		assert.False(t, report.Ready)
+		assert.False(t, report.PeerReady)
+		assert.False(t, report.PeerCanTakeover)
+	}
 }
 
 func TestRoundCopiedShare(t *testing.T) {
-	flow := probe.Flow{Src: netip.MustParseAddr("172.31.94.10"), Dst: netip.MustParseAddr("192.0.2.1"), SrcPort: 40000, DstPort: 443}
-	cache := "tcp 6 ESTABLISHED src=172.31.94.10 dst=192.0.2.1 sport=40000 dport=443 src=192.0.2.1 dst=192.0.2.200 sport=443 dport=40000\n"
-	// standby returns a standby whose copy holds the peer's probe connection
-	// and copied of the peer's 100,000 connections.
+	// standby returns a standby whose copy holds copied of the peer's 100,000
+	// connections.
 	standby := func(t *testing.T, copied int) *fixture {
 		f := newFixture(t)
-		f.peer = &health.Report{TrackedConnections: 100000, Flows: []probe.Flow{flow}}
-		f.conntrack.ExternalCacheReturns(cache, nil)
-		f.conntrack.StatsReturns(stats(3, copied), nil)
+		f.peer = &health.Report{TrackedConnections: 100000}
+		f.tracked, f.copied = 3, copied
 		return f
 	}
 	{
 		// A copy of 70%, as after a full copy lost part of its burst, is not
-		// ready, though it holds the sampled connections. After two such
-		// rounds the standby asks for a full copy.
+		// ready, though conntrackd keeps adding copies. After two such rounds
+		// the standby asks for a full copy.
 		f := standby(t, 70000)
 		assert.False(t, f.rounds(t, 2).Ready)
 		assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
@@ -254,7 +314,7 @@ func TestRoundCopiedShare(t *testing.T) {
 		// replicationRounds later.
 		f := standby(t, 96000)
 		require.True(t, f.rounds(t, 2).Ready)
-		f.conntrack.StatsReturns(stats(3, 40), nil)
+		f.copied = 40
 		assert.False(t, f.rounds(t, 1).Ready)
 	}
 	{
@@ -274,17 +334,42 @@ func TestRoundCopiedShare(t *testing.T) {
 }
 
 func TestRoundOldest(t *testing.T) {
-	// A NAT publishes its oldest connections, and reads them from conntrackd
-	// again only every StandbyInterval, because that dumps the whole cache.
-	f := newFixture(t)
-	f.serving = true
-	f.conntrack.InternalCacheReturns("tcp 6 ESTABLISHED src=10.0.16.5 dst=192.0.2.9 sport=1000 dport=443 [ASSURED] [active since 90s]\n", nil)
-	report := f.rounds(t, 1)
-	assert.Equal(t, []conntrackd.Tuple{{Src: netip.MustParseAddr("10.0.16.5"), Dst: netip.MustParseAddr("192.0.2.9"), SrcPort: 1000, DstPort: 443}}, report.Oldest)
-	f.rounds(t, 4)
-	assert.Equal(t, 1, f.conntrack.InternalCacheCallCount())
-	f.rounds(t, 1)
-	assert.Equal(t, 2, f.conntrack.InternalCacheCallCount())
+	oldest := []conntrackd.Tuple{{Src: netip.MustParseAddr("10.0.16.5"), Dst: netip.MustParseAddr("192.0.2.9"), SrcPort: 1000, DstPort: 443}}
+	{
+		// A NAT publishes its oldest connections once a pass reads them, and
+		// reads them again only every minute, because a pass has conntrackd
+		// write its whole cache
+		f := newFixture(t)
+		f.serving = true
+		f.conntrack.OldestReturns(oldest, nil)
+		f.rounds(t, 1)
+		assert.Equal(t, oldest, f.rounds(t, 1).Oldest)
+		f.rounds(t, 58)
+		assert.Equal(t, 1, f.conntrack.OldestCallCount())
+		f.rounds(t, 1)
+		assert.Equal(t, 2, f.conntrack.OldestCallCount())
+	}
+	{
+		// A round doesn't wait for a pass, however long conntrackd takes to
+		// write its cache, and only one pass runs at a time
+		f := newFixture(t)
+		f.serving = true
+		started, release := make(chan struct{}, 2), make(chan struct{})
+		f.conntrack.OldestCalls(func(context.Context, int) ([]conntrackd.Tuple, error) {
+			started <- struct{}{}
+			<-release
+			return oldest, nil
+		})
+		for range 120 {
+			f.monitor.Round(t.Context())
+			f.clock.now += health.ServingInterval
+		}
+		<-started
+		assert.Empty(t, started, "a second pass started while the first ran")
+		close(release)
+		health.WaitForScans(f.monitor)
+		assert.Equal(t, oldest, f.rounds(t, 1).Oldest)
+	}
 }
 
 func TestRoundServing(t *testing.T) {

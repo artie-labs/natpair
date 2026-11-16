@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now counts as ready only when its copy holds at least 95% as many
   connections as the owner tracks. One that falls short asks for a full copy
   again, and planned maintenance and upgrades wait for it.
+- From about 800,000 connections, natpair's checks of the standby's copy ran
+  past their 2 s limit, so the standby never became ready and planned
+  maintenance and upgrades never handed over. Every health round also read
+  one of conntrackd's whole caches as text into natpair's memory, up to
+  600 MB. natpair now reads the caches outside the health rounds, its oldest
+  connections once a minute and the copies only until it finds the owner's
+  oldest connections, keeping only the few connections it looks for. It
+  confirms that copies keep arriving from conntrackd's counters instead.
 
 - On a fresh apply, the NATs' SSM agent never came online and the Datadog
   agent install failed, because the NATs booted before their IAM policy was
