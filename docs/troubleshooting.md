@@ -129,6 +129,22 @@ rounds, so it asks the owner for a full copy. This fixes itself. If it repeats
 for more than 5 minutes, check the network between the NATs and
 conntrackd on both.
 
+### `the route to the peer was missing or wrong and has been restored`
+
+Each NAT keeps a host route to the peer through its own interface, from its
+own address, so conntrackd's copies don't fragment on the shared ENI. natpair
+checks it every 5 s and found it missing or changed. The kernel deletes it
+when the NAT's own interface goes down or loses its address, and other
+network tools can delete it when they reconfigure the interfaces. natpair
+has already put it back. The warning repeats at most once a minute while
+this keeps happening, and `checks` counts how often natpair found the route
+missing or wrong since the last warning. If it keeps repeating, find what
+removes the route. Check that it's in place with
+`ip route show <peer address>/32`.
+
+`failed to check or restore the route to the peer` means natpair couldn't
+read or set the route. The error says why.
+
 ### `shared Elastic IP not working yet, trying again`
 
 During a takeover, the new owner's test upload through the shared Elastic IP
