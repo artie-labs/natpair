@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -59,11 +60,25 @@ func TestHandover(t *testing.T) {
 		connect(t, a.ns, "10.99.0.1", 3000)
 		require.Eventually(t, func() bool { return strings.Contains(b.copies(t), "sport=1000 ") }, 5*time.Second, 100*time.Millisecond)
 		assert.NotContains(t, b.copies(t), "sport=3000 ")
-		// A lists the connection among its oldest, which needs conntrackd's ages.
-		internal, err := a.client.InternalCache(t.Context())
-		require.NoError(t, err)
+		// A lists an established connection among its oldest, which needs
+		// conntrackd's states and ages, and B finds its copy.
+		idle := Tuple{Src: netip.MustParseAddr("10.0.16.7"), Dst: netip.MustParseAddr("203.0.113.9"), SrcPort: 1100, DstPort: 443}
+		nsRun(t, a.ns, "conntrack", "-I", "-p", "tcp", "-s", "10.0.16.7", "-d", "203.0.113.9", "--sport", "1100", "--dport", "443",
+			"-r", "203.0.113.9", "-q", shared.String(), "--reply-port-src", "443", "--reply-port-dst", "40001",
+			"--state", "ESTABLISHED", "-u", "SEEN_REPLY,ASSURED", "-t", "3600")
+		var oldest []Tuple
+		require.Eventually(t, func() bool {
+			var err error
+			oldest, err = a.client.Oldest(t.Context(), 16)
+			return err == nil && slices.Contains(oldest, idle)
+		}, 5*time.Second, 100*time.Millisecond)
+		// The worker connection's SYN got no answer, so it isn't established.
 		worker := Tuple{Src: netip.MustParseAddr("10.0.16.5"), Dst: netip.MustParseAddr("203.0.113.9"), SrcPort: 1000, DstPort: 443}
-		assert.Contains(t, OldestTuples(internal, 16), worker)
+		assert.NotContains(t, oldest, worker)
+		require.Eventually(t, func() bool {
+			found, err := b.client.Copied(t.Context(), []Tuple{idle, worker})
+			return err == nil && found[idle] && found[worker]
+		}, 5*time.Second, 100*time.Millisecond)
 	}
 	{
 		// After B takes over, A holds copies of the connections B committed without asking for them.
@@ -177,9 +192,7 @@ func (r replica) start(t *testing.T) {
 }
 
 func (r replica) copies(t *testing.T) string {
-	copies, err := r.client.ExternalCache(t.Context())
-	require.NoError(t, err)
-	return copies
+	return run(t, "conntrackd", "-C", r.client.ConfigPath, "-e")
 }
 
 // connect opens a TCP connection from addr:port in namespace ns to the
