@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The owner counts worker connections per destination address, port and
+  protocol once a minute. All of them share the shared address, so each
+  destination can take at most 64,512 at a time. It warns when one
+  destination uses 70% of them, naming it, and reports the busiest
+  destination's share as `shared_ports_used` in its health rounds. See
+  [troubleshooting](docs/troubleshooting.md#worker-connections-to-one-destination-use-most-of-the-shared-addresss-ports).
+
 ### Changed
 
 - The default `max_connections` is 524,288, up from 262,144. Each connection

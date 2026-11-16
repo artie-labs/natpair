@@ -128,6 +128,27 @@ more than 5 minutes, check the network between the NATs and conntrackd on
 both. `sudo conntrackd -C /var/lib/natpair/conntrackd.conf -s` on the standby
 shows the copies it received and lost.
 
+### `worker connections to one destination use most of the shared address's ports`
+
+All worker traffic leaves from the shared address, and each connection to
+one destination address, port and protocol needs its own source port, of
+which there are 64,512. The owner counts them once a minute and warns, at
+most every 10 minutes for each destination, when one destination passes
+70%. The `destination` field names it, such as `tcp 203.0.113.9:5432`, with
+its `connections`. When all its ports are in use, new connections to that
+destination fail while others keep working. The owner logs `back under 70%`
+when the count drops.
+
+Closed TCP connections keep their port while they stay in the connection
+table, so many short connections use ports as much as long ones. To fix it:
+
+- spread the traffic across more destinations, such as several addresses
+  behind the service's DNS name or more ports,
+- reuse connections in the clients, with connection pools or HTTP
+  keep-alive, instead of opening one per request,
+- or send the busiest traffic from more source addresses, such as a second
+  pair for some of the subnets.
+
 ### `the route to the peer was missing or wrong and has been restored`
 
 Each NAT keeps a host route to the peer through its own interface, from its
