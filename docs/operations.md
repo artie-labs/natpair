@@ -270,6 +270,7 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `update` lines continue for more than an hour | An upgrade is stuck. The `reason` field says why. |
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |
 | `worker connections to one destination use most of the shared address's ports` is logged, or the owner's `shared_ports_used` passes 0.7 | New connections to that destination will soon fail. See [troubleshooting](troubleshooting.md#worker-connections-to-one-destination-use-most-of-the-shared-addresss-ports). |
+| `failed to count the shared address's ports in use` repeats for 10 minutes | `shared_ports_used` keeps the latest count that succeeded, so the alert above can't see the ports in use now. |
 
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.
 It ships the logs of `natpair.service`, `natpair-bootstrap.service` and

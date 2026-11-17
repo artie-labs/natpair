@@ -45,7 +45,7 @@ const (
 	// Past it, the count keeps the busiest: any destination with more than
 	// 1/(maxDestinations+1) of the connections is still found, and its count
 	// may be low by at most that many. At 524,288 connections that is 127,
-	// against the 42,000 or more a warning needs.
+	// against the more than 40,000 a warning needs (70% of SharedPorts).
 	maxDestinations = 4096
 	// listTimeout bounds one read of the connection table.
 	listTimeout = 2 * time.Minute
@@ -104,8 +104,9 @@ func New(shared netip.Addr, ports int, serving func() bool, now func() time.Dura
 }
 
 // Used returns the busiest destination's share of its ports at the latest
-// count, from 0 to 1. It is 0 while this NAT doesn't serve, including before
-// the first count after it stops.
+// count that succeeded, from 0 to 1. A count that fails keeps the previous
+// value. It is 0 while this NAT doesn't serve, including before the first
+// count after it stops.
 func (w *Watcher) Used() float64 {
 	if !w.serving() {
 		return 0
@@ -169,7 +170,7 @@ func (w *Watcher) check(ctx context.Context) {
 		w.warned[destination] = now
 		slog.Warn("worker connections to one destination use most of the shared address's ports for it, "+
 			"so new connections to it will fail once all are used. Spread them across more destinations, "+
-			"reuse connections, or give the workers more source addresses.",
+			"reuse connections, or send the busiest traffic from more source addresses, such as a second pair.",
 			slog.String("destination", destination.String()), slog.Int("connections", connections),
 			slog.Int("ports", w.ports), slog.Int("percent", connections*100/w.ports))
 	}
