@@ -270,6 +270,41 @@ func TestRoundCopiedShare(t *testing.T) {
 		assert.Zero(t, f.conntrack.RequestResyncCallCount())
 	}
 	{
+		// Nor without the owner's count. An owner whose conntrackd didn't
+		// answer reports 0 connections, which any copy would cover.
+		f := standby(t, 40)
+		f.peer.TrackedConnections, f.peer.TrackedUnknown = 0, true
+		assert.False(t, f.rounds(t, 2).Ready)
+		f.rounds(t, 20)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
+	}
+	{
+		// One round whose counts can't be read, such as a slow conntrackd -s
+		// while a large copy arrives, doesn't undo a good copy. The standby
+		// stays ready for replicationRounds, as after any failed check.
+		f := standby(t, 96000)
+		require.True(t, f.rounds(t, 2).Ready)
+		f.conntrack.StatsReturns("", errors.New("timed out"))
+		report := f.rounds(t, 1)
+		assert.True(t, report.Ready)
+		// Its report says its own count is unknown, not 0
+		assert.True(t, report.TrackedUnknown)
+		f.conntrack.StatsReturns(stats(3, 96000), nil)
+		assert.False(t, f.rounds(t, 1).TrackedUnknown)
+	}
+	{
+		// Rounds whose counts can't be read don't restart the 30 s a short
+		// copy waits before asking for a full copy again.
+		f := standby(t, 70000)
+		for range 4 {
+			f.rounds(t, 1)
+			f.conntrack.StatsReturns("", errors.New("timed out"))
+			f.rounds(t, 1)
+			f.conntrack.StatsReturns(stats(3, 70000), nil)
+		}
+		assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
+	}
+	{
 		// An owner's copy is of the standby's table, which still counts the
 		// owner's old table for 60 s after a handover, so the share doesn't
 		// apply.

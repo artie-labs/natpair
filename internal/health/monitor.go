@@ -98,6 +98,10 @@ type Report struct {
 	// TrackedConnections is the number of connections conntrackd tracks on
 	// this NAT, which the peer should hold copies of.
 	TrackedConnections int `json:"tracked_connections"`
+	// TrackedUnknown means this NAT couldn't read conntrackd's counts this
+	// round, so TrackedConnections is 0 rather than a count. Releases before
+	// it never set it.
+	TrackedUnknown bool `json:"tracked_unknown,omitempty"`
 	// Oldest are the connections conntrackd has held longest on this NAT. The
 	// peer must hold copies of all of them before it counts as ready.
 	Oldest []conntrackd.Tuple `json:"oldest"`
@@ -367,14 +371,17 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			// Only a standby's copy is what a takeover would install. The
 			// owner's copy is of the standby's table, and the NAT that just
 			// stepped down still counts its old table until its flush 60 s
-			// later.
+			// later. Both NATs' counts must have been read: an owner whose
+			// conntrackd didn't answer reports 0, which any copy would cover.
+			measured := counted && !peer.TrackedUnknown
 			covers := copied*100 >= peer.TrackedConnections*copiedPercent || peer.TrackedConnections-copied <= copiedSlack
-			enough := serving || (counted && covers)
-			complete := oldestCopied == len(peer.Oldest) && enough
-			// A copy known to be short isn't ready, even within
+			shortfall := !serving && measured && !covers
+			complete := oldestCopied == len(peer.Oldest) && (serving || (measured && covers))
+			// A copy measured short isn't ready, even within
 			// replicationRounds of the last good one, such as just after this
-			// NAT's conntrackd restarted empty.
-			if !enough {
+			// NAT's conntrackd restarted empty. Counts that couldn't be read
+			// only fail this round's check.
+			if shortfall {
 				m.replicated = false
 			}
 			if oldestCopied == len(peer.Oldest) || serving {
@@ -382,13 +389,14 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			} else {
 				m.incomplete++
 			}
-			// Only a measured shortfall counts toward asking for a full copy,
-			// not stats that failed to read.
-			if !serving && counted && !covers {
+			// Only measured rounds start or end the time a copy has been
+			// short. A round whose counts couldn't be read does neither.
+			switch {
+			case shortfall:
 				if !m.shortRun {
 					m.shortSince, m.shortRun = now, true
 				}
-			} else {
+			case serving || measured:
 				m.shortRun = false
 			}
 			// A standby with an incomplete copy asks for a full one, for example
@@ -429,6 +437,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		PathHealthy:            healthy,
 		ConsecutiveFailures:    m.failures,
 		TrackedConnections:     tracked,
+		TrackedUnknown:         !counted,
 		Oldest:                 m.oldest,
 		CanForward:             canForward,
 		CanForwardUnverified:   !canForward,
