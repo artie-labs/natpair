@@ -27,8 +27,8 @@ Use natpair if:
 
 Use NAT Gateway instead if:
 
-- your traffic is under about 850 GB a month, or under 1.7 TB if you need
-  the larger instances (see [Cost](#cost)),
+- your traffic is under about 850 GB a month, under 1.7 TB if you need the
+  faster c7gn.medium, or under 3.7 TB for a c7gn.large (see [Cost](#cost)),
 - you need IPv6 egress, or UDP connections that survive a failover, or
 - you don't want to run instances at all.
 
@@ -41,16 +41,16 @@ the [EC2](https://aws.amazon.com/ec2/pricing/on-demand/),
 [DynamoDB](https://aws.amazon.com/dynamodb/pricing/on-demand/) pricing pages
 for yours.
 
-| | natpair, 2 × c7g.medium | natpair, 2 × c7gn.medium | NAT Gateway |
-| --- | ---: | ---: | ---: |
-| Instances or gateway hours | $53.00 | $91.10 | $32.85 |
-| Public IPv4 addresses | $10.95 (3) | $10.95 (3) | $3.65 (1) |
-| EBS, 2 × 8 GB gp3 | $1.28 | $1.28 | |
-| DynamoDB lease table | about $9 | about $9 | |
-| Lambda probe receiver | under $1 | under $1 | |
-| **Fixed total** | **about $75** | **about $113** | **$36.50** |
-| Per GB processed | $0 | $0 | $0.045 |
-| **Cheaper than NAT Gateway above** | about 850 GB | about 1.7 TB | |
+| | natpair, 2 × c7g.medium | natpair, 2 × c7gn.medium | natpair, 2 × c7gn.large | NAT Gateway |
+| --- | ---: | ---: | ---: | ---: |
+| Instances or gateway hours | $53.00 | $91.10 | $182.21 | $32.85 |
+| Public IPv4 addresses | $10.95 (3) | $10.95 (3) | $10.95 (3) | $3.65 (1) |
+| EBS, 2 × 8 GB gp3 | $1.28 | $1.28 | $1.28 | |
+| DynamoDB lease table | about $9 | about $9 | about $9 | |
+| Lambda probe receiver | under $1 | under $1 | under $1 | |
+| **Fixed total** | **about $75** | **about $113** | **about $204** | **$36.50** |
+| Per GB processed | $0 | $0 | $0 | $0.045 |
+| **Cheaper than NAT Gateway above** | about 850 GB | about 1.7 TB | about 3.7 TB | |
 
 Data transfer out to the internet costs the same either way and isn't
 included. The DynamoDB figure is measured on a running pair. Like a NAT
@@ -68,16 +68,23 @@ you the load.
 | --- | ---: | ---: |
 | c7g.medium | 0.52 Gbps | 12.5 Gbps |
 | c7gn.medium | 3.125 Gbps | 25 Gbps |
-| c7g.large | 0.937 Gbps | 12.5 Gbps |
 | c7gn.large | 6.25 Gbps | 30 Gbps |
 
 A 1-vCPU type such as c7g.medium or c7gn.medium is fine for normal load and
 is the cheapest option. Its one CPU runs both forwarding and the NAT's own
 work, such as renewing its lease. A flood of small packets beyond what one CPU
 can forward, roughly 500,000 to 600,000 64-byte packets a second, can starve
-that work and make the pair hand over again and again. If the pair must ride
-out floods, use a 2-vCPU type such as c7g.large or c7gn.large. A c7gn.large
-pair held under the same tests. To change the type of a running pair, see
+that work and make the pair hand over again and again.
+
+If the pair must ride out floods, use a c7gn.large. In 60-second floods of
+64-byte UDP offered at 800,000 and 1.2 million packets a second, a c7gn.medium
+pair handed over up to twice a run, and a c7gn.large pair never did. The
+c7gn.large also kept ownership under a 1 million packets a second flood of the
+owner's own address. Those runs used two changes the current release doesn't
+have: threaded receive processing on each network interface, and a check that
+keeps a congested owner from stepping down. On the current release, the
+c7gn.large handed over under these floods too. The c7g.large also has 2 vCPUs
+but wasn't flood-tested. To change the type of a running pair, see
 [Replace a NAT](docs/operations.md#replace-a-nat).
 
 ## How it works
