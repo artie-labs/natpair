@@ -343,6 +343,19 @@ func TestRoundCopiedShare(t *testing.T) {
 		assert.False(t, f.rounds(t, 1).Ready)
 	}
 	{
+		// While a copy is short, passes over it still count, so it isn't read
+		// again every 15 s, and the standby is ready in the round its copy
+		// reaches 95%.
+		idle := conntrackd.Tuple{Src: netip.MustParseAddr("172.31.94.10"), Dst: netip.MustParseAddr("192.0.2.3"), SrcPort: 40002, DstPort: 5432}
+		f := standby(t, 70000)
+		f.peer.Oldest = []conntrackd.Tuple{idle}
+		f.conntrack.CopiedReturns(map[conntrackd.Tuple]bool{idle: true}, nil)
+		assert.False(t, f.rounds(t, 12).Ready)
+		assert.Equal(t, 1, f.conntrack.CopiedCallCount())
+		f.copied = 96000
+		assert.True(t, f.rounds(t, 1).Ready)
+	}
+	{
 		// Without its own counts, a standby can't show its copy is complete
 		f := standby(t, 96000)
 		f.conntrack.StatsReturns("cache internal:\ncurrent active connections: 3\n", nil)
@@ -398,6 +411,9 @@ func TestRoundOldest(t *testing.T) {
 		f.conntrack.OldestReturns(nil, errors.New("conntrackd -i timed out"))
 		assert.Equal(t, oldest, f.rounds(t, 60).Oldest)
 		assert.Equal(t, 2, f.conntrack.OldestCallCount())
+		// but not after a second failure. A connection on a kept list may have
+		// closed, and the peer would wait for its copy forever.
+		assert.Empty(t, f.rounds(t, 60).Oldest)
 	}
 	{
 		// A round doesn't wait for a pass, however long conntrackd takes to
