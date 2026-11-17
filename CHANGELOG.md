@@ -43,8 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   times a minute, pausing forwarding for about 10 s each time. When a loaded
   owner's upload times out, it now tries 40 TCP handshakes through the shared
   Elastic IP, and if some but not all complete, the path is congested and the
-  round doesn't count as a path failure. A NAT taking over opens forwarding by
-  the same check. So that a fault on a loaded owner can't hold it, an owner
+  round doesn't count as a path failure. A NAT taking over accepts a congested
+  shared path by the same check. So that a fault on a loaded owner can't hold it, an owner
   hands over to a standby that has proven its own path once it has served 10
   minutes with at least half of its health rounds congested or failed, and a
   new owner must serve 10 minutes first. NATs log `the health probe failed,

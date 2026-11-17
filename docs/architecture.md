@@ -113,7 +113,8 @@ handshakes complete and some don't, the path is congested, and the round
 doesn't count as failed. If none or all complete, or the owner isn't
 loaded, as with a fault on an idle host, the round counts as before. A NAT
 taking over checks its upload through the shared Elastic IP the same way,
-so it opens forwarding during a flood.
+so a congested shared path doesn't fail the takeover. Its health rounds
+through its own address still can, if the flood also times them out.
 
 A completed handshake can't be forged from off the path, because the
 answer must acknowledge the random sequence number the kernel chose. But
