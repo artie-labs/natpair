@@ -18,8 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4 GiB, such as c7gn.medium,** set `max_connections = 262144` and replace
   both NATs one at a time, as in
   [Replace a NAT](docs/operations.md#replace-a-nat), while still on the
-  release they run. NATs read the setting only when they're created. See
+  release they run. NATs read the setting only when they're created.
+  Rolling back to an earlier release puts pairs that leave it unset back on
+  262,144, so roll back only while the owner holds fewer connections than
+  that. A handover to the earlier release resets the rest. See
   [Size the connection table](docs/operations.md#size-the-connection-table).
+- The complete example's default `instance_type` is c7gn.xlarge, up from
+  c7gn.large, because its 1,048,576 connections need 8 GiB. Applying it
+  stops and starts both NATs, so change one NAT at a time, as in
+  [Replace a NAT](docs/operations.md#replace-a-nat).
 - The kernel's connection table and conntrackd's caches have one hash bucket
   per connection, up from a quarter, so lookups in a full table stay short.
   This costs about 15 MB more at 524,288.

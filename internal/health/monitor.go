@@ -429,6 +429,8 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			// stepped down still counts its old table until its flush 60 s
 			// later. Both NATs' counts must have been read: an owner whose
 			// conntrackd didn't answer reports 0, which any copy would cover.
+			// Releases before TrackedUnknown don't say so, and their 0 is
+			// trusted as before.
 			measured := counted && !peer.TrackedUnknown
 			covers := copied*100 >= peer.TrackedConnections*copiedPercent || peer.TrackedConnections-copied <= copiedSlack
 			shortfall := !serving && measured && !covers
@@ -463,8 +465,10 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			// the owner. On AWS, 80,000 of these copies stayed and inflated the
 			// copied count after the next handover.
 			// A full copy of a large table takes seconds to arrive, such as
-			// conntrackd's own request when it starts, so a short copy asks
-			// again only once it has stayed short for resyncInterval.
+			// conntrackd's own request when it starts, so a copy short of the
+			// count asks again only once it has stayed short for
+			// resyncInterval. A copy missing an oldest connection still asks
+			// after incompleteRounds.
 			short := m.shortRun && now-m.shortSince >= resyncInterval
 			if (m.incomplete >= incompleteRounds || short) && (!m.resynced || now-m.lastResync >= resyncInterval) {
 				slog.Warn("copied connections are incomplete, requesting a full copy from the peer",
