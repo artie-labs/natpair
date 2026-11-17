@@ -115,6 +115,10 @@ type Report struct {
 	// TrackedConnections is the number of connections conntrackd tracks on
 	// this NAT, which the peer should hold copies of.
 	TrackedConnections int `json:"tracked_connections"`
+	// TrackedUnknown means this NAT couldn't read conntrackd's counts this
+	// round, so TrackedConnections is 0 rather than a count. Releases before
+	// it never set it.
+	TrackedUnknown bool `json:"tracked_unknown,omitempty"`
 	// Oldest are the established connections conntrackd has held longest on
 	// this NAT, read every oldestInterval. The peer must hold copies of all of
 	// them before it counts as ready.
@@ -388,24 +392,30 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// Only a standby's copy is what a takeover would install. The
 		// owner's copy is of the standby's table, and the NAT that just
 		// stepped down still counts its old table until its flush 60 s
-		// later.
-		enough := serving || (copied*100 >= peer.TrackedConnections*copiedPercent ||
-			peer.TrackedConnections-copied <= copiedSlack)
+		// later. The owner's count must have been read too: an owner whose
+		// conntrackd didn't answer reports 0, which any copy would cover.
+		covers := copied*100 >= peer.TrackedConnections*copiedPercent ||
+			peer.TrackedConnections-copied <= copiedSlack
+		shortfall := !serving && !peer.TrackedUnknown && !covers
+		enough := serving || (!peer.TrackedUnknown && covers)
 		complete := oldestCopied == len(peer.Oldest) && enough
-		// A copy known to be short isn't ready, even within
+		// A copy measured short isn't ready, even within
 		// replicationRounds of the last good one, such as just after this
-		// NAT's conntrackd restarted empty. What passes found about the
-		// peer's oldest connections still counts: a copy that lost part of a
-		// burst keeps the entries it got, and noteCopies forgets them when
-		// the copy is emptied.
-		if !enough {
+		// NAT's conntrackd restarted empty. An unknown count only fails this
+		// round's check. What passes found about the peer's oldest
+		// connections still counts: a copy that lost part of a burst keeps
+		// the entries it got, and noteCopies forgets them when the copy is
+		// emptied.
+		if shortfall {
 			m.replicated = false
 		}
-		if !serving && !enough {
+		// Only measured rounds start or end the time a copy has been short.
+		switch {
+		case shortfall:
 			if !m.shortRun {
 				m.shortSince, m.shortRun = now, true
 			}
-		} else {
+		case enough:
 			m.shortRun = false
 		}
 		// A standby with an incomplete copy asks for a full one, for example
@@ -446,6 +456,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		PathHealthy:            healthy,
 		ConsecutiveFailures:    m.failures,
 		TrackedConnections:     tracked,
+		TrackedUnknown:         !counted,
 		Oldest:                 oldest,
 		CanForward:             canForward,
 		CanForwardUnverified:   !canForward,

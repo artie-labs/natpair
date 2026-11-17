@@ -4,6 +4,7 @@ package conntrackd
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net/netip"
 	"os"
@@ -16,9 +17,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/artie-labs/natpair/internal/command"
+	"github.com/artie-labs/natpair/internal/netns"
 )
+
+// pairShared is the shared address of the replicas startPair creates.
+var pairShared = netip.MustParseAddr("10.99.1.100")
 
 // replica is one NAT's conntrackd in its own network namespace.
 type replica struct {
@@ -32,19 +38,9 @@ type replica struct {
 // the shared address and port 40000, as the NATs' SNAT rules do, and sends
 // them out through a dummy interface.
 func TestHandover(t *testing.T) {
-	shared := netip.MustParseAddr("10.99.1.100")
-	a := startReplica(t, "a", netip.MustParseAddr("10.99.0.1"), netip.MustParseAddr("10.99.0.2"), shared)
-	b := startReplica(t, "b", netip.MustParseAddr("10.99.0.2"), netip.MustParseAddr("10.99.0.1"), shared)
-	run(t, "ip", "link", "add", a.ns+"-s", "type", "veth", "peer", "name", b.ns+"-s")
-	for _, r := range []replica{a, b} {
-		run(t, "ip", "link", "set", r.ns+"-s", "netns", r.ns)
-	}
-	nsRun(t, a.ns, "ip", "addr", "add", "10.99.0.1/24", "dev", a.ns+"-s")
-	nsRun(t, b.ns, "ip", "addr", "add", "10.99.0.2/24", "dev", b.ns+"-s")
-	for _, r := range []replica{a, b} {
-		nsRun(t, r.ns, "ip", "link", "set", r.ns+"-s", "up")
-		r.start(t)
-	}
+	a, b := startPair(t)
+	a.start(t)
+	b.start(t)
 
 	{
 		// conntrackd gets the copies' socket buffers it asks for, 16 MB at
@@ -64,7 +60,7 @@ func TestHandover(t *testing.T) {
 		// conntrackd's states and ages, and B finds its copy.
 		idle := Tuple{Src: netip.MustParseAddr("10.0.16.7"), Dst: netip.MustParseAddr("203.0.113.9"), SrcPort: 1100, DstPort: 443}
 		nsRun(t, a.ns, "conntrack", "-I", "-p", "tcp", "-s", "10.0.16.7", "-d", "203.0.113.9", "--sport", "1100", "--dport", "443",
-			"-r", "203.0.113.9", "-q", shared.String(), "--reply-port-src", "443", "--reply-port-dst", "40001",
+			"-r", "203.0.113.9", "-q", pairShared.String(), "--reply-port-src", "443", "--reply-port-dst", "40001",
 			"--state", "ESTABLISHED", "-u", "SEEN_REPLY,ASSURED", "-t", "3600")
 		var oldest []Tuple
 		require.Eventually(t, func() bool {
@@ -150,6 +146,83 @@ func TestHandover(t *testing.T) {
 	}
 }
 
+// TestFullCopy checks that a full copy of a large table reaches the peer
+// whole. A standby's conntrackd asks the owner for one when it starts, such
+// as after a reboot. With Linux's default socket buffers, the burst overflowed
+// the standby's socket: on AWS it got 69 to 80% of the table, and here about
+// 30% of 250,000 connections.
+func TestFullCopy(t *testing.T) {
+	const connections = 100000
+	a, b := startPair(t)
+	a.start(t)
+	sendSYNs(t, a.ns, connections)
+	// Sent this fast, the kernel's events about the new connections can
+	// overflow conntrackd's event socket, so it reads the table again.
+	nsRun(t, a.ns, "conntrackd", "-C", a.client.ConfigPath, "-R")
+	require.Eventually(t, func() bool {
+		tracked, _ := a.counts(t)
+		return tracked == connections
+	}, 30*time.Second, 100*time.Millisecond)
+
+	b.start(t)
+	require.Eventually(t, func() bool {
+		_, copied := b.counts(t)
+		return copied == connections
+	}, 30*time.Second, 500*time.Millisecond)
+}
+
+// startPair creates two replicas linked by a veth pair, without starting
+// their conntrackd.
+func startPair(t *testing.T) (replica, replica) {
+	a := startReplica(t, "a", netip.MustParseAddr("10.99.0.1"), netip.MustParseAddr("10.99.0.2"), pairShared)
+	b := startReplica(t, "b", netip.MustParseAddr("10.99.0.2"), netip.MustParseAddr("10.99.0.1"), pairShared)
+	run(t, "ip", "link", "add", a.ns+"-s", "type", "veth", "peer", "name", b.ns+"-s")
+	for _, r := range []replica{a, b} {
+		run(t, "ip", "link", "set", r.ns+"-s", "netns", r.ns)
+	}
+	nsRun(t, a.ns, "ip", "addr", "add", "10.99.0.1/24", "dev", a.ns+"-s")
+	nsRun(t, b.ns, "ip", "addr", "add", "10.99.0.2/24", "dev", b.ns+"-s")
+	for _, r := range []replica{a, b} {
+		nsRun(t, r.ns, "ip", "link", "set", r.ns+"-s", "up")
+	}
+	return a, b
+}
+
+// sendSYNs sends one TCP SYN to 203.0.113.20:443 from each of count source
+// addresses from 10.1.0.0 up, through a raw socket in namespace ns. Each
+// leaves through the dummy interface and creates a connection entry, far
+// faster than opening real connections. The kernel fills in the IP checksum,
+// and conntrack doesn't check TCP checksums on a host's own packets.
+func sendSYNs(t *testing.T, ns string, count int) {
+	require.NoError(t, netns.Do(ns, func() error {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(fd)
+		destination := [4]byte{203, 0, 113, 20}
+		for i := range count {
+			packet := make([]byte, 40)
+			packet[0] = 0x45 // IPv4 with a 20-byte header
+			binary.BigEndian.PutUint16(packet[2:], uint16(len(packet)))
+			packet[8] = 64 // TTL
+			packet[9] = unix.IPPROTO_TCP
+			copy(packet[12:], []byte{10, byte(1 + i>>16), byte(i >> 8), byte(i)})
+			copy(packet[16:], destination[:])
+			tcp := packet[20:]
+			binary.BigEndian.PutUint16(tcp[0:], 40000)
+			binary.BigEndian.PutUint16(tcp[2:], 443)
+			tcp[12] = 5 << 4 // a 20-byte header
+			tcp[13] = 0x02   // SYN
+			binary.BigEndian.PutUint16(tcp[14:], 65535)
+			if err := unix.Sendto(fd, packet, 0, &unix.SockaddrInet4{Addr: destination}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
 // startReplica creates a namespace with a dummy route and SNAT rule, and
 // writes its conntrackd configuration.
 func startReplica(t *testing.T, name string, local, peer, shared netip.Addr) replica {
@@ -193,6 +266,17 @@ func (r replica) start(t *testing.T) {
 
 func (r replica) copies(t *testing.T) string {
 	return run(t, "conntrackd", "-C", r.client.ConfigPath, "-e")
+}
+
+// counts returns how many connections the replica's conntrackd tracks and
+// holds copies of, or zeros while it doesn't answer.
+func (r replica) counts(t *testing.T) (tracked, copied int) {
+	stats, err := r.client.Stats(t.Context())
+	if err != nil {
+		return 0, 0
+	}
+	counts, _ := ParseStats(stats)
+	return counts.Tracked, counts.Copied
 }
 
 // connect opens a TCP connection from addr:port in namespace ns to the

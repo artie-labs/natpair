@@ -172,6 +172,13 @@ owner's old release. To roll back, pin the previous release and its SHA-256
 again, and the standby moves back. If the new release can't run at all, the
 standby can't move itself back, so replace it.
 
+The standby is ready only once its copy holds at least 95% of the owner's
+connections. While it's short, its health rounds show `copied_connections`
+below `peer_tracked_connections`, and it asks the owner for a full copy
+every 30 s. If it doesn't catch up within a few minutes, roll back as above
+and see
+[the full-copy message](troubleshooting.md#copied-connections-are-incomplete-requesting-a-full-copy-from-the-peer).
+
 A NAT you put in maintenance by hand isn't upgraded until you run
 `natpair resume`.
 
@@ -247,6 +254,11 @@ under half the instance's memory:
 | 1,048,576 | 1.2 GB | 2.4 GB | 8 GiB, such as c7gn.xlarge |
 | 2,097,152 | 2.3 GB | 4.8 GB | 16 GiB |
 | 4,194,304 | 4.6 GB | 9.6 GB | 32 GiB |
+
+Lower `max_connections` only while the owner holds fewer connections than the
+new limit. A new standby can't copy more than its limit, so until then it
+never counts as ready, and the handover in
+[Replace a NAT](#replace-a-nat) waits.
 
 On AWS, 2,097,152 connections on a 4 GiB NAT ran it out of memory, and the
 kernel killed conntrackd, so nothing was copied. A larger table also costs
