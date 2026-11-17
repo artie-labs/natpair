@@ -40,33 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between them.
 - An owner that got more traffic than it could forward stepped down, the NAT
   that took over saturated and stepped down too, and the pair moved 2 to 4
-  times a minute, each move pausing forwarding for about 10 s. When a loaded
-  owner's upload times out, it now tries 40 TCP handshakes with the probe
-  receiver through the shared Elastic IP. Loaded means its busiest CPU was
-  busy at least 85% of the round, or its network devices dropped at least
-  100 packets on receive. If some handshakes complete and some don't, the
-  path is congested, not broken, and the round doesn't count as a path
-  failure. If none or all complete, or the owner isn't loaded, as with a
-  fault on an idle host, it counts as before. NATs log `the health probe
-  failed, but the path is alive`, and their reports show `congested`. A
-  fault on a loaded owner can also count as congested. So once an owner has
-  served for 10 minutes with at least half of its health rounds in the last
-  10 minutes congested or failed, it hands over to a standby that has proven
-  its own path, and logs `handing over because at least half of this NAT's
-  health rounds in the last congestion_handover_minutes were congested or
-  failed`. A NAT that takes over must serve 10 minutes first, so a flood
-  moves the pair at most once every 10 minutes, and bursts that leave most
-  rounds healthy never move it. The Terraform module's
-  `congestion_handover_minutes`, from 1 to 60, changes the window. Releases
-  before this one reject the setting. `natpair maintenance` hands over
-  sooner. Both handovers from a congested owner go to a standby that has
-  proven its own path, without waiting for it to verify its copied
-  connections, so connections it hasn't copied may reset. Upgrades still
-  wait for a ready standby. A loaded NAT taking over whose upload through
-  the shared Elastic IP times out runs the same check, and opens forwarding
-  if the path is congested, instead of retrying until the takeover times out
-  with no NAT forwarding. It logs `the upload through the shared Elastic IP
-  timed out, but the path is alive`.
+  times a minute, pausing forwarding for about 10 s each time. When a loaded
+  owner's upload times out, it now tries 40 TCP handshakes through the shared
+  Elastic IP, and if some but not all complete, the path is congested and the
+  round doesn't count as a path failure. A NAT taking over opens forwarding by
+  the same check. So that a fault on a loaded owner can't hold it, an owner
+  hands over to a standby that has proven its own path once it has served 10
+  minutes with at least half of its health rounds congested or failed, and a
+  new owner must serve 10 minutes first. NATs log `the health probe failed,
+  but the path is alive` and `handing over because at least half of this
+  NAT's health rounds in the last 10 minutes were congested or failed`.
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
   second. The NAT may then give a closed connection's address and port to a

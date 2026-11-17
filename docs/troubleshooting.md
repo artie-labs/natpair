@@ -154,14 +154,10 @@ associated with the shared ENI.
 
 ### `the upload through the shared Elastic IP timed out, but the path is alive`
 
-The full message ends with `so forwarding is congested and the path counts
-as verified`. During a takeover, the new owner's upload through the shared
-Elastic IP timed out, but the `handshakes` field's count of 40 TCP
-handshakes with the probe receiver completed. The path works but loses
-packets, usually because of a flood that follows the shared Elastic IP, so
-the new owner opened forwarding instead of retrying until its takeover
-timed out. Its health rounds then likely show
-[`the health probe failed, but the path is alive`](#the-health-probe-failed-but-the-path-is-alive).
+During a takeover, the new owner's upload through the shared Elastic IP
+timed out while it was loaded, but `handshakes` of 40 TCP handshakes
+completed. The path works but loses packets, usually under a flood, so the
+new owner opened forwarding.
 
 ### `this boot was prepared by another release, so this NAT reports none until it reboots`
 
@@ -200,67 +196,41 @@ logs this, and the `health round` line, at most once a minute.
 
 ### `the health probe failed, but the path is alive`
 
-The full message ends with `so forwarding is congested and it doesn't count
-as a path failure`. The owner's upload timed out while it was loaded, and
-of the 40 TCP handshakes it then tried with the probe receiver through the
-shared Elastic IP, the `handshakes` field's count completed and the rest
-were lost. The path works but loses packets, usually because more traffic
-arrives than the NAT can forward, so the owner keeps serving: the standby
-would get the same traffic. Its `health round` lines show
-`"congested":true`, with `busiest_cpu_percent`, the busiest CPU's busy
-share over the round, and `rx_drops`, the packets its network devices
-dropped on receive. It counts as loaded at 85% or 100 drops. Check the
-NAT's CPU with `top` (high `si` means the kernel is busy forwarding) and
-its [network limits](#the-nat-is-too-small). If the loss looks like the
-owner's own, such as a fault in its host, run `sudo natpair maintenance`
-on it to hand over. While the owner is congested, it hands
-over to a standby that has proven its own path, without waiting for the
-standby to verify its copied connections, and logs `handing over to a peer
-that hasn't verified its copied connections`. Connections the standby
-hasn't copied may reset. natpair logs this, and the `health round` line, at
-most once a minute. The `window_bad_rounds` field says how many of the
-`window_rounds` health rounds over the last `congestion_handover_minutes`,
-10 by default, were congested or failed. Once the owner has served for the
-whole window and that's at least half, it hands over by itself, as in the
-next section.
+The owner's upload timed out while it was loaded, but `handshakes` of 40
+TCP handshakes completed, so its path is congested, not broken, and it
+keeps serving. This usually means more traffic than the NAT can forward:
+see [the NAT is too small](#the-nat-is-too-small). Loaded means
+`busiest_cpu_percent` of at least 85 or `rx_drops` of at least 100 over
+the round. `window_bad_rounds` of `window_rounds` counts the congested or
+failed rounds in the last 10 minutes. `natpair maintenance` waits for a
+ready standby, and the standby can't show it copied the owner's
+connections while no upload passes, so the owner may hand over by itself
+first, as in the next entry. natpair logs this at most once a minute.
 
-### `handing over because at least half of this NAT's health rounds in the last congestion_handover_minutes were congested or failed`
+### `handing over because at least half of this NAT's health rounds in the last 10 minutes were congested or failed`
 
-The full message ends with `so connections the peer hasn't copied may
-reset`. The owner's path was congested, as in
-[`the health probe failed, but the path is alive`](#the-health-probe-failed-but-the-path-is-alive),
-or failed, in `window_bad_rounds` of its last `window_rounds` health
-rounds, at least half, so it handed over to a standby that has proven its
-own path. The handover doesn't wait for the standby to verify its copied
-connections, so connections it hadn't copied may have reset.
-
-If the new owner serves without trouble, the loss was likely the old
-owner's own, such as a fault in its host. Replace that NAT, as in
-[Replace a NAT](operations.md#replace-a-nat). If the new owner logs `the
-health probe failed, but the path is alive` too, more traffic arrives than
-either NAT can forward, and the pair moves again at most once per window. See
-[more packets than the CPU can forward](#the-nat-is-too-small).
-
-If the standby can't take over, because it hasn't proven its own path or is
-in maintenance or cooldown, the owner keeps serving and keeps logging `the
-health probe failed, but the path is alive`.
+The owner served for 10 minutes with at least half of its rounds congested
+or failed, so it handed over to a standby that has proven its own path.
+Connections the standby hadn't copied may have reset. If the new owner
+serves without trouble, the old owner's host was likely at fault, so
+[replace it](operations.md#replace-a-nat). If the new owner logs `the
+health probe failed, but the path is alive` too, the pair gets more
+traffic than either NAT can forward, and moves at most once every 10
+minutes.
 
 ### `failed to read this NAT's load, so the failed probe counts`
 
-After an upload timed out, the owner couldn't read its CPU times from
-`/proc/stat` or its network devices' statistics from `/sys/class/net`. The
-`err` field says which. Without them it can't tell load from a fault, so
-the failed round counts toward stepping down, as for an idle NAT. natpair
-logs this at most once a minute.
+After an upload timed out, the owner couldn't read `/proc/stat` or
+`/sys/class/net`, so it can't tell load from a fault, and the round counts
+toward stepping down. The `err` field says which. natpair logs this at most
+once a minute.
 
 ### `failed to check whether the path is alive, so the failed probe counts`
 
-After an upload timed out, the owner couldn't check its path: it couldn't
-resolve the probe receiver's address, or a handshake failed other than by
-running out of time, such as a refused connection or one the NAT couldn't
-start. The `err` field says which. The failed round counts toward stepping
-down, as it would without the check. natpair logs this at most once a
-minute.
+After an upload timed out, the handshake check couldn't run or a handshake
+failed other than by running out of time, such as a refused connection.
+The `err` field says why. The round counts toward stepping down. natpair
+logs this at most once a minute.
 
 ### `failed to read the connection table, so a full table can't be told from a path failure`
 
