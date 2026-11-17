@@ -44,6 +44,8 @@ type fixture struct {
 	arriving               bool
 	// portsUsed is the busiest destination's share of the shared ports.
 	portsUsed float64
+	// statsErr, if set, is what reading the stats fails with.
+	statsErr error
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -56,6 +58,9 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f.prober.UploadReturns(probe.Flow{}, nil)
 	f.conntrack.StatsCalls(func(context.Context) (string, error) {
+		if f.statsErr != nil {
+			return "", f.statsErr
+		}
 		if f.arriving {
 			f.added++
 		}
@@ -346,6 +351,19 @@ func TestRoundCopiedShare(t *testing.T) {
 		assert.False(t, f.rounds(t, 1).Ready)
 	}
 	{
+		// While a copy is short, passes over it still count, so it isn't read
+		// again every 15 s, and the standby is ready in the round its copy
+		// reaches 95%.
+		idle := conntrackd.Tuple{Src: netip.MustParseAddr("172.31.94.10"), Dst: netip.MustParseAddr("192.0.2.3"), SrcPort: 40002, DstPort: 5432}
+		f := standby(t, 70000)
+		f.peer.Oldest = []conntrackd.Tuple{idle}
+		f.conntrack.CopiedReturns(map[conntrackd.Tuple]bool{idle: true}, nil)
+		assert.False(t, f.rounds(t, 12).Ready)
+		assert.Equal(t, 1, f.conntrack.CopiedCallCount())
+		f.copied = 96000
+		assert.True(t, f.rounds(t, 1).Ready)
+	}
+	{
 		// Without its own counts, a standby can't show its copy is complete
 		f := standby(t, 96000)
 		f.conntrack.StatsReturns("cache internal:\ncurrent active connections: 3\n", nil)
@@ -353,6 +371,41 @@ func TestRoundCopiedShare(t *testing.T) {
 		// Nor does it ask for a full copy over stats it couldn't read
 		f.rounds(t, 20)
 		assert.Zero(t, f.conntrack.RequestResyncCallCount())
+	}
+	{
+		// Nor without the owner's count. An owner whose conntrackd didn't
+		// answer reports 0 connections, which any copy would cover.
+		f := standby(t, 40)
+		f.peer.TrackedConnections, f.peer.TrackedUnknown = 0, true
+		assert.False(t, f.rounds(t, 2).Ready)
+		f.rounds(t, 20)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
+	}
+	{
+		// One round whose counts can't be read, such as a slow conntrackd -s
+		// while a large copy arrives, doesn't undo a good copy. The standby
+		// stays ready for replicationRounds, as after any failed check.
+		f := standby(t, 96000)
+		require.True(t, f.rounds(t, 2).Ready)
+		f.statsErr = errors.New("timed out")
+		report := f.rounds(t, 1)
+		assert.True(t, report.Ready)
+		// Its report says its own count is unknown, not 0
+		assert.True(t, report.TrackedUnknown)
+		f.statsErr = nil
+		assert.False(t, f.rounds(t, 1).TrackedUnknown)
+	}
+	{
+		// Rounds whose counts can't be read don't restart the 30 s a short
+		// copy waits before asking for a full copy again.
+		f := standby(t, 70000)
+		for range 4 {
+			f.rounds(t, 1)
+			f.statsErr = errors.New("timed out")
+			f.rounds(t, 1)
+			f.statsErr = nil
+		}
+		assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
 	}
 	{
 		// An owner's copy is of the standby's table, which still counts the
@@ -401,6 +454,9 @@ func TestRoundOldest(t *testing.T) {
 		f.conntrack.OldestReturns(nil, errors.New("conntrackd -i timed out"))
 		assert.Equal(t, oldest, f.rounds(t, 60).Oldest)
 		assert.Equal(t, 2, f.conntrack.OldestCallCount())
+		// but not after a second failure. A connection on a kept list may have
+		// closed, and the peer would wait for its copy forever.
+		assert.Empty(t, f.rounds(t, 60).Oldest)
 	}
 	{
 		// A round doesn't wait for a pass, however long conntrackd takes to

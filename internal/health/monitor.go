@@ -115,6 +115,10 @@ type Report struct {
 	// TrackedConnections is the number of connections conntrackd tracks on
 	// this NAT, which the peer should hold copies of.
 	TrackedConnections int `json:"tracked_connections"`
+	// TrackedUnknown means this NAT couldn't read conntrackd's counts this
+	// round, so TrackedConnections is 0 rather than a count. Releases before
+	// it never set it.
+	TrackedUnknown bool `json:"tracked_unknown,omitempty"`
 	// Oldest are the established connections conntrackd has held longest on
 	// this NAT, read every oldestInterval. The peer must hold copies of all of
 	// them before it counts as ready.
@@ -396,23 +400,30 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// Only a standby's copy is what a takeover would install. The
 		// owner's copy is of the standby's table, and the NAT that just
 		// stepped down still counts its old table until its flush 60 s
-		// later.
-		enough := serving || (copied*100 >= peer.TrackedConnections*copiedPercent ||
-			peer.TrackedConnections-copied <= copiedSlack)
+		// later. The owner's count must have been read too: an owner whose
+		// conntrackd didn't answer reports 0, which any copy would cover.
+		covers := copied*100 >= peer.TrackedConnections*copiedPercent ||
+			peer.TrackedConnections-copied <= copiedSlack
+		shortfall := !serving && !peer.TrackedUnknown && !covers
+		enough := serving || (!peer.TrackedUnknown && covers)
 		complete := oldestCopied == len(peer.Oldest) && enough
-		// A copy known to be short isn't ready, even within
+		// A copy measured short isn't ready, even within
 		// replicationRounds of the last good one, such as just after this
-		// NAT's conntrackd restarted empty. It may have lost the peer's
-		// oldest connections too, so they're checked again.
-		if !enough {
+		// NAT's conntrackd restarted empty. An unknown count only fails this
+		// round's check. What passes found about the peer's oldest
+		// connections still counts: a copy that lost part of a burst keeps
+		// the entries it got, and noteCopies forgets them when the copy is
+		// emptied.
+		if shortfall {
 			m.replicated = false
-			m.scans.forget()
 		}
-		if !serving && !enough {
+		// Only measured rounds start or end the time a copy has been short.
+		switch {
+		case shortfall:
 			if !m.shortRun {
 				m.shortSince, m.shortRun = now, true
 			}
-		} else {
+		case enough:
 			m.shortRun = false
 		}
 		// A standby with an incomplete copy asks for a full one, for example
@@ -453,6 +464,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		PathHealthy:            healthy,
 		ConsecutiveFailures:    m.failures,
 		TrackedConnections:     tracked,
+		TrackedUnknown:         !counted,
 		Oldest:                 oldest,
 		CanForward:             canForward,
 		CanForwardUnverified:   !canForward,
@@ -542,11 +554,13 @@ type scanner struct {
 
 	mu      sync.Mutex
 	running bool
-	// oldest are this NAT's oldest connections, read by a pass that started
-	// at oldestAt, if oldestRead.
-	oldest     []conntrackd.Tuple
-	oldestAt   time.Duration
-	oldestRead bool
+	// oldest are this NAT's oldest connections, read by the latest pass that
+	// read them, and oldestFailed counts the failed passes since. The latest
+	// pass started at oldestAt, if oldestRead.
+	oldest       []conntrackd.Tuple
+	oldestFailed int
+	oldestAt     time.Duration
+	oldestRead   bool
 	// copiesAt is when the latest pass over this NAT's copies started, if
 	// copiesRead.
 	copiesAt   time.Duration
@@ -597,15 +611,18 @@ func (s *scanner) start(ctx context.Context, now time.Duration, peerOldest []con
 		defer s.done.Done()
 		if readOldest {
 			// A failed pass keeps the previous list: what it read may cover
-			// only part of the table.
+			// only part of the table. results drops a list kept too long.
 			oldest, err := s.conntrack.Oldest(ctx, oldestCount)
 			if err != nil {
 				slog.Warn("failed to read this NAT's oldest connections from conntrackd", slog.Any("err", err))
-			} else {
-				s.mu.Lock()
-				s.oldest = oldest
-				s.mu.Unlock()
 			}
+			s.mu.Lock()
+			if err != nil {
+				s.oldestFailed++
+			} else {
+				s.oldest, s.oldestFailed = oldest, 0
+			}
+			s.mu.Unlock()
 		}
 		var found map[conntrackd.Tuple]bool
 		var err error
@@ -665,7 +682,14 @@ func (s *scanner) results(peerOldest []conntrackd.Tuple, current bool, now time.
 			lost = true
 		}
 	}
-	return s.oldest, copied, lost
+	// A list kept through a failed pass is dropped once a second one fails. A
+	// connection on it may have closed since, and the peer would never find
+	// its copy, so it would never be ready.
+	oldest := s.oldest
+	if s.oldestFailed >= 2 {
+		oldest = nil
+	}
+	return oldest, copied, lost
 }
 
 // rereadOldest makes the next pass read this NAT's oldest connections.
