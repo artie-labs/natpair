@@ -457,6 +457,8 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// stepped down still counts its old table until its flush 60 s
 		// later. The owner's count must have been read too: an owner whose
 		// conntrackd didn't answer reports 0, which any copy would cover.
+		// Releases before TrackedUnknown don't say so, and their 0 is
+		// trusted as before.
 		covers := copied*100 >= peer.TrackedConnections*copiedPercent ||
 			peer.TrackedConnections-copied <= copiedSlack
 		shortfall := !serving && !peer.TrackedUnknown && !covers
