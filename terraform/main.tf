@@ -32,10 +32,6 @@ data "aws_ami" "al2023" {
   }
 }
 
-data "aws_ec2_instance_type" "nat" {
-  instance_type = var.instance_type
-}
-
 locals {
   peer = { a = "b", b = "a" }
   # Every CIDR of the VPC unless the caller narrows it, so a new private subnet
@@ -306,15 +302,6 @@ resource "aws_instance" "nat" {
     # Changing the root volume replaces the NAT, so existing NATs keep theirs
     # until they're replaced on purpose.
     ignore_changes = [ami, user_data, source_dest_check, root_block_device]
-
-    # With 1 vCPU, forwarding a flood starves the NAT's own work. On AWS,
-    # small-packet UDP floods through a c7gn.medium pair made it hand the
-    # shared ENI back and forth, and a c7gn.medium owner flooded at 1M packets
-    # a second on its own address lost its lease.
-    precondition {
-      condition     = data.aws_ec2_instance_type.nat.default_vcpus >= 2
-      error_message = "instance_type ${var.instance_type} has ${data.aws_ec2_instance_type.nat.default_vcpus} vCPU, and natpair needs at least 2. Use c7g.large, c7gn.large or a larger arm64 type. Changing it on a running pair in one apply stops both NATs, so move one NAT at a time, the standby first: https://github.com/artie-labs/natpair/blob/master/docs/operations.md#move-off-a-1-vcpu-instance-type"
-    }
   }
 }
 

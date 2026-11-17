@@ -7,18 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- The module needs an instance type with at least 2 vCPUs, and its plan fails
-  for 1-vCPU types such as c7g.medium and c7gn.medium. With 1 vCPU, a flood of
-  forwarded traffic starves the NAT's own work. On AWS, small-packet UDP
-  floods through a c7gn.medium pair made it hand the shared ENI back and
-  forth, and a c7gn.medium owner flooded at 1M packets a second on its own
-  address lost its lease. Before you upgrade a pair on a 1-vCPU type,
-  [move it to c7g.large or c7gn.large](docs/operations.md#move-off-a-1-vcpu-instance-type).
-  The plan reads the instance type's vCPU count from EC2, so whoever runs it
-  needs `ec2:DescribeInstanceTypes`, for every pair whatever its type.
-
 ### Fixed
 
 - On a fresh apply, the NATs' SSM agent never came online and the Datadog

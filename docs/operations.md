@@ -12,7 +12,6 @@ match yours.
 - [Take a NAT out of service](#take-a-nat-out-of-service)
 - [Upgrade](#upgrade)
 - [Replace a NAT](#replace-a-nat)
-- [Move off a 1-vCPU instance type](#move-off-a-1-vcpu-instance-type)
 - [Monitoring](#monitoring)
 - [Download releases from your own S3 bucket](#download-releases-from-your-own-s3-bucket)
 - [Remove a pair](#remove-a-pair)
@@ -221,37 +220,6 @@ Do the standby first, then hand over, then do the other NAT and run
 
 Changing only tags updates the NATs in place without a restart, so it's safe
 to apply to both at once.
-
-## Move off a 1-vCPU instance type
-
-Each NAT needs at least 2 vCPUs. With 1, a flood of forwarded traffic starves
-the NAT's own work, and the owner can lose its lease. The module's plan fails
-for a 1-vCPU type such as c7g.medium or c7gn.medium. Move such a pair to
-c7g.large or c7gn.large with the module version it runs now, then
-[upgrade](#upgrade).
-
-Resizing with a stop and start, as in [Replace a NAT](#replace-a-nat), also
-works. Replacing gives each NAT a fresh first boot with the module's current
-image and boot script, and a replaced NAT needs no `natpair resume`.
-
-1. Set `instance_type` to the new type, such as `"c7gn.large"`.
-2. [Find the owner](#find-the-owner). The other NAT is the standby. Say it's
-   `b`.
-3. Replace the standby:
-
-   ```sh
-   terraform apply \
-     -target='module.natpair.aws_instance.nat["b"]' \
-     -replace='module.natpair.aws_instance.nat["b"]'
-   ```
-
-   Without `-target`, the same apply would also stop the owner to resize it.
-   Check that the plan replaces only that NAT.
-4. Wait until the new NAT logs a health round with `"ready":true`.
-5. Hand over from the owner, as in steps 1 and 2 of
-   [Take a NAT out of service](#take-a-nat-out-of-service).
-6. Replace the old owner the same way, with `nat["a"]` in both flags.
-7. Run `terraform apply`. The plan must not change `aws_instance.nat`.
 
 ## Monitoring
 

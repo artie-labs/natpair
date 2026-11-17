@@ -4,7 +4,7 @@ Deploys a natpair pair into an existing VPC and sets the optional inputs:
 
 - an existing Elastic IP as the shared address, so the address stays the same
   if you replace the pair
-- `max_connections` sized for more traffic, and `instance_type` as a variable
+- `instance_type` and `max_connections` sized for more traffic
 - a Secrets Manager secret holding a Datadog API key, so each NAT installs the
   Datadog agent
 

@@ -32,7 +32,7 @@ body:
     id: instance-type
     attributes:
       label: Instance type
-      placeholder: c7gn.large
+      placeholder: c7gn.medium
     validations:
       required: true
   - type: textarea

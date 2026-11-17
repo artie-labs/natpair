@@ -64,7 +64,7 @@ module "natpair" {
   public_route_table_id    = var.public_route_table_id
   shared_eip_allocation_id = aws_eip.shared.allocation_id
 
-  instance_type = "c7gn.large"
+  instance_type = "c7gn.medium"
 
   release        = var.release
   release_sha256 = var.release_sha256
