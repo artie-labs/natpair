@@ -42,7 +42,7 @@ variable "worker_cidrs" {
 }
 
 variable "instance_type" {
-  description = "Arm64 instance type for both NATs. Either NAT must carry the pair's full load. Changing it stops and starts each NAT, so change one NAT per apply, the standby first."
+  description = "Arm64 instance type for both NATs, with at least 2 vCPUs, such as c7g.large or c7gn.large. The plan fails for 1-vCPU types, because forwarding a flood on 1 vCPU starves the NAT's own work. Either NAT must carry the pair's full load. Changing it stops and starts each NAT, so change one NAT per apply, the standby first."
   type        = string
 }
 

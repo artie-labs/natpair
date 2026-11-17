@@ -20,15 +20,15 @@ the module's inputs, so read the [changelog](CHANGELOG.md) before you upgrade.
 
 Use natpair if:
 
-- your private subnets send more than about 850 GB a month to the internet,
+- your private subnets send more than about 2 TB a month to the internet,
   so NAT Gateway's $0.045 per GB adds up,
 - you need failover without a person in the loop, and
 - you can run two EC2 instances and read their logs when something goes wrong.
 
 Use NAT Gateway instead if:
 
-- your traffic is under about 850 GB a month, or under 1.7 TB if you need
-  the larger instances (see [Cost](#cost)),
+- your traffic is under about 2 TB a month, or under 3.7 TB if you need
+  the faster c7gn instances (see [Cost](#cost)),
 - you need IPv6 egress, or UDP connections that survive a failover, or
 - you don't want to run instances at all.
 
@@ -41,21 +41,26 @@ the [EC2](https://aws.amazon.com/ec2/pricing/on-demand/),
 [DynamoDB](https://aws.amazon.com/dynamodb/pricing/on-demand/) pricing pages
 for yours.
 
-| | natpair, 2 × c7g.medium | natpair, 2 × c7gn.medium | NAT Gateway |
+| | natpair, 2 × c7g.large | natpair, 2 × c7gn.large | NAT Gateway |
 | --- | ---: | ---: | ---: |
-| Instances or gateway hours | $53.00 | $91.10 | $32.85 |
+| Instances or gateway hours | $105.85 | $182.21 | $32.85 |
 | Public IPv4 addresses | $10.95 (3) | $10.95 (3) | $3.65 (1) |
 | EBS, 2 × 8 GB gp3 | $1.28 | $1.28 | |
 | DynamoDB lease table | about $9 | about $9 | |
 | Lambda probe receiver | under $1 | under $1 | |
-| **Fixed total** | **about $75** | **about $113** | **$36.50** |
+| **Fixed total** | **about $128** | **about $204** | **$36.50** |
 | Per GB processed | $0 | $0 | $0.045 |
-| **Cheaper than NAT Gateway above** | about 850 GB | about 1.7 TB | |
+| **Cheaper than NAT Gateway above** | about 2 TB | about 3.7 TB | |
 
 Data transfer out to the internet costs the same either way and isn't
 included. The DynamoDB figure is measured on a running pair. Like a NAT
 Gateway, a pair lives in one availability zone, so workers in other zones pay
 AWS's cross-zone data charge, $0.01 per GB in each direction, to use it.
+
+natpair needs at least 2 vCPUs, so the module rejects 1-vCPU types such as
+c7g.medium. With 1 vCPU, a flood of forwarded traffic starves the NAT's own
+work. The owner can lose its lease, or the pair can hand the shared ENI back
+and forth.
 
 Pick the instance type by its baseline bandwidth. The "up to" figure is a
 burst that doesn't last. AWS also caps traffic to the internet at 5 Gbps for
@@ -66,8 +71,7 @@ you the load.
 
 | Instance type | Baseline bandwidth | Burst |
 | --- | ---: | ---: |
-| c7g.medium | 0.52 Gbps | 12.5 Gbps |
-| c7gn.medium | 3.125 Gbps | 25 Gbps |
+| c7g.large | 0.937 Gbps | 12.5 Gbps |
 | c7gn.large | 6.25 Gbps | 30 Gbps |
 
 ## How it works
@@ -176,7 +180,7 @@ instead.
      public_route_table_id    = "rtb-0123456789abcdef0"
      shared_eip_allocation_id = aws_eip.nat.allocation_id
 
-     instance_type = "c7gn.medium"
+     instance_type = "c7gn.large"
 
      release        = "v0.1.1"
      release_sha256 = "<64 hex digits from checksums.txt>"

@@ -27,7 +27,7 @@ module "natpair" {
   public_route_table_id    = "rtb-0123456789abcdef0"
   shared_eip_allocation_id = aws_eip.shared.allocation_id
 
-  instance_type = "c7gn.medium"
+  instance_type = "c7gn.large"
 
   release = "v0.1.1"
   # From checksums.txt in the v0.1.1 GitHub release, the line for
@@ -93,7 +93,7 @@ retries. They need no action.
 
 | Name | Description | Type | Default | Required |
 | --- | --- | --- | --- | :---: |
-| `instance_type` | Arm64 instance type for both NATs. Either NAT must carry the pair's full load. Changing it stops and starts each NAT, so change one NAT per apply, the standby first. | `string` | n/a | yes |
+| `instance_type` | Arm64 instance type for both NATs, with at least 2 vCPUs, such as c7g.large or c7gn.large. The plan fails for 1-vCPU types, because forwarding a flood on 1 vCPU starves the NAT's own work. Either NAT must carry the pair's full load. Changing it stops and starts each NAT, so change one NAT per apply, the standby first. | `string` | n/a | yes |
 | `name` | Name or name prefix for the pair's resources: the lease table, security group, IAM role and instance profile, Lambda function and Name tags. IAM names are global to the AWS account, so it must be unique in the account. Changing it replaces the lease table and security group, so don't change it on a running pair. | `string` | n/a | yes |
 | `pair_id` | ID for this NAT pair, unique in the AWS account. Its lease records start with it, and the natpair-pair tag that scopes each NAT's EC2 permissions carries it. Don't change it on a running pair. | `string` | n/a | yes |
 | `public_route_table_id` | Route table of the public subnet. The DynamoDB gateway endpoint is added to it. | `string` | n/a | yes |
