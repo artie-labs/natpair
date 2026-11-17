@@ -78,7 +78,9 @@ func TestBootstrap(t *testing.T) {
 		require.Equal(t, 1, fence.InstallCallCount(), "the fence must close forwarding before anything else")
 		return log.runner().Run(ctx, timeout, name, args...)
 	})
-	require.NoError(t, network.New(testConfig(t), fence, runner).Bootstrap(t.Context()))
+	cfg := testConfig(t)
+	cfg.Instance.MemoryBytes = 4 << 30
+	require.NoError(t, network.New(cfg, fence, runner).Bootstrap(t.Context()))
 	assert.Contains(t, log.commands, "ip netns add natpair-own")
 	assert.Contains(t, log.commands, "ip -n natpair-shared route replace default via 198.18.0.5")
 	// Forwarding turns on only after the canaries exist, before SNAT is installed.
@@ -98,7 +100,8 @@ func TestBootstrap(t *testing.T) {
 	require.Contains(t, log.commands, "modprobe nf_conntrack")
 	// Closed connections leave the table after 30 s instead of 120 s.
 	assert.Contains(t, log.commands[conntrackSettings], " net.netfilter.nf_conntrack_tcp_timeout_time_wait=30")
-	// The connection table matches conntrackd's limit, not the kernel's default from memory.
+	// The connection table matches conntrackd's limit, sized from the
+	// instance's 4 GiB, not the kernel's default from memory.
 	assert.Contains(t, log.commands, "sysctl -qw net.netfilter.nf_conntrack_max=524288 net.netfilter.nf_conntrack_buckets=524288")
 	// New inbound connections to the NAT itself come only from the VPC or the
 	// peer, because its security group lets the whole Internet through.
