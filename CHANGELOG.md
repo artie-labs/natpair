@@ -62,6 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connections once a minute and the copies only until it finds the owner's
   oldest connections, keeping only the few connections it looks for. It
   confirms that copies keep arriving from conntrackd's counters instead.
+- On Linux 6.5 and later, such as the Amazon Linux 2023 6.18 kernel, a NAT
+  whose forwarding filled its CPU did that forwarding inside its daemon's
+  system calls, so its lease renewals and DNS lookups timed out. The daemon
+  now turns on threaded NAPI for every ENI, so receive processing runs in
+  kernel threads that the scheduler shares with the daemon. It does this at
+  start, when the shared ENI comes up during a takeover, and every 5 s. Each
+  forwarded packet costs 4 to 7.5% more CPU below saturation. On Linux 6.1,
+  which doesn't have the problem, that cost buys nothing.
 - A full connection table cut off the NAT's own traffic: under 3,000 new
   worker connections a second, the owner's DNS lookups failed and it stepped
   down. Traffic within the NAT, its own TCP connections, its UDP with the
@@ -81,6 +89,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forwarding once its upload through the shared Elastic IP passes. Two
   failed rounds count as in a row only if at most two such rounds came
   between them.
+- An owner that got more traffic than it could forward stepped down, the NAT
+  that took over saturated and stepped down too, and the pair moved 2 to 4
+  times a minute, pausing forwarding for about 10 s each time. When a loaded
+  owner's upload times out, it now tries 40 TCP handshakes through the shared
+  Elastic IP, and if some but not all complete, the path is congested and the
+  round doesn't count as a path failure. A NAT taking over accepts a congested
+  shared path by the same check. So that a fault on a loaded owner can't hold it, an owner
+  hands over to a standby that has proven its own path once it has served 10
+  minutes with at least half of its health rounds congested or failed, and a
+  new owner must serve 10 minutes first. NATs log `the health probe failed,
+  but the path is alive` and `handing over because at least half of this
+  NAT's health rounds in the last 10 minutes were congested or failed`.
 - A closed TCP connection now leaves the connection table after 30 s instead
   of 120 s, so the same table holds 4 times as many new connections a
   second. The NAT may then give a closed connection's address and port to a
