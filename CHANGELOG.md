@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address lost its lease. Before you upgrade a pair on a 1-vCPU type,
   [move it to c7g.large or c7gn.large](docs/operations.md#move-off-a-1-vcpu-instance-type).
   The plan reads the instance type's vCPU count from EC2, so whoever runs it
-  needs `ec2:DescribeInstanceTypes`.
+  needs `ec2:DescribeInstanceTypes`, for every pair whatever its type.
 
 ### Fixed
 

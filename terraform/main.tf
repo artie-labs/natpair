@@ -313,7 +313,7 @@ resource "aws_instance" "nat" {
     # a second on its own address lost its lease.
     precondition {
       condition     = data.aws_ec2_instance_type.nat.default_vcpus >= 2
-      error_message = "instance_type ${var.instance_type} has ${data.aws_ec2_instance_type.nat.default_vcpus} vCPU, and natpair needs at least 2. Use c7g.large, c7gn.large or a larger arm64 type."
+      error_message = "instance_type ${var.instance_type} has ${data.aws_ec2_instance_type.nat.default_vcpus} vCPU, and natpair needs at least 2. Use c7g.large, c7gn.large or a larger arm64 type. Changing it on a running pair in one apply stops both NATs, so move one NAT at a time, the standby first: https://github.com/artie-labs/natpair/blob/master/docs/operations.md#move-off-a-1-vcpu-instance-type"
     }
   }
 }

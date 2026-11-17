@@ -230,6 +230,10 @@ for a 1-vCPU type such as c7g.medium or c7gn.medium. Move such a pair to
 c7g.large or c7gn.large with the module version it runs now, then
 [upgrade](#upgrade).
 
+Resizing with a stop and start, as in [Replace a NAT](#replace-a-nat), also
+works. Replacing gives each NAT a fresh first boot with the module's current
+image and boot script, and a replaced NAT needs no `natpair resume`.
+
 1. Set `instance_type` to the new type, such as `"c7gn.large"`.
 2. [Find the owner](#find-the-owner). The other NAT is the standby. Say it's
    `b`.
