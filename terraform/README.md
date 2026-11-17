@@ -28,6 +28,8 @@ module "natpair" {
   shared_eip_allocation_id = aws_eip.shared.allocation_id
 
   instance_type = "c7gn.medium"
+  # A c7gn.medium has 2 GiB, too little for the default 524,288 connections.
+  max_connections = 262144
 
   release = "v0.1.1"
   # From checksums.txt in the v0.1.1 GitHub release, the line for

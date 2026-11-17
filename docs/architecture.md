@@ -91,7 +91,8 @@ is up.
   as many connections as the owner tracks, or all but 100 in a small table.
   The oldest connections are a sample, and a copy that lost part of the
   table usually still holds them, so the count catches what the sample
-  misses. A copy that falls short asks the owner for a full copy again.
+  misses. A copy missing an oldest connection for 70 s, or short of the
+  count for 30 s, asks the owner for a full copy again.
 - Finding the oldest connections, and looking for them among the copies,
   has conntrackd write a whole cache, which takes seconds for a large
   table. natpair does it outside the health rounds, reads its oldest

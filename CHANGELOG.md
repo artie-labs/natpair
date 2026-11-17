@@ -38,8 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conntrackd's socket buffers now hold a full copy, and it keeps every update
   until the standby acknowledges it, so it can resend the lost ones. A standby
   now counts as ready only when its copy holds at least 95% as many
-  connections as the owner tracks. One that falls short asks for a full copy
-  again, and planned maintenance and upgrades wait for it.
+  connections as the owner tracks. One that stays short for 30 s asks for a
+  full copy again, and planned maintenance and upgrades wait for it. In the
+  first upgrade to this release, the upgraded standby copies from an owner
+  still on the old settings, so its first copy may come up short. Each
+  repeated copy fills more of the gaps.
 - From about 800,000 connections, natpair's checks of the standby's copy ran
   past their 2 s limit, so the standby never became ready and planned
   maintenance and upgrades never handed over. Every health round also read

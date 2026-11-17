@@ -91,10 +91,6 @@ const (
 	// connection that closed stays in the peer's reports until the peer reads
 	// its oldest connections again, up to oldestInterval later.
 	missingFor = oldestInterval + 2*StandbyInterval
-	// incompleteRounds is how many rounds in a row a copy must hold too few of
-	// the peer's connections before this NAT asks for a full copy. One round
-	// can compare with a count from before many connections closed.
-	incompleteRounds = 2
 	// resyncInterval is the shortest time between requests for a full copy, so
 	// a large copy still on its way isn't requested again.
 	resyncInterval = 30 * BaseInterval
@@ -243,9 +239,10 @@ type Monitor struct {
 	flows           []timedFlow
 	lastReplication time.Duration
 	replicated      bool
-	// short counts rounds in a row whose copy held too few of the peer's
-	// connections.
-	short      int
+	// shortSince is when this NAT's copy started holding too few of the
+	// peer's connections, if shortRun.
+	shortSince time.Duration
+	shortRun   bool
 	lastResync time.Duration
 	resynced   bool
 	// copiesAdded is conntrackd's latest count of copies it added, if
@@ -391,7 +388,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	} else {
 		m.scans.start(ctx, now, nil)
 	}
-	oldest, oldestCopied, oldestLost := m.scans.results(peer.Oldest, now)
+	oldest, oldestCopied, oldestLost := m.scans.results(peer.Oldest, peerOK, now)
 
 	verified := false
 	// A running control socket alone does not prove state was copied.
@@ -411,10 +408,12 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			m.replicated = false
 			m.scans.forget()
 		}
-		if enough {
-			m.short = 0
+		if !serving && !enough {
+			if !m.shortRun {
+				m.shortSince, m.shortRun = now, true
+			}
 		} else {
-			m.short++
+			m.shortRun = false
 		}
 		// A standby with an incomplete copy asks for a full one, for example
 		// after its conntrackd restarted while the peer was down, so its
@@ -422,8 +421,11 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// takeover, the full copy would hold the former owner's old entries,
 		// and the former owner's scheduled flush removes them without telling
 		// the owner. On AWS, 80,000 of these copies stayed and inflated the
-		// copied count after the next handover.
-		incomplete := m.short >= incompleteRounds || oldestLost
+		// copied count after the next handover. A full copy of a large table
+		// takes seconds to arrive, such as conntrackd's own request when it
+		// starts, so a short copy asks again only once it has stayed short
+		// for resyncInterval.
+		incomplete := (m.shortRun && now-m.shortSince >= resyncInterval) || oldestLost
 		if !serving && incomplete && (!m.resynced || now-m.lastResync >= resyncInterval) {
 			slog.Warn("copied connections are incomplete, requesting a full copy from the peer",
 				slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
@@ -500,11 +502,12 @@ func (m *Monitor) Round(ctx context.Context) Report {
 // noteCopies records when conntrackd last added a copy, and forgets which of
 // the peer's oldest connections this NAT's copy held when the copy may have
 // been emptied since: conntrackd restarted, which starts its count over, or
-// this NAT took over or stepped down, which flush the copies.
+// this NAT took over or stepped down, which flush the copies. The count is 32
+// bits, so it also starts over after about 4 billion copies, which costs one
+// extra pass.
 // This NAT isn't ready again until it has checked the new copy.
 func (m *Monitor) noteCopies(now time.Duration, serving bool, stats conntrackd.Stats, counted bool) {
 	emptied := m.servedBefore && serving != m.wasServing
-	m.wasServing, m.servedBefore = serving, true
 	if counted {
 		if m.addedRead && stats.CopiesAdded != m.copiesAdded {
 			emptied = emptied || stats.CopiesAdded < m.copiesAdded
@@ -516,6 +519,14 @@ func (m *Monitor) noteCopies(now time.Duration, serving bool, stats conntrackd.S
 		m.scans.forget()
 		m.replicated = false
 	}
+	// The oldest connections read in the other role belong to the wrong
+	// table: a standby's are its own few connections, not the ones it now
+	// forwards. Read them again at once, so the peer doesn't check against
+	// them for up to oldestInterval.
+	if m.servedBefore && serving != m.wasServing {
+		m.scans.rereadOldest()
+	}
+	m.wasServing, m.servedBefore = serving, true
 }
 
 // scanner reads conntrackd's caches outside the health rounds, one pass at
@@ -585,13 +596,16 @@ func (s *scanner) start(ctx context.Context, now time.Duration, peerOldest []con
 	go func() {
 		defer s.done.Done()
 		if readOldest {
+			// A failed pass keeps the previous list: what it read may cover
+			// only part of the table.
 			oldest, err := s.conntrack.Oldest(ctx, oldestCount)
 			if err != nil {
 				slog.Warn("failed to read this NAT's oldest connections from conntrackd", slog.Any("err", err))
+			} else {
+				s.mu.Lock()
+				s.oldest = oldest
+				s.mu.Unlock()
 			}
-			s.mu.Lock()
-			s.oldest = oldest
-			s.mu.Unlock()
 		}
 		var found map[conntrackd.Tuple]bool
 		var err error
@@ -625,20 +639,26 @@ func (s *scanner) start(ctx context.Context, now time.Duration, peerOldest []con
 }
 
 // results returns this NAT's oldest connections, how many of peerOldest the
-// finished passes found among its copies, and whether any of peerOldest has
-// been missing for missingFor. It forgets connections that are no longer
-// among peerOldest.
-func (s *scanner) results(peerOldest []conntrackd.Tuple, now time.Duration) ([]conntrackd.Tuple, int, bool) {
+// finished passes found among its copies within 2 confirmFor, and whether any
+// of peerOldest has been missing for missingFor. With a current peer report,
+// it forgets connections that are no longer among peerOldest. Without one,
+// it keeps them, so a failed read of the board doesn't throw away what
+// passes found.
+func (s *scanner) results(peerOldest []conntrackd.Tuple, current bool, now time.Duration) ([]conntrackd.Tuple, int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, findings := range []map[conntrackd.Tuple]time.Duration{s.confirmed, s.missing} {
-		maps.DeleteFunc(findings, func(tuple conntrackd.Tuple, _ time.Duration) bool {
-			return !slices.Contains(peerOldest, tuple)
-		})
+	if current {
+		for _, findings := range []map[conntrackd.Tuple]time.Duration{s.confirmed, s.missing} {
+			maps.DeleteFunc(findings, func(tuple conntrackd.Tuple, _ time.Duration) bool {
+				return !slices.Contains(peerOldest, tuple)
+			})
+		}
 	}
 	copied, lost := 0, false
 	for _, tuple := range peerOldest {
-		if _, ok := s.confirmed[tuple]; ok {
+		// A pass checks again after confirmFor. If passes keep failing, the
+		// finding stops counting after twice that.
+		if at, ok := s.confirmed[tuple]; ok && now-at < 2*confirmFor {
 			copied++
 		}
 		if since, ok := s.missing[tuple]; ok && now-since >= missingFor {
@@ -646,6 +666,13 @@ func (s *scanner) results(peerOldest []conntrackd.Tuple, now time.Duration) ([]c
 		}
 	}
 	return s.oldest, copied, lost
+}
+
+// rereadOldest makes the next pass read this NAT's oldest connections.
+func (s *scanner) rereadOldest() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.oldestRead = false
 }
 
 // forget drops what passes found about this NAT's copies, including a pass
