@@ -22,13 +22,16 @@ data "aws_vpc" "this" {
   id = data.aws_subnet.public.vpc_id
 }
 
+# The newest Amazon Linux 2023 image on the chosen kernel line. Without the
+# line in the name, most_recent picked whichever line AWS published last, so
+# new NATs booted 6.1, 6.12 or 6.18 depending on the day.
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["al2023-ami-2023.*-kernel-*-arm64"]
+    values = ["al2023-ami-2023.*-kernel-${var.kernel}-arm64"]
   }
 }
 
@@ -357,6 +360,22 @@ resource "aws_instance" "nat" {
     # Changing the root volume replaces the NAT, so existing NATs keep theirs
     # until they're replaced on purpose.
     ignore_changes = [ami, user_data, source_dest_check, root_block_device]
+
+    # On Linux 6.5 and later, so 6.12 and 6.18, a task runs pending softirq
+    # work inline. On a saturated NAT, that makes the daemon forward packets
+    # inside its own system calls, and it times out lease renewals and DNS
+    # lookups. Releases after v0.1.1 turn on threaded NAPI, which moves that
+    # work to kernel threads. v0.1.0 and v0.1.1 are the only releases without
+    # it. A later release without it, such as a fix on the v0.1.1 line, must
+    # be added to the list. The check runs on every plan, so it also blocks
+    # rolling release back to one of them while kernel is 6.12 or 6.18. It
+    # reads kernel, not the image a running NAT booted, since ami is ignored,
+    # so docs/operations.md says to check uname -r on NATs of a pair that ran
+    # an older release.
+    precondition {
+      condition     = var.kernel == "6.1" || !contains(["v0.1.0", "v0.1.1"], var.release)
+      error_message = "kernel ${var.kernel} needs a natpair release with threaded NAPI, and ${var.release} doesn't have it. Set release to a version after v0.1.1, or set kernel = \"6.1\"."
+    }
   }
 }
 
