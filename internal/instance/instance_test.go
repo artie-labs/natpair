@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,6 +60,11 @@ func TestDiscover(t *testing.T) {
 	}
 	{
 		fakeMetadata(t, primary.HardwareAddr.String())
+		meminfo := filepath.Join(t.TempDir(), "meminfo")
+		require.NoError(t, os.WriteFile(meminfo, []byte("MemTotal:        3898756 kB\nMemFree:         3021488 kB\n"), 0o644))
+		previous := meminfoPath
+		meminfoPath = meminfo
+		defer func() { meminfoPath = previous }()
 		cfg, err := awsconfig.LoadDefaultConfig(t.Context())
 		require.NoError(t, err)
 		facts, err := Discover(t.Context(), cfg)
@@ -70,6 +76,8 @@ func TestDiscover(t *testing.T) {
 			PublicIP:  netip.MustParseAddr("192.0.2.10"),
 			Interface: primary.Name,
 			VPCCIDRs:  []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("100.64.0.0/16")},
+			// MemTotal from the meminfo file
+			MemoryBytes: 3898756 * 1024,
 		}, facts)
 	}
 	{
