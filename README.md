@@ -68,7 +68,17 @@ you the load.
 | --- | ---: | ---: |
 | c7g.medium | 0.52 Gbps | 12.5 Gbps |
 | c7gn.medium | 3.125 Gbps | 25 Gbps |
+| c7g.large | 0.937 Gbps | 12.5 Gbps |
 | c7gn.large | 6.25 Gbps | 30 Gbps |
+
+A 1-vCPU type such as c7g.medium or c7gn.medium is fine for normal load and
+is the cheapest option. Its one CPU runs both forwarding and the NAT's own
+work, such as renewing its lease. A flood of small packets beyond what one CPU
+can forward, roughly 500,000 to 600,000 64-byte packets a second, can starve
+that work and make the pair hand over again and again. If the pair must ride
+out floods, use a 2-vCPU type such as c7g.large or c7gn.large. A c7gn.large
+pair held under the same tests. To change the type of a running pair, see
+[Replace a NAT](docs/operations.md#replace-a-nat).
 
 ## How it works
 
