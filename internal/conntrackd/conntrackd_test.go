@@ -78,4 +78,11 @@ func TestWriteConfig(t *testing.T) {
 	// The NAT's own connections are not copied: loopback, its address and the shared address.
 	assert.Contains(t, string(contents), "Address Ignore {\n            IPv4_address 127.0.0.1\n            IPv6_address ::1\n            IPv4_address 10.0.1.10\n            IPv4_address 10.0.1.100\n        }")
 	assert.NotContains(t, string(contents), "Backlog", "conntrackd 1.4.6 ignores it and logs a warning")
+
+	// A small limit keeps conntrackd's default resend queue
+	require.NoError(t, WriteConfig(path, netip.MustParseAddr("10.0.1.10"), netip.MustParseAddr("10.0.1.11"), netip.MustParseAddr("10.0.1.100"), "ens5", dir, 65536))
+	contents, err = os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(contents), "ResendQueueSize 131072")
+	assert.Contains(t, string(contents), "HashLimit 65536")
 }

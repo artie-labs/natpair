@@ -71,7 +71,8 @@ const (
 	oldestInterval = StandbyInterval
 	// incompleteRounds is how many rounds in a row a copy must miss the peer's
 	// oldest connections before this NAT asks for a full copy. One round can
-	// miss a connection that closed after the peer's report.
+	// miss a connection that closed after the peer's report. A copy holding
+	// too few connections asks after resyncInterval instead.
 	incompleteRounds = 2
 	// resyncInterval is the shortest time between requests for a full copy, so
 	// a large copy still on its way isn't requested again.
@@ -213,8 +214,12 @@ type Monitor struct {
 	oldestAt        time.Duration
 	readOldest      bool
 	incomplete      int
-	lastResync      time.Duration
-	resynced        bool
+	// shortSince is when this NAT's copy started holding too few of the
+	// peer's connections, if shortRun.
+	shortSince time.Duration
+	shortRun   bool
+	lastResync time.Duration
+	resynced   bool
 	// peerFailing means the peer's latest report showed failed rounds. A
 	// standby then checks its own path at the serving interval, so the owner
 	// learns quickly whether the failure is its own.
@@ -363,8 +368,8 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			// owner's copy is of the standby's table, and the NAT that just
 			// stepped down still counts its old table until its flush 60 s
 			// later.
-			enough := serving || (counted && (copied*100 >= peer.TrackedConnections*copiedPercent ||
-				peer.TrackedConnections-copied <= copiedSlack))
+			covers := copied*100 >= peer.TrackedConnections*copiedPercent || peer.TrackedConnections-copied <= copiedSlack
+			enough := serving || (counted && covers)
 			complete := oldestCopied == len(peer.Oldest) && enough
 			// A copy known to be short isn't ready, even within
 			// replicationRounds of the last good one, such as just after this
@@ -372,10 +377,19 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			if !enough {
 				m.replicated = false
 			}
-			if complete || serving {
+			if oldestCopied == len(peer.Oldest) || serving {
 				m.incomplete = 0
 			} else {
 				m.incomplete++
+			}
+			// Only a measured shortfall counts toward asking for a full copy,
+			// not stats that failed to read.
+			if !serving && counted && !covers {
+				if !m.shortRun {
+					m.shortSince, m.shortRun = now, true
+				}
+			} else {
+				m.shortRun = false
 			}
 			// A standby with an incomplete copy asks for a full one, for example
 			// after its conntrackd restarted while the peer was down, so its
@@ -384,7 +398,11 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			// and the former owner's scheduled flush removes them without telling
 			// the owner. On AWS, 80,000 of these copies stayed and inflated the
 			// copied count after the next handover.
-			if m.incomplete >= incompleteRounds && (!m.resynced || now-m.lastResync >= resyncInterval) {
+			// A full copy of a large table takes seconds to arrive, such as
+			// conntrackd's own request when it starts, so a short copy asks
+			// again only once it has stayed short for resyncInterval.
+			short := m.shortRun && now-m.shortSince >= resyncInterval
+			if (m.incomplete >= incompleteRounds || short) && (!m.resynced || now-m.lastResync >= resyncInterval) {
 				slog.Warn("copied connections are incomplete, requesting a full copy from the peer",
 					slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
 					slog.Int("copied_connections", copied), slog.Int("peer_tracked_connections", peer.TrackedConnections))

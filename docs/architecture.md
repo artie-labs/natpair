@@ -90,8 +90,8 @@ is up.
   many connections as the owner tracks, or all but 100 in a small table.
   The oldest connections are a sample, and a copy that lost part of the
   table usually still holds them, so the count catches what the sample
-  misses. A copy that falls short for two rounds asks the owner for a full
-  copy again.
+  misses. A copy missing an oldest connection for two rounds, or short of
+  the count for 30 s, asks the owner for a full copy again.
 - Each NAT writes a short report to DynamoDB after every round, so the peer
   can see it.
 

@@ -38,9 +38,9 @@ variable "shared_eip_allocation_id" {
 }
 
 variable "instance_type" {
-  description = "Arm64 instance type for both NATs. Either NAT must carry the pair's full load."
+  description = "Arm64 instance type for both NATs. Either NAT must carry the pair's full load. 1,048,576 connections need 8 GiB."
   type        = string
-  default     = "c7gn.large"
+  default     = "c7gn.xlarge"
 }
 
 variable "max_connections" {

@@ -120,8 +120,8 @@ NAT takes over before conntrackd is back, existing connections are reset.
 ### `copied connections are incomplete, requesting a full copy from the peer`
 
 For two rounds, the standby's copy missed some of the owner's oldest
-connections, or held less than 95% as many connections as the owner tracks,
-so it asks the owner for a full copy. This fixes itself. If it repeats for
+connections, or for 30 s it held less than 95% as many connections as the
+owner tracks, so it asks the owner for a full copy. This fixes itself. If it repeats for
 more than 5 minutes, check the network between the NATs and conntrackd on
 both. `sudo conntrackd -C /var/lib/natpair/conntrackd.conf -s` on the standby
 shows the copies it received and lost.

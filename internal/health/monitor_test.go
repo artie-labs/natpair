@@ -219,10 +219,13 @@ func TestRoundCopiedShare(t *testing.T) {
 	}
 	{
 		// A copy of 70%, as after a full copy lost part of its burst, is not
-		// ready, though it holds the sampled connections. After two such
-		// rounds the standby asks for a full copy.
+		// ready, though it holds the sampled connections. Once it has stayed
+		// short for 30 s, longer than a large copy takes to arrive, the
+		// standby asks for a full copy.
 		f := standby(t, 70000)
-		assert.False(t, f.rounds(t, 2).Ready)
+		assert.False(t, f.rounds(t, 6).Ready)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
+		assert.False(t, f.rounds(t, 1).Ready)
 		assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
 	}
 	{
@@ -262,6 +265,9 @@ func TestRoundCopiedShare(t *testing.T) {
 		f := standby(t, 96000)
 		f.conntrack.StatsReturns("cache internal:\ncurrent active connections: 3\n", nil)
 		assert.False(t, f.rounds(t, 2).Ready)
+		// Nor does it ask for a full copy over stats it couldn't read
+		f.rounds(t, 20)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
 	}
 	{
 		// An owner's copy is of the standby's table, which still counts the
