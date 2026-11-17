@@ -360,6 +360,18 @@ func TestRoundReplication(t *testing.T) {
 		assert.False(t, f.rounds(t, 1).Ready)
 	}
 	{
+		// A count that moved since a read long ago doesn't show copies
+		// arriving now. After stats fail for a minute, the NAT is ready again
+		// only once the count moves between two reads.
+		f := standby(t, true)
+		require.True(t, f.rounds(t, 2).Ready)
+		f.statsErr = errors.New("timed out")
+		require.False(t, f.rounds(t, 12).Ready)
+		f.statsErr = nil
+		assert.False(t, f.rounds(t, 1).Ready)
+		assert.True(t, f.rounds(t, 1).Ready)
+	}
+	{
 		// A copy missing the peer's oldest connection, for example after this
 		// NAT's conntrackd restarted and churn alone refilled it, isn't ready,
 		// and is checked again every 15 s. After 70 s, longer than the peer
@@ -410,6 +422,18 @@ func TestRoundReplication(t *testing.T) {
 		f.serving = false
 		f.conntrack.CopiedReturns(map[conntrackd.Tuple]bool{}, nil)
 		assert.False(t, f.rounds(t, 1).Ready)
+	}
+	{
+		// Nor is a standby whose takeover failed after conntrackd flushed its
+		// caches. It never served, and the flush doesn't lower conntrackd's
+		// count of copies added, but its copy refilled without the peer's
+		// idle connection.
+		f := standby(t, true)
+		require.True(t, f.rounds(t, 2).Ready)
+		f.conntrack.FlushesReturns(1)
+		f.conntrack.CopiedReturns(map[conntrackd.Tuple]bool{}, nil)
+		assert.False(t, f.rounds(t, 1).Ready)
+		assert.False(t, f.rounds(t, 20).Ready)
 	}
 	{
 		// A board read that fails for a round keeps what passes found, so the

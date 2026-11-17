@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/artie-labs/natpair/internal/command"
@@ -201,7 +202,12 @@ func (c Client) RequestResync(ctx context.Context) error {
 // conntrackd, and every later command waits behind it.
 func (c Client) TakeOver(ctx context.Context) error {
 	for _, flag := range []string{"-c", "-f", "-R", "-B"} {
-		if _, err := c.run(ctx, takeoverStepTimeout, flag); err != nil {
+		_, err := c.run(ctx, takeoverStepTimeout, flag)
+		// A flush that failed may still have emptied the caches.
+		if flag == "-f" {
+			flushes.Add(1)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -226,11 +232,26 @@ func (c Client) ScheduleFlush(ctx context.Context) error {
 // would commit them as dead connections.
 func (c Client) StepDown(ctx context.Context) error {
 	for _, args := range [][]string{{"-t"}, {"-f", "external"}, {"-n"}} {
-		if _, err := c.run(ctx, 2*time.Second, args...); err != nil {
+		_, err := c.run(ctx, 2*time.Second, args...)
+		// A flush that failed may still have emptied the copies.
+		if args[0] == "-f" {
+			flushes.Add(1)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// flushes counts the times TakeOver and StepDown had conntrackd flush its
+// caches. Each NAT runs one conntrackd, so one count serves every Client.
+var flushes atomic.Uint64
+
+// Flushes returns how many times TakeOver and StepDown have had conntrackd
+// flush its caches in this process.
+func (Client) Flushes() uint64 {
+	return flushes.Load()
 }
 
 func (c Client) run(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
