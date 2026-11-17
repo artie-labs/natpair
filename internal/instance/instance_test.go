@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -77,5 +79,30 @@ func TestDiscover(t *testing.T) {
 		require.NoError(t, err)
 		_, err = Discover(t.Context(), cfg)
 		assert.ErrorContains(t, err, "no network interface has the primary MAC address 02:ff:ff:ff:ff:ff")
+	}
+}
+
+func TestParseMemTotal(t *testing.T) {
+	{
+		// /proc/meminfo on a c7g.large
+		memory, err := parseMemTotal(strings.NewReader("MemTotal:        3898756 kB\nMemFree:         3021488 kB\nMemAvailable:    3412372 kB\n"))
+		require.NoError(t, err)
+		assert.Equal(t, uint64(3898756*1024), memory)
+	}
+	for _, c := range []struct{ meminfo, err string }{
+		{"MemFree:         3021488 kB\n", "no MemTotal line"},
+		{"", "no MemTotal line"},
+		{"MemTotal:        3807 MB\n", `unexpected MemTotal line "MemTotal:        3807 MB"`},
+		{"MemTotal:        3898756\n", `unexpected MemTotal line "MemTotal:        3898756"`},
+		{"MemTotal:        -1 kB\n", `unexpected MemTotal line "MemTotal:        -1 kB": strconv.ParseUint: parsing "-1": invalid syntax`},
+		{"MemTotal:        0 kB\n", "MemTotal of 0 kB is outside 262144 to 68719476736 kB"},
+		{"MemTotal:        3898756000000 kB\n", "MemTotal of 3898756000000 kB is outside 262144 to 68719476736 kB"},
+	} {
+		_, err := parseMemTotal(strings.NewReader(c.meminfo))
+		assert.EqualError(t, err, c.err, c.meminfo)
+	}
+	{
+		// A file that can't be read gives 0, which ConnectionLimit treats as unknown
+		assert.Zero(t, readMemory(filepath.Join(t.TempDir(), "missing")))
 	}
 }

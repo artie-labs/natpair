@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/artie-labs/natpair/internal/command"
@@ -103,9 +104,11 @@ General {
 // restarts or asks for it, is about 100 bytes a connection on the wire (26 MB
 // for 262,144 on AWS), sent in 1 to 3 s. With Linux's default buffer of
 // about 208 KB, the receiving NAT dropped most of that burst, and after the
-// resends its copy still lacked 13 to 31% of the table. The kernel doubles
-// the size conntrackd asks for to cover its own bookkeeping, so 64 bytes a
-// connection lets the buffer hold about the whole copy: 32 MB at 524,288.
+// resends its copy still lacked 13 to 31% of the table. conntrackd asks for
+// 64 bytes a connection, 32 MB at 524,288, which the kernel doubles to cover
+// its own bookkeeping per datagram. That held most of each burst on AWS, and
+// the resend queue covered the rest: a copy of 498,097 connections arrived
+// with 17 missing.
 // conntrackd sets its buffers with SO_RCVBUFFORCE and SO_SNDBUFFORCE, which
 // root may use past net.core.rmem_max and wmem_max, so those limits for every
 // other socket on the host stay as they are. A buffer uses memory only while
@@ -201,7 +204,12 @@ func (c Client) RequestResync(ctx context.Context) error {
 // conntrackd, and every later command waits behind it.
 func (c Client) TakeOver(ctx context.Context) error {
 	for _, flag := range []string{"-c", "-f", "-R", "-B"} {
-		if _, err := c.run(ctx, takeoverStepTimeout, flag); err != nil {
+		_, err := c.run(ctx, takeoverStepTimeout, flag)
+		// A flush that failed may still have emptied the caches.
+		if flag == "-f" {
+			flushes.Add(1)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -226,11 +234,26 @@ func (c Client) ScheduleFlush(ctx context.Context) error {
 // would commit them as dead connections.
 func (c Client) StepDown(ctx context.Context) error {
 	for _, args := range [][]string{{"-t"}, {"-f", "external"}, {"-n"}} {
-		if _, err := c.run(ctx, 2*time.Second, args...); err != nil {
+		_, err := c.run(ctx, 2*time.Second, args...)
+		// A flush that failed may still have emptied the copies.
+		if args[0] == "-f" {
+			flushes.Add(1)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// flushes counts the times TakeOver and StepDown had conntrackd flush its
+// caches. Each NAT runs one conntrackd, so one count serves every Client.
+var flushes atomic.Uint64
+
+// Flushes returns how many times TakeOver and StepDown have had conntrackd
+// flush its caches in this process.
+func (Client) Flushes() uint64 {
+	return flushes.Load()
 }
 
 func (c Client) run(ctx context.Context, timeout time.Duration, args ...string) (string, error) {

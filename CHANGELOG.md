@@ -18,17 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The default `max_connections` is 524,288, up from 262,144. Each connection
-  in the table costs the owner about 1.1 KB of memory and up to 2.3 KB after
-  a takeover, more than the 160 MB per 262,144 the docs said. 524,288
-  fits within half of a 4 GiB instance. NATs that leave `max_connections`
-  unset move to the new default when they reboot into this release, as the
-  upgrade itself does. **Before upgrading a pair whose NATs have less than
-  4 GiB, such as c7gn.medium,** set `max_connections = 262144` and replace
-  both NATs one at a time, as in
-  [Replace a NAT](docs/operations.md#replace-a-nat), while still on the
-  release they run. NATs read the setting only when they're created. See
+- Without `max_connections`, each NAT now sizes its connection table from
+  its memory at every boot: the largest power of two whose peak use, counted
+  as 2.6 KB a connection (about 2.3 KB was measured after a takeover), fits
+  in half the memory. That's 262,144 for 2 GiB, as before, 524,288 for 4 GiB
+  and 1,048,576 for 8 GiB. A NAT that can't read its memory uses 262,144, and
+  a set `max_connections` still wins. The docs said a connection cost about
+  a third of what it does. Rolling back to an earlier release puts NATs with
+  more memory back on
+  262,144, so roll back only while the owner holds fewer connections than
+  that. A handover to the earlier release resets the rest. See
   [Size the connection table](docs/operations.md#size-the-connection-table).
+- The complete example's default `instance_type` is c7gn.xlarge, up from
+  c7gn.large, because its 1,048,576 connections need 8 GiB. Applying it
+  stops and starts both NATs, so change one NAT at a time, as in
+  [Replace a NAT](docs/operations.md#replace-a-nat).
 - The kernel's connection table and conntrackd's caches have one hash bucket
   per connection, up from a quarter, so lookups in a full table stay short.
   This costs about 15 MB more at 524,288.

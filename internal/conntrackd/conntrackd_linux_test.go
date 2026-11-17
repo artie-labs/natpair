@@ -79,14 +79,20 @@ func TestHandover(t *testing.T) {
 	{
 		// After B takes over, A holds copies of the connections B committed without asking for them.
 		assert.NotContains(t, a.copies(t), "sport=1000 ")
+		flushed := b.client.Flushes()
 		require.NoError(t, b.client.TakeOver(t.Context()))
+		// A takeover flushes both caches, which health rounds must know.
+		assert.Equal(t, flushed+1, b.client.Flushes())
 		assert.Contains(t, nsRun(t, b.ns, "conntrack", "-L", "-p", "tcp"), "dst=10.99.1.100 sport=443 dport=40000")
 		require.Eventually(t, func() bool { return strings.Contains(a.copies(t), "sport=1000 ") }, 5*time.Second, 100*time.Millisecond)
 	}
 	{
 		// A, the former owner, flushes its old entries, so they can't clash with a
 		// connection B later translates to the same shared port.
+		flushed := a.client.Flushes()
 		require.NoError(t, a.client.StepDown(t.Context()))
+		// A step-down flushes the copies, which health rounds must know.
+		assert.Equal(t, flushed+1, a.client.Flushes())
 		nsRun(t, b.ns, "conntrack", "-D", "-p", "tcp", "--orig-port-src", "1000")
 		connect(t, b.ns, "10.0.16.6", 2000)
 		require.Eventually(t, func() bool { return strings.Contains(a.copies(t), "sport=2000 ") }, 5*time.Second, 100*time.Millisecond)

@@ -211,6 +211,9 @@ type Conntrack interface {
 	Copied(ctx context.Context, wanted []conntrackd.Tuple) (map[conntrackd.Tuple]bool, error)
 	// RequestResync asks the peer to send its whole connection table again.
 	RequestResync(ctx context.Context) error
+	// Flushes counts the times natpair has had conntrackd flush its caches,
+	// as a takeover and a step-down do.
+	Flushes() uint64
 }
 
 // ConnectionTable reads the kernel's connection table.
@@ -276,12 +279,16 @@ type Monitor struct {
 	shortRun   bool
 	lastResync time.Duration
 	resynced   bool
-	// copiesAdded is conntrackd's latest count of copies it added, if
-	// addedRead. addedAt is when that count last changed, if addedMoved.
+	// copiesAdded is conntrackd's latest count of copies it added, read at
+	// addedReadAt, if addedRead. addedAt is when that count last changed, if
+	// addedMoved.
 	copiesAdded int
+	addedReadAt time.Duration
 	addedAt     time.Duration
 	addedRead   bool
 	addedMoved  bool
+	// flushes is Conntrack.Flushes at the previous round, if servedBefore.
+	flushes uint64
 	// wasServing is whether the previous round served, if servedBefore.
 	wasServing   bool
 	servedBefore bool
@@ -458,6 +465,8 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		// stepped down still counts its old table until its flush 60 s
 		// later. The owner's count must have been read too: an owner whose
 		// conntrackd didn't answer reports 0, which any copy would cover.
+		// Releases before TrackedUnknown don't say so, and their 0 is
+		// trusted as before.
 		covers := copied*100 >= peer.TrackedConnections*copiedPercent ||
 			peer.TrackedConnections-copied <= copiedSlack
 		shortfall := !serving && !peer.TrackedUnknown && !covers
@@ -627,18 +636,25 @@ func (w *warning) due(now time.Duration) bool {
 // noteCopies records when conntrackd last added a copy, and forgets which of
 // the peer's oldest connections this NAT's copy held when the copy may have
 // been emptied since: conntrackd restarted, which starts its count over, or
-// this NAT took over or stepped down, which flush the copies. The count is 32
-// bits, so it also starts over after about 4 billion copies, which costs one
-// extra pass.
+// natpair had conntrackd flush its caches, as a takeover and a step-down do.
+// A takeover that fails after the flush leaves this NAT standing by, so only
+// the count of flushes shows it. The count of copies is 32 bits, so it also
+// starts over after about 4 billion copies, which costs one extra pass.
 // This NAT isn't ready again until it has checked the new copy.
 func (m *Monitor) noteCopies(now time.Duration, serving bool, stats conntrackd.Stats, counted bool) {
-	emptied := m.servedBefore && serving != m.wasServing
+	flushes := m.deps.Conntrack.Flushes()
+	emptied := m.servedBefore && (serving != m.wasServing || flushes != m.flushes)
+	m.flushes = flushes
 	if counted {
 		if m.addedRead && stats.CopiesAdded != m.copiesAdded {
 			emptied = emptied || stats.CopiesAdded < m.copiesAdded
-			m.addedAt, m.addedMoved = now, true
+			// A count that moved since a read longer than copyWindow ago may
+			// have moved before copies stopped arriving.
+			if now-m.addedReadAt <= copyWindow {
+				m.addedAt, m.addedMoved = now, true
+			}
 		}
-		m.copiesAdded, m.addedRead = stats.CopiesAdded, true
+		m.copiesAdded, m.addedReadAt, m.addedRead = stats.CopiesAdded, now, true
 	}
 	if emptied {
 		m.scans.forget()
