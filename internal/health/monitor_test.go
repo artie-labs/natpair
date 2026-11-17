@@ -35,10 +35,12 @@ type fixture struct {
 	prober    *mocks.FakeProber
 	conntrack *mocks.FakeConntrack
 	table     *mocks.FakeConnectionTable
+	load      *mocks.FakeLoadMeter
 	reports   *mocks.FakeReports
 	clock     *fakeClock
 	serving   bool
 	inhibited bool
+	session   uint64
 	// peer is what the fake board returns. nil means no fresh report.
 	peer *health.Report
 }
@@ -48,11 +50,14 @@ func newFixture(t *testing.T) *fixture {
 		prober:    &mocks.FakeProber{},
 		conntrack: &mocks.FakeConntrack{},
 		table:     &mocks.FakeConnectionTable{},
+		load:      &mocks.FakeLoadMeter{},
 		reports:   &mocks.FakeReports{},
 		clock:     &fakeClock{now: 100 * time.Second},
 	}
 	f.prober.UploadReturns(probe.Flow{}, nil)
 	f.table.ReadConnectionTableReturns(network.ConnectionTable{Connections: 1200, Max: 262144}, nil)
+	// Loaded by default, so a congested path counts as congested.
+	f.loadReadings(95, 0)
 	f.reports.ReadCalls(func(context.Context) (*health.Report, error) {
 		return f.peer, nil
 	})
@@ -64,12 +69,33 @@ func newFixture(t *testing.T) *fixture {
 		Prober:    f.prober,
 		Conntrack: f.conntrack,
 		Table:     f.table,
+		Load:      f.load,
 		Reports:   f.reports,
 		Serving:   func() bool { return f.serving },
 		Inhibited: func() bool { return f.inhibited },
+		Session:   func() uint64 { return f.session },
 		Now:       f.clock.Now,
 	})
 	return f
+}
+
+// loadReadings makes each reading of the load show, since the last one,
+// the busiest of two CPUs busy for busiestPercent of the time, the other
+// for 5%, and dropped more packets dropped on receive.
+func (f *fixture) loadReadings(busiestPercent int, dropped uint64) {
+	var load network.Load
+	f.load.ReadLoadCalls(func(context.Context) (network.Load, error) {
+		next := network.Load{CPUs: []network.CPUTime{{Busy: uint64(busiestPercent), Total: 100}, {Busy: 5, Total: 100}}, RxDrops: dropped}
+		if load.CPUs != nil {
+			for i := range next.CPUs {
+				next.CPUs[i].Busy += load.CPUs[i].Busy
+				next.CPUs[i].Total += load.CPUs[i].Total
+			}
+			next.RxDrops += load.RxDrops
+		}
+		load = next
+		return load, nil
+	})
 }
 
 // rounds runs count rounds, advancing the clock by the round interval after
@@ -273,6 +299,397 @@ func TestRoundFullConnectionTable(t *testing.T) {
 		report := f.rounds(t, 2)
 		assert.True(t, report.PathHealthy)
 		assert.True(t, report.CanForward)
+	}
+}
+
+// errTimeout is how a lost upload fails: it runs out of time.
+var errTimeout = fmt.Errorf("%w: failed to send probe upload: read tcp4 198.18.0.6:35237->192.0.2.1:443: i/o timeout", probe.ErrTimeout)
+
+func TestRoundCongestedPath(t *testing.T) {
+	// newOwner returns an owner that has run a healthy round, whose uploads
+	// now time out, and whose standby proved its own path meanwhile.
+	newOwner := func(t *testing.T) *fixture {
+		f := newFixture(t)
+		f.serving = true
+		f.rounds(t, 1)
+		f.peer = &health.Report{CanTakeover: true, ProvenWhilePeerFailing: true}
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		return f
+	}
+	{
+		// Some handshakes complete, as on AWS when forwarding lost 87% of
+		// pings, so the path is alive and the owner keeps serving.
+		f := newOwner(t)
+		f.prober.HandshakesReturns(5, nil)
+		report := f.rounds(t, 30)
+		assert.True(t, report.Congested)
+		assert.False(t, report.PathHealthy)
+		assert.Zero(t, report.ConsecutiveFailures)
+		assert.False(t, controller.ShouldDemote(report))
+	}
+	{
+		// No upload passes while congested, so an owner that could take over
+		// stops offering to, and the standby's updater doesn't reboot the
+		// only NAT that could
+		f := newFixture(t)
+		f.serving = true
+		f.peer = &health.Report{CanTakeover: true}
+		require.True(t, f.rounds(t, 5).CanTakeover)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		report := f.rounds(t, 1)
+		assert.True(t, report.Congested)
+		assert.False(t, report.CanTakeover)
+		_, target, attempts := f.prober.HandshakesArgsForCall(0)
+		assert.Equal(t, "nat-shared", target.Namespace)
+		assert.Equal(t, 40, attempts)
+	}
+	{
+		// The report is as old as the end of the round, after the
+		// handshakes, so a slow check doesn't make it look stale
+		f := newOwner(t)
+		f.prober.HandshakesCalls(func(context.Context, probe.Target, int) (int, error) {
+			f.clock.now += health.StaleAfter(health.ServingInterval)
+			return 5, nil
+		})
+		f.rounds(t, 1)
+		assert.False(t, f.monitor.Latest().Stale)
+	}
+	{
+		// No handshake completes, so the path is dead
+		f := newOwner(t)
+		f.prober.HandshakesReturns(0, nil)
+		report := f.rounds(t, 2)
+		assert.False(t, report.Congested)
+		assert.True(t, controller.ShouldDemote(report))
+	}
+	{
+		// Every handshake completes, so small packets get through without
+		// loss, and the upload failed for another reason, such as a path
+		// that drops full-size packets
+		f := newOwner(t)
+		f.prober.HandshakesReturns(40, nil)
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 2)))
+	}
+	{
+		// A congested round ends a run of failures, so a dead round on each
+		// side of it doesn't demote
+		f := newOwner(t)
+		f.prober.HandshakesReturnsOnCall(0, 0, nil)
+		f.prober.HandshakesReturnsOnCall(1, 5, nil)
+		f.prober.HandshakesReturnsOnCall(2, 0, nil)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+		assert.Zero(t, f.rounds(t, 1).ConsecutiveFailures)
+		report := f.rounds(t, 1)
+		assert.Equal(t, 1, report.ConsecutiveFailures)
+		assert.False(t, controller.ShouldDemote(report))
+	}
+	{
+		// Without an answer from the check, the failure counts
+		f := newOwner(t)
+		f.prober.HandshakesReturns(0, errors.New(`failed to resolve probe receiver "probe.example.invalid": i/o timeout`))
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 2)))
+	}
+	{
+		// A failure that came back over the path, such as a reply from the
+		// wrong address, counts without a check
+		f := newOwner(t)
+		f.prober.UploadReturns(probe.Flow{}, errors.New("probe receiver saw source IP 192.0.2.7, expected 192.0.2.10"))
+		f.prober.HandshakesReturns(5, nil)
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 2)))
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// A healthy upload needs no check
+		f := newFixture(t)
+		f.serving = true
+		assert.True(t, f.rounds(t, 3).CanForward)
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// A standby's load doesn't move with the shared ENI, so its timeouts
+		// count without a check
+		f := newFixture(t)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		report := f.rounds(t, 2)
+		assert.Equal(t, 2, report.ConsecutiveFailures)
+		assert.False(t, report.CanForward)
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// A full table excuses the round first, without a check
+		f := newOwner(t)
+		f.tableReadings(262133, 262144, 40)
+		assert.Zero(t, f.rounds(t, 3).ConsecutiveFailures)
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+}
+
+// roundsOf runs one serving round of each kind in kinds, in order: 'h'
+// passes its upload, 'c' is congested, with 5 of 40 handshakes completing,
+// and 'f' fails, with none completing. It returns the last report and
+// whether any round reached the congestion limit.
+func (f *fixture) roundsOf(t *testing.T, kinds string) (health.Report, bool) {
+	var report health.Report
+	var reached bool
+	for _, kind := range kinds {
+		switch kind {
+		case 'h':
+			f.prober.UploadReturns(probe.Flow{}, nil)
+		case 'c':
+			f.prober.UploadReturns(probe.Flow{}, errTimeout)
+			f.prober.HandshakesReturns(5, nil)
+		case 'f':
+			f.prober.UploadReturns(probe.Flow{}, errTimeout)
+			f.prober.HandshakesReturns(0, nil)
+		}
+		report = f.rounds(t, 1)
+		reached = reached || report.CongestionLimit
+	}
+	return report, reached
+}
+
+func TestRoundLoad(t *testing.T) {
+	// newOwner returns an owner that has run a healthy round, whose uploads
+	// now time out while 5 of 40 handshakes complete, and whose standby
+	// proved its own path meanwhile.
+	newOwner := func(t *testing.T) *fixture {
+		f := newFixture(t)
+		f.serving = true
+		f.rounds(t, 1)
+		f.peer = &health.Report{CanTakeover: true, ProvenWhilePeerFailing: true}
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		return f
+	}
+	{
+		// An owner that isn't loaded counts a timed-out probe as a failure,
+		// without the check, as on a host fault that loses most packets, so
+		// it steps down as before
+		f := newOwner(t)
+		f.loadReadings(20, 0)
+		report := f.rounds(t, 2)
+		assert.False(t, report.Congested)
+		assert.True(t, controller.ShouldDemote(report))
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// The busiest CPU busy for 85% of the round is loaded
+		f := newOwner(t)
+		f.loadReadings(85, 0)
+		assert.True(t, f.rounds(t, 1).Congested)
+	}
+	{
+		// 84% isn't
+		f := newOwner(t)
+		f.loadReadings(84, 0)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+	}
+	{
+		// 100 packets dropped on receive over the round is loaded, even with
+		// idle CPUs
+		f := newOwner(t)
+		f.loadReadings(10, 100)
+		assert.True(t, f.rounds(t, 1).Congested)
+	}
+	{
+		// 99 isn't
+		f := newOwner(t)
+		f.loadReadings(10, 99)
+		assert.Equal(t, 1, f.rounds(t, 1).ConsecutiveFailures)
+	}
+	{
+		// Without a reading of the load, the failure counts
+		f := newOwner(t)
+		f.load.ReadLoadReturns(network.Load{}, errors.New("failed to read CPU times: permission denied"))
+		assert.True(t, controller.ShouldDemote(f.rounds(t, 2)))
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// A standby's failures always count, so it doesn't read its load
+		f := newFixture(t)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.rounds(t, 2)
+		assert.Zero(t, f.load.ReadLoadCallCount())
+	}
+}
+
+func TestRoundCongestionWindow(t *testing.T) {
+	// newOwner returns a NAT that just started serving, with 1 s rounds, so
+	// the 10 minute congestion window holds 600.
+	newOwner := func(t *testing.T) *fixture {
+		f := newFixture(t)
+		f.serving = true
+		return f
+	}
+	// lossy is 20 rounds like those of an owner losing about 85% of its
+	// packets: mostly congested, a failed round now and then, never two in
+	// a row, and an upload that gets through.
+	lossy := "ccccfcccchccccfccccc"
+	{
+		// 85% loss reaches the limit once the owner has served the whole
+		// window, and not before
+		f := newOwner(t)
+		report, reached := f.roundsOf(t, strings.Repeat(lossy, 30))
+		assert.False(t, reached)
+		assert.Equal(t, 600, report.WindowRounds)
+		assert.Equal(t, 570, report.WindowBadRounds)
+		report, _ = f.roundsOf(t, "c")
+		assert.True(t, report.CongestionLimit)
+		assert.Equal(t, 600, report.WindowRounds)
+	}
+	{
+		// One congested round a minute never reaches it
+		f := newOwner(t)
+		_, reached := f.roundsOf(t, strings.Repeat(strings.Repeat("h", 59)+"c", 30))
+		assert.False(t, reached)
+	}
+	{
+		// Nor does a burst every 30 s that leaves most rounds healthy
+		f := newOwner(t)
+		_, reached := f.roundsOf(t, strings.Repeat("ccfcc"+strings.Repeat("h", 25), 60))
+		assert.False(t, reached)
+	}
+	{
+		// A failed round every 30 s and a passing upload every 7 s don't
+		// restart anything, so an owner whose rounds are mostly congested
+		// still reaches it. Restarting at either would let bursts or a fault
+		// that lets some uploads through keep a damaged owner.
+		f := newOwner(t)
+		var kinds strings.Builder
+		for i := range 601 {
+			switch {
+			case i%30 == 29:
+				kinds.WriteByte('f')
+			case i%7 == 6:
+				kinds.WriteByte('h')
+			default:
+				kinds.WriteByte('c')
+			}
+		}
+		report, _ := f.roundsOf(t, kinds.String())
+		assert.True(t, report.CongestionLimit)
+	}
+	{
+		// Exactly half is enough
+		f := newOwner(t)
+		report, _ := f.roundsOf(t, strings.Repeat("hc", 300)+"h")
+		assert.Equal(t, 300, report.WindowBadRounds)
+		assert.True(t, report.CongestionLimit)
+	}
+	{
+		// Standing by clears the window, so a NAT that serves again must
+		// serve a whole window again
+		f := newOwner(t)
+		report, _ := f.roundsOf(t, strings.Repeat("c", 601))
+		require.True(t, report.CongestionLimit)
+		f.serving = false
+		f.prober.UploadReturns(probe.Flow{}, nil)
+		assert.False(t, f.rounds(t, 1).CongestionLimit)
+		f.serving = true
+		report, reached := f.roundsOf(t, strings.Repeat("c", 600))
+		assert.False(t, reached)
+		assert.Equal(t, 600, report.WindowBadRounds)
+		report, _ = f.roundsOf(t, "c")
+		assert.True(t, report.CongestionLimit)
+	}
+	{
+		// So does a new ownership session, even if this NAT took the lease
+		// back before it ran a round while standing by
+		f := newOwner(t)
+		report, _ := f.roundsOf(t, strings.Repeat("c", 601))
+		require.True(t, report.CongestionLimit)
+		f.session++
+		report, _ = f.roundsOf(t, "c")
+		assert.False(t, report.CongestionLimit)
+		assert.Equal(t, 1, report.WindowRounds)
+	}
+}
+
+func TestVerifyPath(t *testing.T) {
+	target := probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-shared"}
+	{
+		// A passing upload verifies the path without a check
+		f := newFixture(t)
+		prober := f.prober
+		require.NoError(t, health.VerifyPath(t.Context(), prober, f.load, target))
+		assert.Zero(t, prober.HandshakesCallCount())
+	}
+	{
+		// An upload that ran out of time while some handshakes complete
+		// means the path is congested, as under a flood that follows the
+		// shared Elastic IP, so it is verified
+		f := newFixture(t)
+		prober := f.prober
+		prober.UploadReturns(probe.Flow{}, errTimeout)
+		prober.HandshakesReturns(5, nil)
+		require.NoError(t, health.VerifyPath(t.Context(), prober, f.load, target))
+		_, checked, attempts := prober.HandshakesArgsForCall(0)
+		assert.Equal(t, target, checked)
+		assert.Equal(t, 40, attempts)
+	}
+	{
+		// None completing means the path is dead
+		f := newFixture(t)
+		prober := f.prober
+		prober.UploadReturns(probe.Flow{}, errTimeout)
+		prober.HandshakesReturns(0, nil)
+		err := health.VerifyPath(t.Context(), prober, f.load, target)
+		assert.ErrorIs(t, err, probe.ErrTimeout)
+		assert.ErrorContains(t, err, "0 of 40 handshakes completed")
+	}
+	{
+		// All completing means lost packets don't explain the failure
+		f := newFixture(t)
+		prober := f.prober
+		prober.UploadReturns(probe.Flow{}, errTimeout)
+		prober.HandshakesReturns(40, nil)
+		assert.ErrorIs(t, health.VerifyPath(t.Context(), prober, f.load, target), probe.ErrTimeout)
+	}
+	{
+		// Without an answer from the check, the failure stands
+		f := newFixture(t)
+		prober := f.prober
+		prober.UploadReturns(probe.Flow{}, errTimeout)
+		prober.HandshakesReturns(0, errors.New("connection refused"))
+		err := health.VerifyPath(t.Context(), prober, f.load, target)
+		assert.ErrorIs(t, err, probe.ErrTimeout)
+		assert.ErrorContains(t, err, "connection refused")
+	}
+	{
+		// A failure that came back over the path, such as a reply from the
+		// wrong address, fails without a check
+		f := newFixture(t)
+		prober := f.prober
+		wrong := errors.New("probe receiver saw source IP 192.0.2.7, expected 192.0.2.10")
+		prober.UploadReturns(probe.Flow{}, wrong)
+		prober.HandshakesReturns(5, nil)
+		assert.ErrorIs(t, health.VerifyPath(t.Context(), prober, f.load, target), wrong)
+		assert.Zero(t, prober.HandshakesCallCount())
+	}
+	{
+		// A NAT that isn't loaded fails without the check, as on a fault
+		// that loses most packets on the shared path
+		f := newFixture(t)
+		f.loadReadings(20, 0)
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		err := health.VerifyPath(t.Context(), f.prober, f.load, target)
+		assert.ErrorIs(t, err, probe.ErrTimeout)
+		assert.ErrorContains(t, err, "this NAT isn't loaded: busiest CPU 20%, 0 packets dropped on receive")
+		assert.Zero(t, f.prober.HandshakesCallCount())
+	}
+	{
+		// Without a reading of the load, the failure stands
+		f := newFixture(t)
+		f.load.ReadLoadReturns(network.Load{}, errors.New("failed to read CPU times: permission denied"))
+		f.prober.UploadReturns(probe.Flow{}, errTimeout)
+		f.prober.HandshakesReturns(5, nil)
+		err := health.VerifyPath(t.Context(), f.prober, f.load, target)
+		assert.ErrorIs(t, err, probe.ErrTimeout)
+		assert.ErrorContains(t, err, "permission denied")
+		assert.Zero(t, f.prober.HandshakesCallCount())
 	}
 }
 
@@ -686,4 +1103,31 @@ func TestConnectionTableWarnings(t *testing.T) {
 		assert.Equal(t, 1, strings.Count(output, `"table_full":true`))
 		assert.Zero(t, logged("the connection table is nearly full"))
 	}
+}
+
+func TestCongestedPathWarning(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	f := newFixture(t)
+	f.serving = true
+	f.prober.UploadReturns(probe.Flow{}, errTimeout)
+	f.prober.HandshakesReturns(7, nil)
+	f.rounds(t, 61)
+	output := logs.String()
+	// Once a minute, and so is the health round, like a healthy one's: an
+	// overload can last hours
+	assert.Equal(t, 2, strings.Count(output, `"msg":"the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure"`))
+	// The repeat says how many rounds in the window were congested or failed
+	assert.Contains(t, output, `"handshakes":7,"attempts":40,"window_bad_rounds":61,"window_rounds":61}`)
+	assert.Equal(t, 2, strings.Count(output, `"msg":"health round"`))
+	assert.Equal(t, 2, strings.Count(output, `"congested":true`))
+	assert.Equal(t, 2, strings.Count(output, `"handshakes":7}`))
+	// The end of the congestion is logged at once
+	logs.Reset()
+	f.prober.UploadReturns(probe.Flow{}, nil)
+	f.rounds(t, 1)
+	assert.Equal(t, 1, strings.Count(logs.String(), `"msg":"health round"`))
 }

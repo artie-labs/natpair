@@ -80,6 +80,12 @@ the NATs one at a time, as in [Replace a NAT](operations.md#replace-a-nat).
   `system.net.aws.ec2.*_allowance_exceeded`. Move to an instance type with
   more baseline bandwidth, as in
   [Replace a NAT](operations.md#replace-a-nat).
+- **More packets than the CPU can forward.** Small packets at a high rate,
+  such as 800,000 UDP packets a second on a c7gn.medium, saturate the
+  CPU, and packets beyond what it can process are lost. natpair logs
+  [`the health probe failed, but the path is alive`](#the-health-probe-failed-but-the-path-is-alive)
+  and keeps the owner serving. Move to an instance type with more vCPUs,
+  or find the worker sending the traffic.
 - **Connection table full.** When the table reaches `max_connections`, the
   kernel drops new connections and logs `nf_conntrack: table full, dropping
   packet` in `sudo dmesg`, and natpair logs
@@ -151,6 +157,13 @@ failed, so it hasn't opened forwarding yet. They're normal for up to about
 10 s while AWS moves the ENI. If they continue, check that the Elastic IP is still
 associated with the shared ENI.
 
+### `the upload through the shared Elastic IP timed out, but the path is alive`
+
+During a takeover, the new owner's upload through the shared Elastic IP
+timed out while it was loaded, but `handshakes` of 40 TCP handshakes
+completed. The path works but loses packets, usually under a flood, so the
+new owner opened forwarding.
+
 ### `this boot was prepared by another release, so this NAT reports none until it reboots`
 
 This NAT took over while it was installing a release, so it runs a binary it
@@ -185,6 +198,44 @@ the same way. Its `health round` lines show `"table_full":true`. Fix
 the table as for
 [`the connection table is full`](#the-connection-table-is-full). natpair
 logs this, and the `health round` line, at most once a minute.
+
+### `the health probe failed, but the path is alive`
+
+The owner's upload timed out while it was loaded, but `handshakes` of 40
+TCP handshakes completed, so its path is congested, not broken, and it
+keeps serving. This usually means more traffic than the NAT can forward:
+see [the NAT is too small](#the-nat-is-too-small). Loaded means
+`busiest_cpu_percent` of at least 85 or `rx_drops` of at least 100 over
+the round. `window_bad_rounds` of `window_rounds` counts the congested or
+failed rounds in the last 10 minutes. `natpair maintenance` waits for a
+ready standby, and the standby can't show it copied the owner's
+connections while no upload passes, so the owner may hand over by itself
+first, as in the next entry. natpair logs this at most once a minute.
+
+### `handing over because at least half of this NAT's health rounds in the last 10 minutes were congested or failed`
+
+The owner served for 10 minutes with at least half of its rounds congested
+or failed, so it handed over to a standby that has proven its own path.
+Connections the standby hadn't copied may have reset. If the new owner
+serves without trouble, the old owner's host was likely at fault, so
+[replace it](operations.md#replace-a-nat). If the new owner logs `the
+health probe failed, but the path is alive` too, the pair gets more
+traffic than either NAT can forward, and moves at most once every 10
+minutes.
+
+### `failed to read this NAT's load, so the failed probe counts`
+
+After an upload timed out, the owner couldn't read `/proc/stat` or
+`/sys/class/net`, so it can't tell load from a fault, and the round counts
+toward stepping down. The `err` field says which. natpair logs this at most
+once a minute.
+
+### `failed to check whether the path is alive, so the failed probe counts`
+
+After an upload timed out, the handshake check couldn't run or a handshake
+failed other than by running out of time, such as a refused connection.
+The `err` field says why. The round counts toward stepping down. natpair
+logs this at most once a minute.
 
 ### `failed to read the connection table, so a full table can't be told from a path failure`
 
