@@ -157,8 +157,8 @@ type Report struct {
 	Flows []probe.Flow `json:"flows"`
 	// SharedPortsUsed is the share, from 0 to 1, of the shared address's
 	// ports that worker connections use for their busiest destination, at
-	// the latest count. It is 0 while this NAT doesn't serve. At 1, new
-	// connections to that destination fail.
+	// the latest count. It is 0 while this NAT doesn't serve. Near 1, new
+	// connections to that destination start to fail.
 	SharedPortsUsed float64 `json:"shared_ports_used"`
 	Stale           bool    `json:"stale"`
 }

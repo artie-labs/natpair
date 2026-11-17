@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"strconv"
 	"sync"
@@ -32,6 +33,10 @@ const (
 	// warnPercent is the share of a destination's ports, in percent, past
 	// which the watcher warns.
 	warnPercent = 70
+	// clearPercent is the share a destination must drop under before the
+	// watcher says it's back under. The gap keeps a destination hovering
+	// around warnPercent from logging a pair of lines at every count.
+	clearPercent = 60
 	// warnInterval is the shortest time between warnings about one
 	// destination.
 	warnInterval = 10 * time.Minute
@@ -40,7 +45,7 @@ const (
 	// Past it, the count keeps the busiest: any destination with more than
 	// 1/(maxDestinations+1) of the connections is still found, and its count
 	// may be low by at most that many. At 524,288 connections that is 127,
-	// against the 41,000 or more a warning needs.
+	// against the 42,000 or more a warning needs.
 	maxDestinations = 4096
 	// listTimeout bounds one read of the connection table.
 	listTimeout = 2 * time.Minute
@@ -70,7 +75,10 @@ type Watcher struct {
 	// shared address, one a line, in the format of `conntrack -L`.
 	list func(ctx context.Context, read func(io.Reader) error) error
 
-	// warned holds the destinations last warned about, with when.
+	// over holds the destinations past warnPercent that haven't dropped
+	// under clearPercent since. warned holds when each destination was last
+	// warned about, for warnInterval.
+	over   map[Destination]bool
 	warned map[Destination]time.Duration
 
 	mu sync.Mutex
@@ -90,13 +98,18 @@ func New(shared netip.Addr, ports int, serving func() bool, now func() time.Dura
 		list: func(ctx context.Context, read func(io.Reader) error) error {
 			return command.Stream(ctx, listTimeout, read, "conntrack", "-L", "--reply-dst", shared.String())
 		},
+		over:   map[Destination]bool{},
 		warned: map[Destination]time.Duration{},
 	}
 }
 
 // Used returns the busiest destination's share of its ports at the latest
-// count, from 0 to 1. It is 0 while this NAT doesn't serve.
+// count, from 0 to 1. It is 0 while this NAT doesn't serve, including before
+// the first count after it stops.
 func (w *Watcher) Used() float64 {
+	if !w.serving() {
+		return 0
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.used
@@ -121,7 +134,10 @@ func (w *Watcher) Run(ctx context.Context) {
 // its old ones stay until conntrackd flushes them.
 func (w *Watcher) check(ctx context.Context) {
 	if !w.serving() {
+		// The next owner counts these connections now. This NAT starts afresh
+		// if it serves again.
 		w.setUsed(0)
+		clear(w.over)
 		return
 	}
 	var counts map[Destination]int
@@ -141,11 +157,13 @@ func (w *Watcher) check(ctx context.Context) {
 	w.setUsed(float64(busiest) / float64(w.ports))
 
 	now := w.now()
+	maps.DeleteFunc(w.warned, func(_ Destination, at time.Duration) bool { return now-at >= warnInterval })
 	for destination, connections := range counts {
 		if connections*100 < w.ports*warnPercent {
 			continue
 		}
-		if at, ok := w.warned[destination]; ok && now-at < warnInterval {
+		w.over[destination] = true
+		if _, ok := w.warned[destination]; ok {
 			continue
 		}
 		w.warned[destination] = now
@@ -155,10 +173,10 @@ func (w *Watcher) check(ctx context.Context) {
 			slog.String("destination", destination.String()), slog.Int("connections", connections),
 			slog.Int("ports", w.ports), slog.Int("percent", connections*100/w.ports))
 	}
-	for destination := range w.warned {
-		if counts[destination]*100 < w.ports*warnPercent {
-			delete(w.warned, destination)
-			slog.Info("worker connections to a destination are back under 70% of the shared address's ports",
+	for destination := range w.over {
+		if counts[destination]*100 < w.ports*clearPercent {
+			delete(w.over, destination)
+			slog.Info(fmt.Sprintf("worker connections to a destination are back under %d%% of the shared address's ports", clearPercent),
 				slog.String("destination", destination.String()), slog.Int("connections", counts[destination]),
 				slog.Int("ports", w.ports))
 		}

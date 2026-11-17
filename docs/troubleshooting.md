@@ -135,9 +135,10 @@ one destination address, port and protocol needs its own source port, of
 which there are 64,512. The owner counts them once a minute and warns, at
 most every 10 minutes for each destination, when one destination passes
 70%. The `destination` field names it, such as `tcp 203.0.113.9:5432`, with
-its `connections`. When all its ports are in use, new connections to that
-destination fail while others keep working. The owner logs `back under 70%`
-when the count drops.
+its `connections`. As its ports run out, new connections to that destination
+start to fail while others keep working. The owner logs `back under 60%`
+once the count drops under 60%. A NAT that stops serving stops counting, and
+its `shared_ports_used` goes to 0.
 
 Closed TCP connections keep their port while they stay in the connection
 table, so many short connections use ports as much as long ones. To fix it:

@@ -3,7 +3,9 @@
 package ports
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net/netip"
 	"testing"
 	"time"
@@ -19,10 +21,18 @@ import (
 func TestCheckReadsTheKernelTable(t *testing.T) {
 	shared := netip.MustParseAddr("10.98.1.100")
 	watcher := New(shared, 100, func() bool { return true }, func() time.Duration { return 0 })
+	t.Cleanup(func() {
+		_, _ = command.Run(context.WithoutCancel(t.Context()), 5*time.Second, "conntrack", "-D", "--reply-dst", shared.String())
+	})
 	{
 		// No translated connections: conntrack lists nothing, which isn't a failure
-		watcher.check(t.Context())
-		assert.Zero(t, watcher.Used())
+		var counts map[Destination]int
+		require.NoError(t, watcher.list(t.Context(), func(r io.Reader) error {
+			var err error
+			counts, err = count(r, maxDestinations)
+			return err
+		}))
+		assert.Empty(t, counts)
 	}
 	for i := range 72 {
 		port := fmt.Sprint(20000 + i)
@@ -32,9 +42,6 @@ func TestCheckReadsTheKernelTable(t *testing.T) {
 			"--state", "ESTABLISHED", "-u", "SEEN_REPLY,ASSURED", "-t", "120")
 		require.NoError(t, err)
 	}
-	t.Cleanup(func() {
-		_, _ = command.Run(t.Context(), 5*time.Second, "conntrack", "-D", "--reply-dst", shared.String())
-	})
 	watcher.check(t.Context())
 	assert.InDelta(t, 0.72, watcher.Used(), 1e-9)
 }

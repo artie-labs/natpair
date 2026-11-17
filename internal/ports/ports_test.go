@@ -91,8 +91,9 @@ func TestCheck(t *testing.T) {
 		assert.InDelta(t, 0.699, f.watcher.Used(), 1e-9)
 	}
 	{
-		// At 70%, the busiest destination is named with its count, once per
-		// 10 minutes, and a line follows when it drops back under
+		// At 70%, the busiest destination is named with its count, at most
+		// once per 10 minutes. Hovering between 60% and 70% logs nothing more,
+		// and a line follows when it drops under 60%.
 		f := newFixture(t)
 		f.table = entries("203.0.113.9", 5432, 700)
 		f.watcher.check(t.Context())
@@ -105,13 +106,23 @@ func TestCheck(t *testing.T) {
 		f.now += time.Second
 		f.watcher.check(t.Context())
 		assert.Equal(t, 2, warnings(f))
-		f.table = entries("203.0.113.9", 5432, 500)
+		for _, connections := range []int{650, 710, 601, 720} {
+			f.now += 2 * time.Minute
+			f.table = entries("203.0.113.9", 5432, connections)
+			f.watcher.check(t.Context())
+		}
+		assert.Equal(t, 2, warnings(f))
+		assert.NotContains(t, f.logs.String(), "back under")
+		f.table = entries("203.0.113.9", 5432, 599)
 		f.watcher.check(t.Context())
-		assert.Equal(t, 1, strings.Count(f.logs.String(), "back under 70%"))
+		assert.Equal(t, 1, strings.Count(f.logs.String(), "back under 60%"))
 		f.watcher.check(t.Context())
-		assert.Equal(t, 1, strings.Count(f.logs.String(), "back under 70%"))
-		// Past 70% again, it warns at once
+		assert.Equal(t, 1, strings.Count(f.logs.String(), "back under 60%"))
+		// Past 70% again, it warns once 10 minutes have passed since the last warning
 		f.table = entries("203.0.113.9", 5432, 800)
+		f.watcher.check(t.Context())
+		assert.Equal(t, 2, warnings(f))
+		f.now += 2 * time.Minute
 		f.watcher.check(t.Context())
 		assert.Equal(t, 3, warnings(f))
 	}
@@ -121,10 +132,11 @@ func TestCheck(t *testing.T) {
 		f := newFixture(t)
 		f.table = entries("203.0.113.9", 5432, 900)
 		f.watcher.check(t.Context())
+		// It reports 0 as soon as it stops serving, before the next count
 		f.serving = false
+		assert.Zero(t, f.watcher.Used())
 		f.watcher.check(t.Context())
 		assert.Equal(t, 1, f.lists)
-		assert.Zero(t, f.watcher.Used())
 	}
 	{
 		// A failed read keeps the last count and is logged
