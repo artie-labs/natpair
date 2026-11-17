@@ -47,6 +47,8 @@ type fixture struct {
 	// While arriving, each read of the stats counts one more copy added.
 	tracked, copied, added int
 	arriving               bool
+	// portsUsed is the busiest destination's share of the shared ports.
+	portsUsed float64
 	// statsErr, if set, is what reading the stats fails with.
 	statsErr error
 }
@@ -82,15 +84,16 @@ func newFixture(t *testing.T) *fixture {
 		ServingProbe: probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-shared"},
 		Release:      "v0.2.0",
 	}, health.Dependencies{
-		Prober:    f.prober,
-		Conntrack: f.conntrack,
-		Table:     f.table,
-		Load:      f.load,
-		Reports:   f.reports,
-		Serving:   func() bool { return f.serving },
-		Inhibited: func() bool { return f.inhibited },
-		Session:   func() uint64 { return f.session },
-		Now:       f.clock.Now,
+		Prober:          f.prober,
+		Conntrack:       f.conntrack,
+		Table:           f.table,
+		Load:            f.load,
+		Reports:         f.reports,
+		Serving:         func() bool { return f.serving },
+		Inhibited:       func() bool { return f.inhibited },
+		Session:         func() uint64 { return f.session },
+		SharedPortsUsed: func() float64 { return f.portsUsed },
+		Now:             f.clock.Now,
 	})
 	return f
 }
@@ -1154,6 +1157,13 @@ func TestRoundPeerFailure(t *testing.T) {
 		f.peer = &health.Report{ProvenWhilePeerFailing: true, Stale: true}
 		assert.False(t, f.rounds(t, 1).PeerConfirmedFailure, "a stale peer report confirms nothing")
 	}
+}
+
+func TestRoundReportsSharedPorts(t *testing.T) {
+	f := newFixture(t)
+	f.serving = true
+	f.portsUsed = 0.71
+	assert.InDelta(t, 0.71, f.rounds(t, 1).SharedPortsUsed, 1e-9)
 }
 
 func TestRoundReportsReleases(t *testing.T) {

@@ -6,7 +6,9 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -269,6 +271,23 @@ func TestDropStale(t *testing.T) {
 		n := network.New(testConfig(t), &mocks.FakeNetworkFence{}, log.runner())
 		assert.EqualError(t, n.DropStale(t.Context()), "failed to drop out-of-date connections to 10.0.1.100: conntrack failed: exit status 1: operation not permitted")
 	}
+}
+
+func TestSharedPorts(t *testing.T) {
+	// SharedPorts is the size of the port range the first SNAT rule for TCP
+	// gives worker connections. Without a range, the kernel picks from 1024
+	// to 65535 for source ports of 1024 or more.
+	log := &commandLog{}
+	require.NoError(t, network.New(testConfig(t), &mocks.FakeNetworkFence{}, log.runner()).PrepareNetwork(t.Context()))
+	require.Len(t, log.inputs, 1)
+	rule := regexp.MustCompile(`(?m)^-A NATPAIR_SNAT -s 10\.0\.16\.0/20 (?:-p tcp )?-j SNAT --to-source 10\.0\.1\.100(?::(\d+)-(\d+))?$`).FindStringSubmatch(log.inputs[0])
+	require.NotNil(t, rule, log.inputs[0])
+	low, high := 1024, 65535
+	if rule[1] != "" {
+		low, _ = strconv.Atoi(rule[1])
+		high, _ = strconv.Atoi(rule[2])
+	}
+	assert.Equal(t, high-low+1, network.SharedPorts, rule[0])
 }
 
 func TestPrepareNetwork(t *testing.T) {

@@ -226,6 +226,13 @@ newer kernels. If something else writes 0, the daemon writes 1 again within
   lease renewals and health reports reach DynamoDB without depending on the
   internet path the NATs forward. Workers' DynamoDB traffic goes through the
   NATs like their other traffic, so it leaves from the shared Elastic IP.
+- Every worker connection leaves from the shared address, so to one
+  destination address, port and protocol, such as one database's port, the
+  pair can hold at most 59,976 TCP connections at a time, one per source
+  port in the range natpair translates worker TCP to. The owner counts them per destination once a
+  minute, warns when one destination uses 70% of its ports, and reports the
+  busiest destination's share as `shared_ports_used` in its health rounds.
+  See [troubleshooting](troubleshooting.md#worker-connections-to-one-destination-use-most-of-the-shared-addresss-ports).
 - By default the NATs forward traffic from every CIDR of the VPC. Their own
   traffic, such as AWS API calls and lease renewals, always keeps their own
   address and route, even though that address is inside the VPC.

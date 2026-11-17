@@ -24,6 +24,12 @@ import (
 	"github.com/artie-labs/natpair/internal/config"
 )
 
+// SharedPorts is how many source ports the shared address offers each
+// destination address and port: the size of workerPorts, which worker TCP is
+// translated to. Other protocols get the kernel's range of 1024 to 65535, a
+// few more.
+const SharedPorts = workerPortsLast - workerPortsFirst + 1
+
 const (
 	snatChain  = "NATPAIR_SNAT"
 	inputChain = "NATPAIR_INPUT"
@@ -37,12 +43,13 @@ const (
 	// by its port whether it goes to a socket or back to the canary.
 	localPorts  = "32768:60999"
 	canaryPorts = "61000-65535"
-	// workerPorts is the range worker TCP connections are translated to on
-	// the shared address. A port already in it is kept. It leaves out the
-	// well-known ports below 1024 and the canary's range, so a scan of
-	// those on the shared address gets no answer (see protectHost), and
-	// still offers 59,976 ports for each remote address and port.
-	workerPorts = "1024-60999"
+	// workerPortsFirst to workerPortsLast, called workerPorts below, is the
+	// range worker TCP connections are translated to on the shared address.
+	// A port already in it is kept. It leaves out the well-known ports below
+	// 1024 and the canary's range, so a scan of those on the shared address
+	// gets no answer (see protectHost), and still offers 59,976 ports for
+	// each remote address and port.
+	workerPortsFirst, workerPortsLast = 1024, 60999
 	// resetLimit and resetBurst bound the resets the shared address sends
 	// to each remote address, for connections this NAT doesn't know. A
 	// burst of 50 resets at once the connections one remote server most
@@ -237,7 +244,7 @@ func (n *Network) protectHost(ctx context.Context) error {
 	rules += fmt.Sprintf("-A %s -d %s/32 -p tcp ! --syn --dport %s -m conntrack --ctstate INVALID "+
 		"-m hashlimit --hashlimit-upto %s --hashlimit-burst %s --hashlimit-mode srcip --hashlimit-name natpair_reset "+
 		"--hashlimit-htable-size 4096 --hashlimit-htable-max 65536 --hashlimit-htable-expire 60000 "+
-		"-j REJECT --reject-with tcp-reset\n", inputChain, n.cfg.SharedAddress.Addr(), strings.Replace(workerPorts, "-", ":", 1), resetLimit, resetBurst)
+		"-j REJECT --reject-with tcp-reset\n", inputChain, n.cfg.SharedAddress.Addr(), fmt.Sprintf("%d:%d", workerPortsFirst, workerPortsLast), resetLimit, resetBurst)
 	// Everything else from outside the VPC is dropped without an answer. VPC
 	// sources and the peer were accepted above, so they still get the
 	// kernel's reset from a closed port and fail fast.
@@ -581,7 +588,7 @@ func (n *Network) PrepareNetwork(ctx context.Context) error {
 	for _, source := range n.sharedSources() {
 		// TCP takes ports in workerPorts, the only ones that get a reset for
 		// an unknown connection (see protectHost).
-		rules += fmt.Sprintf("-A %s -s %s -p tcp -j SNAT --to-source %s:%s\n", snatChain, source, shared, workerPorts)
+		rules += fmt.Sprintf("-A %s -s %s -p tcp -j SNAT --to-source %s:%d-%d\n", snatChain, source, shared, workerPortsFirst, workerPortsLast)
 		rules += fmt.Sprintf("-A %s -s %s -j SNAT --to-source %s\n", snatChain, source, shared)
 	}
 	// The own canary's probes take ports the NAT's own sockets never use, so

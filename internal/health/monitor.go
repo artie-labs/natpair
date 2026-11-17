@@ -222,7 +222,12 @@ type Report struct {
 	// Flows are recent probe connections. Earlier releases check that they
 	// hold a copy of one of the peer's.
 	Flows []probe.Flow `json:"flows"`
-	Stale bool         `json:"stale"`
+	// SharedPortsUsed is the share, from 0 to 1, of the shared address's
+	// ports that worker connections use for their busiest destination, at
+	// the latest count that succeeded. It is 0 while this NAT doesn't serve.
+	// Near 1, new connections to that destination start to fail.
+	SharedPortsUsed float64 `json:"shared_ports_used"`
+	Stale           bool    `json:"stale"`
 }
 
 // Config lists what the monitor checks.
@@ -293,6 +298,9 @@ type Dependencies struct {
 	// Session returns the number of the controller's current or latest
 	// ownership session. It changes each time this NAT takes the lease.
 	Session func() uint64
+	// SharedPortsUsed returns the busiest destination's share of the shared
+	// address's ports.
+	SharedPortsUsed func() float64
 	// Now returns elapsed time on the boot clock.
 	Now func() time.Duration
 }
@@ -653,6 +661,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		Serving:                serving,
 		PeerRelease:            peer.Release,
 		PeerServing:            peerOK && peer.Serving,
+		SharedPortsUsed:        m.deps.SharedPortsUsed(),
 	}
 	for _, flow := range m.flows {
 		report.Flows = append(report.Flows, flow.flow)
@@ -685,7 +694,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			slog.Int("tracked_connections", tracked), slog.Int("copied_connections", copied),
 			slog.Int("peer_tracked_connections", peer.TrackedConnections),
 			slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
-			slog.String("release", m.config.Release),
+			slog.Float64("shared_ports_used", report.SharedPortsUsed), slog.String("release", m.config.Release),
 		}
 		if load.measured {
 			attrs = append(attrs, slog.Int("busiest_cpu_percent", load.busiestCPUPercent), slog.Uint64("rx_drops", load.drops))
