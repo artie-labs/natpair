@@ -49,6 +49,8 @@ type fixture struct {
 	// verified records the verify argument of each takeover.
 	verified  []bool
 	stepDowns int
+	// onStepDown runs after each step-down, if set.
+	onStepDown func()
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -94,8 +96,12 @@ func newFixture(t *testing.T) *fixture {
 			},
 			StepDown: func(context.Context) error {
 				f.mu.Lock()
-				defer f.mu.Unlock()
 				f.stepDowns++
+				hook := f.onStepDown
+				f.mu.Unlock()
+				if hook != nil {
+					hook()
+				}
 				return nil
 			},
 			Now: bootclock.Now,
@@ -412,6 +418,119 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func TestCongestedOwnerWaitsForReadyPeer(t *testing.T) {
+	// Below the congestion limit, maintenance and handover requests on a
+	// congested owner wait for a ready peer, as on any owner
+	f := newFixture(t)
+	f.start(t)
+	require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+	f.setReport(health.Report{Ready: true, CanForward: true, CanTakeover: true, Congested: true, PeerCanTakeover: true})
+	require.NoError(t, controller.RequestMaintenance(f.stateDir))
+	f.controller.SetHandover(true)
+	time.Sleep(100 * time.Millisecond)
+	assert.True(t, f.controller.Serving(), "the peer is not ready")
+}
+
+func TestCongestionHandover(t *testing.T) {
+	// congested is what an owner reports once 510 of its 600 rounds in its
+	// congestion window were congested or failed: no upload passed this
+	// round, so it can forward only unproven.
+	congested := health.Report{CanForwardUnverified: true, Congested: true, CongestionLimit: true, WindowRounds: 600, WindowBadRounds: 510, PeerCanTakeover: true}
+	const handingOver = `"msg":"handing over because at least half of this NAT's health rounds in the last 10 minutes were congested or failed, so connections the peer hasn't copied may reset"`
+	{
+		// An owner congested for the limit hands over once to a peer that can
+		// take over, and the log says why
+		logs := &syncBuffer{}
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+		defer slog.SetDefault(previous)
+		f := newFixture(t)
+		// The peer takes the released lease, as it does on taking over.
+		f.onStepDown = func() {
+			raw, err := f.store.Read(t.Context())
+			assert.NoError(t, err)
+			var record lease.Record
+			assert.NoError(t, json.Unmarshal(raw, &record))
+			record.Owner, record.Revision, record.Epoch, record.Released = "nat-b/1", "peer", record.Epoch+1, false
+			taken, err := json.Marshal(record)
+			assert.NoError(t, err)
+			swapped, err := f.store.Swap(t.Context(), raw, taken)
+			assert.NoError(t, err)
+			assert.True(t, swapped)
+		}
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		f.setReport(congested)
+		require.Eventually(t, func() bool { return f.stepDownCount() == 1 }, waitFor, 10*time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
+		assert.False(t, f.controller.Serving())
+		assert.Equal(t, 1, f.stepDownCount())
+		assert.Equal(t, 1, strings.Count(logs.String(), handingOver))
+		assert.Contains(t, logs.String(), `"window_bad_rounds":510,"window_rounds":600`)
+	}
+	{
+		// Below the limit, the owner keeps serving
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.CongestionLimit = false
+		f.setReport(report)
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving())
+	}
+	{
+		// A ready peer gets it too. With a fault that still lets some of the
+		// owner's uploads through, the peer copies their flows and can stay
+		// ready for most of the congestion.
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.PeerReady = true
+		f.setReport(report)
+		require.Eventually(t, func() bool { return !f.controller.Serving() }, waitFor, 10*time.Millisecond)
+		assert.True(t, f.released(t))
+	}
+	{
+		// A peer that can't take over, which includes a congested peer since
+		// no upload passed for it either, doesn't get the handover
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.PeerCanTakeover = false
+		f.setReport(report)
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving())
+	}
+	{
+		// A stale report never hands over, because the monitor itself may be
+		// the problem
+		f := newFixture(t)
+		f.start(t)
+		require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+		report := congested
+		report.Stale = true
+		f.setReport(report)
+		time.Sleep(100 * time.Millisecond)
+		assert.True(t, f.controller.Serving())
+	}
+}
+
+func TestSession(t *testing.T) {
+	// Each acquired lease starts a new session
+	f := newFixture(t)
+	f.start(t)
+	require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+	assert.Equal(t, uint64(1), f.controller.Session())
+	f.setReport(health.Report{Ready: true, CanForward: true, CanTakeover: true, PathHealthy: true, PeerReady: true})
+	f.controller.SetHandover(true)
+	require.Eventually(t, func() bool { return f.stepDownCount() == 1 }, waitFor, 10*time.Millisecond)
+	require.Eventually(t, f.controller.Serving, waitFor, 10*time.Millisecond)
+	assert.Equal(t, uint64(2), f.controller.Session())
 }
 
 func TestContendWarnings(t *testing.T) {

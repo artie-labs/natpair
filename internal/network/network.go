@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -400,6 +401,92 @@ func (n *Network) ReadConnectionTable(ctx context.Context) (ConnectionTable, err
 		return ConnectionTable{}, fmt.Errorf("no drop counter in the connection table's statistics %q", stats)
 	}
 	return table, nil
+}
+
+// Load is one reading of how busy this NAT is. Its counters only grow, so
+// two readings give the load between them.
+type Load struct {
+	// CPUs holds each CPU's time since boot, in clock ticks.
+	CPUs []CPUTime
+	// RxDrops counts the packets this NAT's network devices dropped on
+	// receive since boot, because the host couldn't take them in time:
+	// rx_dropped, rx_missed_errors and rx_over_errors, summed over the
+	// interfaces backed by a device. ENA reports the drops its device counts
+	// for lack of receive buffers in rx_dropped.
+	RxDrops uint64
+}
+
+// CPUTime is one CPU's time since boot, in clock ticks. Busy is all but
+// idle and I/O wait. Time the hypervisor gave to other instances (steal)
+// counts as busy, because the NAT couldn't forward then either.
+type CPUTime struct {
+	Busy, Total uint64
+}
+
+// These are the files ReadLoad reads. They're variables only so tests can
+// point them elsewhere (export_test.go).
+var (
+	procStat    = "/proc/stat"
+	sysClassNet = "/sys/class/net"
+)
+
+// ReadLoad reads how busy this NAT is from /proc/stat and the network
+// devices' statistics in sysfs. It reads files, without running a command,
+// so it costs microseconds.
+func (n *Network) ReadLoad(context.Context) (Load, error) {
+	stat, err := os.ReadFile(procStat)
+	if err != nil {
+		return Load{}, fmt.Errorf("failed to read CPU times: %w", err)
+	}
+	var load Load
+	for line := range strings.Lines(string(stat)) {
+		fields := strings.Fields(line)
+		// Per-CPU lines are "cpuN user nice system idle iowait irq softirq
+		// steal guest guest_nice". The first line, "cpu", sums them all.
+		if len(fields) < 9 || fields[0] == "cpu" || !strings.HasPrefix(fields[0], "cpu") {
+			continue
+		}
+		var ticks [8]uint64
+		for i := range ticks {
+			if ticks[i], err = strconv.ParseUint(fields[i+1], 10, 64); err != nil {
+				return Load{}, fmt.Errorf("failed to parse CPU times %q: %w", strings.TrimSpace(line), err)
+			}
+		}
+		// Guest time is already counted in user and nice.
+		var total uint64
+		for _, tick := range ticks {
+			total += tick
+		}
+		idle := ticks[3] + ticks[4]
+		load.CPUs = append(load.CPUs, CPUTime{Busy: total - idle, Total: total})
+	}
+	if len(load.CPUs) == 0 {
+		return Load{}, fmt.Errorf("no per-CPU times in %s", procStat)
+	}
+	interfaces, err := os.ReadDir(sysClassNet)
+	if err != nil {
+		return Load{}, fmt.Errorf("failed to list network interfaces: %w", err)
+	}
+	for _, entry := range interfaces {
+		// Only interfaces backed by a device, such as ENA, have this link.
+		// Loopback, the canaries' veth pairs and tunnels don't.
+		dir := filepath.Join(sysClassNet, entry.Name())
+		if _, err := os.Stat(filepath.Join(dir, "device")); err != nil {
+			continue
+		}
+		for _, counter := range []string{"rx_dropped", "rx_missed_errors", "rx_over_errors"} {
+			raw, err := os.ReadFile(filepath.Join(dir, "statistics", counter))
+			if err != nil {
+				return Load{}, fmt.Errorf("failed to read %s of %s: %w", counter, entry.Name(), err)
+			}
+			value, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+			if err != nil {
+				return Load{}, fmt.Errorf("failed to parse %s of %s: %w", counter, entry.Name(), err)
+			}
+			load.RxDrops += value
+		}
+	}
+	return load, nil
 }
 
 // sizeConnectionTable matches the kernel's connection table to conntrackd's

@@ -217,9 +217,11 @@ func runNAT(ctx context.Context, args []string) error {
 		Prober:    prober,
 		Conntrack: conntrack,
 		Table:     net,
+		Load:      net,
 		Reports:   reports,
 		Serving:   func() bool { return ctrl.Serving() },
 		Inhibited: func() bool { return ctrl.Inhibited() },
+		Session:   func() uint64 { return ctrl.Session() },
 		Now:       bootclock.Now,
 	})
 	ctrl = controller.New(controller.Config{
@@ -353,7 +355,7 @@ func (s localSteps) ActivateShared(ctx context.Context, mac string) error {
 }
 
 func (s localSteps) VerifyIdentity(ctx context.Context) error {
-	if _, err := s.prober.Upload(ctx, s.target); err != nil {
+	if err := health.VerifyPath(ctx, s.prober, s.network, s.target); err != nil {
 		return fmt.Errorf("upload through the shared Elastic IP failed: %w", err)
 	}
 	return nil

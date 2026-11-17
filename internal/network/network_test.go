@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -181,6 +183,46 @@ func TestReadConnectionTable(t *testing.T) {
 		n := newNetwork(map[string]string{sizes: "10\n262144"}, map[string]error{"conntrack -S": errors.New("conntrack failed: exit status 1")})
 		_, err := n.ReadConnectionTable(t.Context())
 		assert.EqualError(t, err, "conntrack failed: exit status 1")
+	}
+}
+
+func TestReadLoad(t *testing.T) {
+	// writeLoad writes a /proc/stat and a /sys/class/net, with ens5 backed by
+	// a device and lo not, and points ReadLoad at them.
+	writeLoad := func(t *testing.T, stat string) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o600))
+		for name, drops := range map[string][3]string{"ens5": {"40", "2", "1"}, "lo": {"500", "0", "0"}} {
+			statistics := filepath.Join(dir, "net", name, "statistics")
+			require.NoError(t, os.MkdirAll(statistics, 0o700))
+			for i, counter := range []string{"rx_dropped", "rx_missed_errors", "rx_over_errors"} {
+				require.NoError(t, os.WriteFile(filepath.Join(statistics, counter), []byte(drops[i]+"\n"), 0o600))
+			}
+		}
+		require.NoError(t, os.Mkdir(filepath.Join(dir, "net", "ens5", "device"), 0o700))
+		t.Cleanup(network.UseLoadFiles(filepath.Join(dir, "stat"), filepath.Join(dir, "net")))
+	}
+	n := network.New(testConfig(t), nil, &mocks.FakeRunner{})
+	{
+		// Each CPU's busy time is all but idle and I/O wait, and only
+		// interfaces backed by a device count their drops
+		writeLoad(t, "cpu  30 0 20 900 10 0 40 5 7 0\n"+
+			"cpu0 10 0 5 100 4 0 30 1 7 0\n"+
+			"cpu1 20 0 15 800 6 0 10 4 0 0\n"+
+			"intr 12345 0 0\nctxt 999\n")
+		load, err := n.ReadLoad(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, network.Load{CPUs: []network.CPUTime{{Busy: 46, Total: 150}, {Busy: 49, Total: 855}}, RxDrops: 43}, load)
+	}
+	{
+		writeLoad(t, "cpu  1 2 3 4 5 6 7 8 0 0\nintr 1\n")
+		_, err := n.ReadLoad(t.Context())
+		assert.ErrorContains(t, err, "no per-CPU times in")
+	}
+	{
+		writeLoad(t, "cpu0 1 2 x 4 5 6 7 8 0 0\n")
+		_, err := n.ReadLoad(t.Context())
+		assert.ErrorContains(t, err, `failed to parse CPU times "cpu0 1 2 x 4 5 6 7 8 0 0"`)
 	}
 }
 

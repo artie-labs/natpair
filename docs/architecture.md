@@ -100,6 +100,32 @@ packets it couldn't track since the last round while the table was at least
 rounds came between them. A NAT taking over also doesn't stop for such a
 round, because the copies it loads can fill its table.
 
+## Congested paths
+
+More traffic than the owner can forward loses packets, the upload's too,
+because the upload leaves through the shared Elastic IP like worker
+traffic. The standby would get the same traffic, so stepping down would
+only move the problem. So when a loaded owner's upload times out, it tries
+40 TCP handshakes with the probe receiver through the shared Elastic IP.
+Loaded means its busiest CPU was busy at least 85% of the round, or its
+network devices dropped at least 100 packets on receive. If some
+handshakes complete and some don't, the path is congested, and the round
+doesn't count as failed. If none or all complete, or the owner isn't
+loaded, as with a fault on an idle host, the round counts as before. A NAT
+taking over checks its upload through the shared Elastic IP the same way,
+so a congested shared path doesn't fail the takeover. Its health rounds
+through its own address still can, if the flood also times them out.
+
+A completed handshake can't be forged from off the path, because the
+answer must acknowledge the random sequence number the kernel chose. But
+the check can't tell a flood from a fault on a loaded owner, and an
+attacker can make a NAT look loaded by flooding it. So once an owner has
+served for 10 minutes with at least half of its health rounds in the last
+10 minutes congested or failed, it hands over to a standby that has proven
+its own path, without waiting for the standby to verify its copied
+connections. A NAT that takes over must serve 10 minutes first, so a flood
+moves the pair at most once every 10 minutes.
+
 ## Taking over
 
 When the standby takes the lease, it:
