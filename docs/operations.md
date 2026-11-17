@@ -253,10 +253,10 @@ plus host metrics. These metrics are worth watching:
   connections AWS can track for the NAT. AWS tracks one per worker
   connection on the owner's own interface, as
   [Network details](architecture.md#network-details) explains. Alert well
-  before it reaches 0. At 0, AWS drops new connections, and
-  `conntrack_allowance_exceeded` counts the dropped packets. The owner's
-  probes don't notice, so only this metric and your workers' egress check
-  show it.
+  before it reaches 0. At 0, AWS drops new connections, both workers' and
+  the NAT's own, and `conntrack_allowance_exceeded` counts the dropped
+  packets. The owner's probes go through the shared ENI and don't notice, so
+  only this metric and your workers' egress check show it.
 
 Without Datadog, ship the same journald units with your own agent. The
 network counters are in `sudo ethtool -S <interface> | grep allowance`.

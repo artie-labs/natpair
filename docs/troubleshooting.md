@@ -82,9 +82,11 @@ the NATs one at a time, as in [Replace a NAT](operations.md#replace-a-nat).
 - **Tracked connections used up.** `conntrack_allowance_exceeded` rising,
   or `conntrack_allowance_available` near 0, means AWS has no room to track
   new connections on the NAT, so it drops them. AWS tracks every worker
-  connection on the owner's own interface. Workers' new connections fail
-  while the owner's health rounds stay healthy. Move to a larger instance
-  type, as in [Replace a NAT](operations.md#replace-a-nat).
+  connection on the owner's own interface. Workers' new connections fail,
+  while the owner's probes, which go through the shared ENI, can stay
+  healthy. The owner's own new connections fail too, so it may also lose its
+  lease and hand over. Move to a larger instance type, as in
+  [Replace a NAT](operations.md#replace-a-nat).
 - **Connection table full.** When the table reaches `max_connections`, the
   kernel drops new connections and logs `nf_conntrack: table full, dropping
   packet` in `sudo dmesg`. Raise `max_connections` and replace the NATs. Each

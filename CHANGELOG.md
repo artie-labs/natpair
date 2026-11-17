@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   AWS now tracks every connection on the NATs' own interfaces, including one
   for each worker connection on the owner, and each instance type can track
-  only so many. Watch `conntrack_allowance_available`, as
+  only so many. When they run out, AWS drops new connections, both workers'
+  and the NAT's own. Watch `conntrack_allowance_available`, as
   [Monitoring](docs/operations.md#monitoring) describes.
 
   On a running pair, the apply creates `aws_security_group.own` and swaps the

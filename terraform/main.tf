@@ -190,8 +190,9 @@ resource "aws_security_group" "nat" {
 # shared ENI, and the replies to workers that leave here are allowed by the
 # outbound rule.
 resource "aws_security_group" "own" {
-  name        = "${var.name}-own"
-  description = "natpair NAT pair ${var.pair_id}, the NATs' own interfaces"
+  name = "${var.name}-own"
+  # EC2 rejects apostrophes and most other punctuation in descriptions.
+  description = "natpair NAT pair ${var.pair_id}, own interfaces"
   vpc_id      = data.aws_vpc.this.id
 
   # A new description would replace the group while the NATs use it.
@@ -200,15 +201,27 @@ resource "aws_security_group" "own" {
   }
 
   # conntrackd's copies are the only traffic the NATs start toward each other.
-  # They come from the peer's own interface, or, on v0.1.1 and earlier, from
-  # the shared ENI. Allowing the two groups rather than the VPC's CIDRs
-  # keeps every other host in the VPC from injecting connection entries.
+  # Allowing the pair's groups rather than the VPC's CIDRs keeps every other
+  # host in the VPC from injecting connection entries. Between the NATs' own
+  # interfaces, copies fit the 9001-byte MTU in one packet.
   ingress {
-    description     = "conntrackd copies from the peer NAT"
-    from_port       = 3780
-    to_port         = 3780
-    protocol        = "udp"
-    self            = true
+    description = "conntrackd copies from the peer NAT"
+    from_port   = 3780
+    to_port     = 3780
+    protocol    = "udp"
+    self        = true
+  }
+
+  # Copies come from the owner's shared ENI on v0.1.1 and earlier, and on
+  # later releases for up to 5 s whenever the host route to the peer is
+  # missing. Its MTU is 1500, so they arrive as IP fragments, and fragments
+  # after the first carry no UDP port. So this rule allows every protocol.
+  # Only the NAT that holds the shared ENI sends from it.
+  ingress {
+    description     = "conntrackd copies from the shared ENI, including IP fragments"
+    from_port       = 0
+    to_port         = 0
+    protocol        = "-1"
     security_groups = [aws_security_group.nat.id]
   }
 

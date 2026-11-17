@@ -129,10 +129,12 @@ old release. See [operations](operations.md#upgrade) for the steps.
   replies to copied connections arrive at the other instance, and AWS would
   drop replies it tracked on the old one.
 - Each NAT's own interface, which carries its own Elastic IP, has another
-  group. Its only inbound rule lets in conntrackd's copies, UDP port 3780,
-  from the peer NAT. So AWS tracks every connection on this interface, lets
-  in only replies to what the NAT sent, and drops anything else from the
-  internet before it reaches the NAT. This traffic uses the own interface:
+  group. Its only inbound rules let in conntrackd's copies from the peer NAT:
+  UDP port 3780 from the peer's own interface, and every protocol from the
+  shared ENI, whose copies arrive as IP fragments. So AWS tracks every
+  connection on this interface, lets in only replies to what the NAT sent,
+  and drops anything else from the internet before it reaches the NAT. This
+  traffic uses the own interface:
   - The NAT's own connections, out and back: lease renewals and health
     reports, AWS API calls such as moving the shared ENI, Session Manager,
     the standby's own-path probes, release downloads and Datadog.
@@ -149,11 +151,14 @@ old release. See [operations](operations.md#upgrade) for the steps.
   rule allows everything.
 - Tracking has a cost. AWS tracks the replies to workers too, one entry per
   worker connection, and each instance type can track only so many
-  connections at once. An entry lasts until AWS sees the connection close or
-  it stays idle for the interface's tracking timeout, 5 days by default for
-  TCP on most instance types. Once the limit is reached, AWS drops packets
-  of new connections on that NAT, including workers'. The owner's probes
-  leave through the shared ENI, so they don't notice.
+  connections at once. AWS sees only the replies, never the worker's side of
+  the connection, so an entry may last until the interface's idle timeout,
+  5 days by default for TCP on most instance types, even after the
+  connection closes. Once the limit is reached, AWS drops packets of new
+  connections on that NAT. That includes workers' new connections and the
+  NAT's own, such as a new connection for lease renewals, so the owner can
+  lose its lease. The owner's probes leave through the shared ENI, so they
+  don't notice.
   [Monitoring](operations.md#monitoring) says which counters to watch.
 - The host firewall on each NAT filters traffic to the NAT itself, which
   matters most on the shared ENI. It accepts new connections only from the
@@ -183,7 +188,8 @@ old release. See [operations](operations.md#upgrade) for the steps.
   owner itself.
 - **Connection copies.** conntrackd sends connection state to the peer in
   cleartext over UDP port 3780. The own interface's security group accepts
-  it only from the peer NAT, and the host firewall only from inside the VPC.
+  it only from the pair's own interfaces and the shared ENI, and the host
+  firewall only from inside the VPC.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs
