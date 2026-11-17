@@ -182,14 +182,40 @@ and see
 A NAT you put in maintenance by hand isn't upgraded until you run
 `natpair resume`.
 
+An upgrade doesn't change the NATs' Amazon Linux image or kernel. New NATs
+boot the newest image on the module's `kernel` line, 6.18 by default. To move
+a running pair to another line, or to a newer image on the same line,
+[replace the NATs](#replace-a-nat). AWS adds a new long-term support kernel
+line to Amazon Linux 2023 each year and supports each for four years, though
+not past Amazon Linux 2023's own end of life on June 30, 2029
+([kernel lifecycle](https://docs.aws.amazon.com/linux/al2023/ug/kernel-lifecycle.html)).
+So plan to move `kernel` forward about once a year. A new line first needs a
+module release that adds it to the values `kernel` accepts.
+
+6.12 and 6.18 need a daemon that turns on threaded NAPI, as every release from
+this module's version on does. So keep `release` on the module's version, or
+set `kernel = "6.1"`. On a 6.12 or 6.18 pair, roll back only to such a
+release. On an older one, a NAT whose forwarding fills its CPU times out its
+lease renewals and DNS lookups again. `terraform plan` fails when `kernel` is
+6.12 or 6.18 and `release` is v0.1.0 or v0.1.1, the two releases without
+threaded NAPI. Before this module version, the image lookup could already
+put NATs on 6.12 or 6.18, so check `uname -r` on each NAT of a pair that runs
+an older release. If one runs 6.12 or 6.18, upgrade `release`, or set
+`kernel = "6.1"` and replace that NAT.
+
+Move off a line before its support ends. AWS then stops publishing images for
+it, and each image is deprecated 90 days after its release. Once the last one
+is deprecated, the image lookup finds none, and every `terraform plan` for the
+pair fails, even though running NATs keep their image.
+
 ## Replace a NAT
 
 Running NATs keep the image, configuration and boot script they launched
 with. These changes need new NATs:
 
 - `worker_cidrs`, `max_connections`, `release_url`,
-  `datadog_api_key_secret_arn` and `datadog_site`, and a new CIDR on the VPC
-  when `worker_cidrs` is left at its default
+  `datadog_api_key_secret_arn`, `datadog_site` and `kernel`, and a new CIDR
+  on the VPC when `worker_cidrs` is left at its default
 - a newer Amazon Linux image
 - a module upgrade whose changelog says so
 
@@ -234,8 +260,8 @@ to apply to both at once.
 `max_connections` is the most connections each NAT tracks and copies to its
 peer. When the table is full, the kernel drops new connections. Size it for
 your peak with room to spare. A closed TCP connection stays in the table for
-120 s, so each new connection a second holds about 120 entries, and the
-default of 524,288 sustains about 4,000 new connections a second on top of
+30 s, so each new connection a second holds about 30 entries, and the
+default of 524,288 sustains about 17,000 new connections a second on top of
 the long-lived ones.
 
 Memory follows the connections in the table, not the limit. Measured on AWS,
@@ -281,6 +307,8 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `forced the stuck shared ENI detach. Stop and start the NAT it was attached to before it serves again.` is logged | That NAT needs a stop and start. See [troubleshooting](troubleshooting.md#forced-the-stuck-shared-eni-detach). |
 | `update` lines continue for more than an hour | An upgrade is stuck. The `reason` field says why. |
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |
+| `the connection table is full` is logged | The kernel is dropping new worker connections. `the connection table is nearly full` warns earlier, at 90%. See [troubleshooting](troubleshooting.md#the-connection-table-is-full). |
+| `the health probe failed because this NAT's connection table is full` is logged | The owner's uploads fail because of the full table, not its path, so it stays the owner instead of stepping down. Workers' new connections fail the same way. See [troubleshooting](troubleshooting.md#the-health-probe-failed-because-this-nats-connection-table-is-full). |
 | `worker connections to one destination use most of the shared address's ports` is logged, or the owner's `shared_ports_used` passes 0.7 | New connections to that destination will soon fail. See [troubleshooting](troubleshooting.md#worker-connections-to-one-destination-use-most-of-the-shared-addresss-ports). |
 | `failed to count the shared address's ports in use` repeats for 10 minutes | `shared_ports_used` keeps the latest count that succeeded, so the alert above can't see the ports in use now. |
 
