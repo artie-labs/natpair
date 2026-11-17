@@ -132,10 +132,12 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 }
 
 // protectHost blocks new connections to the NAT's own services, such as SSH
-// and conntrackd, from outside the VPC. The security group can't do it: it
-// must allow all TCP and UDP, or AWS tracks connections through the NAT and,
-// after a takeover, drops replies to the ones it tracked on the old owner.
-// Traffic the NAT forwards doesn't pass through this chain.
+// and conntrackd, from outside the VPC. The shared ENI's security group can't
+// do it: it must allow all TCP and UDP, or AWS tracks connections through the
+// shared ENI and, after a takeover, drops replies to the ones it tracked on
+// the old owner. On the NAT's own interface, the Terraform module's group
+// already drops new connections from the internet, so there this chain is a
+// second layer. Traffic the NAT forwards doesn't pass through this chain.
 func (n *Network) protectHost(ctx context.Context) error {
 	rules := "*filter\n:" + inputChain + " - [0:0]\n-F " + inputChain + "\n"
 	rules += "-A " + inputChain + " -i lo -j ACCEPT\n"

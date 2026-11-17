@@ -241,7 +241,7 @@ If you ship the NATs' logs, these alerts cover the rest:
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.
 It ships the logs of `natpair.service`, `natpair-bootstrap.service` and
 `conntrackd.service`, tagged `service:natpair` and `natpair_pair:<pair_id>`,
-plus host metrics. Two metrics are worth watching:
+plus host metrics. These metrics are worth watching:
 
 - `system.net.conntrack.count`, the size of the connection table, against
   `system.net.conntrack.max`.
@@ -249,6 +249,14 @@ plus host metrics. Two metrics are worth watching:
   `allowance_exceeded` counters. They count packets AWS queued or dropped
   because the instance hit its network limits, a sign the instance type is
   too small.
+- `system.net.aws.ec2.conntrack_allowance_available`, how many more
+  connections AWS can track for the NAT. AWS tracks one per worker
+  connection on the owner's own interface, as
+  [Network details](architecture.md#network-details) explains. Alert well
+  before it reaches 0. At 0, AWS drops new connections, and
+  `conntrack_allowance_exceeded` counts the dropped packets. The owner's
+  probes don't notice, so only this metric and your workers' egress check
+  show it.
 
 Without Datadog, ship the same journald units with your own agent. The
 network counters are in `sudo ethtool -S <interface> | grep allowance`.

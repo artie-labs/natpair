@@ -27,9 +27,10 @@ symptom or a log message.
    routed to the pair but missing from them gets no internet access. So does
    one in a CIDR added to the VPC after the NATs launched.
 5. **Do the NATs' own uploads work?** If the owner's health rounds show
-   `"healthy":true` but workers still fail, the problem is between the
-   workers and the NAT, such as a network ACL or the workers' security
-   group. natpair can't detect this, which is why
+   `"healthy":true` but workers still fail, the problem is on a path the
+   owner's probes don't use, such as a network ACL, the workers' security
+   group, or [tracked connections used up](#the-nat-is-too-small) on the
+   owner. natpair can't detect this, which is why
    [an egress check on the workers](operations.md#monitoring) matters.
 
 ## The standby isn't ready
@@ -78,6 +79,12 @@ the NATs one at a time, as in [Replace a NAT](operations.md#replace-a-nat).
   `system.net.aws.ec2.*_allowance_exceeded`. Move to an instance type with
   more baseline bandwidth, as in
   [Replace a NAT](operations.md#replace-a-nat).
+- **Tracked connections used up.** `conntrack_allowance_exceeded` rising,
+  or `conntrack_allowance_available` near 0, means AWS has no room to track
+  new connections on the NAT, so it drops them. AWS tracks every worker
+  connection on the owner's own interface. Workers' new connections fail
+  while the owner's health rounds stay healthy. Move to a larger instance
+  type, as in [Replace a NAT](operations.md#replace-a-nat).
 - **Connection table full.** When the table reaches `max_connections`, the
   kernel drops new connections and logs `nf_conntrack: table full, dropping
   packet` in `sudo dmesg`. Raise `max_connections` and replace the NATs. Each

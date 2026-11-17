@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Anyone on the internet could send traffic to each NAT's own Elastic IP,
+  because one security group, open to all TCP and UDP, covered every
+  interface of the pair. The host firewall dropped it, but only after the NAT
+  had received it. On AWS, a flood of 1 million packets a second at a 1-vCPU
+  NAT's own address made it lose its lease. Each NAT's own interface now has
+  its own security group, `<name>-own`. It lets in only conntrackd's copies
+  from the peer NAT and replies to what the NAT sent, so AWS drops the rest
+  before it reaches the NAT. The shared ENI keeps the open group.
+
+  AWS now tracks every connection on the NATs' own interfaces, including one
+  for each worker connection on the owner, and each instance type can track
+  only so many. Watch `conntrack_allowance_available`, as
+  [Monitoring](docs/operations.md#monitoring) describes.
+
+  On a running pair, the apply creates `aws_security_group.own` and swaps the
+  groups on `aws_network_interface.nat` in place, with no new NATs and no
+  handover. Worker traffic, conntrackd's copies and lease renewals carry on.
+  The NATs' other connections to the internet that are open during the swap,
+  such as Session Manager sessions, may drop and reconnect, and the standby
+  may fail one own-path probe. To roll back, apply the previous module
+  version, which swaps the groups back the same way.
+
 ### Fixed
 
 - On a fresh apply, the NATs' SSM agent never came online and the Datadog

@@ -132,7 +132,8 @@ locals {
 
 # Network
 
-# NATs take worker traffic and copy connections to each other with conntrackd.
+# The shared ENI's group. Worker traffic arrives on the shared ENI, and the
+# internet's replies to it come back there.
 resource "aws_security_group" "nat" {
   name        = var.name
   description = "natpair NAT pair ${var.pair_id}"
@@ -153,7 +154,7 @@ resource "aws_security_group" "nat" {
   }
 
   # With all TCP and UDP open in both directions, AWS doesn't track connections
-  # through the NATs. Tracked state stays on the host that held the shared ENI,
+  # through the shared ENI. Tracked state would stay on the NAT that held it,
   # so after a takeover AWS would drop the replies to copied connections. Each
   # NAT's host firewall drops new connections to its own services from outside
   # the VPC.
@@ -181,13 +182,54 @@ resource "aws_security_group" "nat" {
   }
 }
 
+# The group of each NAT's own interface, which carries the NAT's own Elastic
+# IP. With no inbound rule from the internet, AWS tracks every connection
+# here, lets in only replies to what the NAT sent, and drops floods at the
+# NAT's own address before they reach the instance. Tracked state on this
+# interface never matters after a takeover: worker traffic arrives on the
+# shared ENI, and the replies to workers that leave here are allowed by the
+# outbound rule.
+resource "aws_security_group" "own" {
+  name        = "${var.name}-own"
+  description = "natpair NAT pair ${var.pair_id}, the NATs' own interfaces"
+  vpc_id      = data.aws_vpc.this.id
+
+  # A new description would replace the group while the NATs use it.
+  lifecycle {
+    ignore_changes = [description]
+  }
+
+  # conntrackd's copies are the only traffic the NATs start toward each other.
+  # They come from the peer's own interface, or, on v0.1.1 and earlier, from
+  # the shared ENI. Allowing the two groups rather than the VPC's CIDRs
+  # keeps every other host in the VPC from injecting connection entries.
+  ingress {
+    description     = "conntrackd copies from the peer NAT"
+    from_port       = 3780
+    to_port         = 3780
+    protocol        = "udp"
+    self            = true
+    security_groups = [aws_security_group.nat.id]
+  }
+
+  # The NAT's own connections go anywhere, and replies to workers go to the
+  # VPC. Narrowing this wouldn't contain a compromised NAT, which can send
+  # anything through the shared ENI.
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
 # Each NAT's primary interface is created first, so each NAT's configuration
 # can name its peer's address.
 resource "aws_network_interface" "nat" {
   for_each = local.peer
 
   subnet_id         = var.public_subnet_id
-  security_groups   = [aws_security_group.nat.id]
+  security_groups   = [aws_security_group.own.id]
   source_dest_check = false
   tags              = { Name = "${var.name}-nat-${each.key}" }
 }

@@ -119,14 +119,46 @@ old release. See [operations](operations.md#upgrade) for the steps.
 
 - Both NATs and the shared ENI must be in one availability zone, because an
   ENI can't move between zones.
-- The NATs' security group allows all traffic from the VPC's CIDRs, and all
-  TCP and UDP ports from anywhere. With every port open, AWS doesn't track
-  connections through the NATs. That matters because after a takeover, the
+- AWS security groups normally track connections: AWS records each one, so
+  it can let replies back in without an inbound rule for them. A flow isn't
+  tracked when its rules allow all TCP or UDP from anywhere, in both
+  directions.
+- The shared ENI has its own security group. It allows all traffic from the
+  VPC's CIDRs, and all TCP and UDP ports from anywhere, so AWS doesn't track
+  connections through it. That matters because after a takeover, the
   replies to copied connections arrive at the other instance, and AWS would
   drop replies it tracked on the old one.
-- So the host firewall on each NAT is what filters traffic to the NAT itself.
-  It accepts new connections only from the VPC and the peer, resets other TCP
-  and drops everything else. Traffic the NAT forwards doesn't pass through it.
+- Each NAT's own interface, which carries its own Elastic IP, has another
+  group. Its only inbound rule lets in conntrackd's copies, UDP port 3780,
+  from the peer NAT. So AWS tracks every connection on this interface, lets
+  in only replies to what the NAT sent, and drops anything else from the
+  internet before it reaches the NAT. This traffic uses the own interface:
+  - The NAT's own connections, out and back: lease renewals and health
+    reports, AWS API calls such as moving the shared ENI, Session Manager,
+    the standby's own-path probes, release downloads and Datadog.
+  - Replies to workers, out only. Worker traffic arrives on the shared ENI,
+    but the internet's replies to it leave toward the workers through the
+    NAT's own interface, because the workers are in the VPC.
+  - conntrackd's copies, in and out.
+
+  Security groups don't filter the VPC's DNS resolver, instance metadata or
+  the Amazon Time Sync Service at all.
+- Tracked state on a NAT's own interface never matters after a takeover.
+  Worker traffic arrives on the shared ENI, which isn't tracked, and replies
+  to workers leave the new owner through its own interface, whose outbound
+  rule allows everything.
+- Tracking has a cost. AWS tracks the replies to workers too, one entry per
+  worker connection, and each instance type can track only so many
+  connections at once. An entry lasts until AWS sees the connection close or
+  it stays idle for the interface's tracking timeout, 5 days by default for
+  TCP on most instance types. Once the limit is reached, AWS drops packets
+  of new connections on that NAT, including workers'. The owner's probes
+  leave through the shared ENI, so they don't notice.
+  [Monitoring](operations.md#monitoring) says which counters to watch.
+- The host firewall on each NAT filters traffic to the NAT itself, which
+  matters most on the shared ENI. It accepts new connections only from the
+  VPC and the peer, resets other TCP and drops everything else. Traffic the
+  NAT forwards doesn't pass through it.
 - The module adds a DynamoDB gateway endpoint to the public route table, so
   lease renewals and health reports reach DynamoDB without depending on the
   internet path the NATs forward. Workers' DynamoDB traffic goes through the
@@ -143,9 +175,15 @@ old release. See [operations](operations.md#upgrade) for the steps.
   records and move only its own pair's shared ENI.
   [The module reference](../terraform/README.md#what-the-nats-may-do) lists
   every permission.
+- **Exposure to the internet.** AWS drops unsolicited traffic to each NAT's
+  own Elastic IP, so a flood at that address never reaches the NAT, and the
+  standby can't be reached from the internet at all. The shared Elastic IP
+  stays open to all TCP and UDP, because forwarded traffic must not be
+  tracked. There, the host firewall resets or drops new connections to the
+  owner itself.
 - **Connection copies.** conntrackd sends connection state to the peer in
-  cleartext over UDP port 3780. The host firewall accepts it only from inside
-  the VPC.
+  cleartext over UDP port 3780. The own interface's security group accepts
+  it only from the peer NAT, and the host firewall only from inside the VPC.
 - **Encryption at rest.** The lease table uses DynamoDB's AWS owned key. The
   root volumes are encrypted with the account's default EBS key, AWS managed
   `aws/ebs` unless you've set another, so whoever launches the NATs needs
