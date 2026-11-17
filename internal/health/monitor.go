@@ -12,7 +12,10 @@
 package health
 
 import (
+	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -109,8 +112,37 @@ const (
 	// the table being full.
 	nearlyFullPercent = 90
 	// tableWarnInterval is the shortest time between repeats of each warning
-	// about the connection table.
+	// about the connection table, and about the handshake check.
 	tableWarnInterval = 60 * BaseInterval
+	// handshakeAttempts is how many TCP handshakes an owner whose upload
+	// timed out tries at once, to tell a congested path from a dead one. On
+	// AWS, forwarding more small UDP packets than the CPU could process lost
+	// 64 to 87% of pings through the NAT. At 87%, all 40 fail in 0.4% of
+	// rounds. A step-down needs two such rounds in a row, which at about
+	// 1.5 s a round come about once a day. Each failed attempt keeps an
+	// entry in the connection table for up to 2 minutes, a few thousand
+	// entries while an overload lasts.
+	handshakeAttempts = 40
+	// loadedCPUPercent and loadedDrops decide whether an owner is loaded
+	// over a round: its busiest CPU was busy for at least loadedCPUPercent
+	// of the round, or its network devices dropped at least loadedDrops
+	// packets on receive. Only a loaded owner runs the handshake check, so
+	// only load can excuse a timed-out probe as congestion. The kernel
+	// forwards in softirq time, so an owner getting more than it can forward
+	// keeps at least one CPU busy, or its device drops what the host can't
+	// take in, thousands of packets a second on AWS. A fault that loses
+	// packets on an idle host shows neither, so its failed rounds count and
+	// the owner fails over in about 15 s, as before.
+	loadedCPUPercent = 85
+	loadedDrops      = 100
+	// congestionWindow is the trailing time over which a serving NAT judges
+	// how congested its path is. See [Report.CongestionLimit]. Load excuses
+	// a congested round, and an attacker who floods a NAT can make it look
+	// loaded, so the window bounds how long a flood can delay failing over
+	// from a damaged owner. A NAT that takes over must serve a whole window
+	// first, so it is also the shortest time between the moves a flood
+	// causes.
+	congestionWindow = 10 * time.Minute
 )
 
 // StaleAfter returns how old a report from rounds of the given interval may
@@ -161,6 +193,19 @@ type Report struct {
 	// PeerConfirmedFailure means the peer proved its path while this NAT was
 	// failing, so the failure is this NAT's. An owner steps down only then.
 	PeerConfirmedFailure bool `json:"peer_confirmed_failure"`
+	// Congested means this NAT is serving and its upload timed out, but
+	// some of its handshakes through the shared Elastic IP completed while
+	// others were lost. The path works but drops packets, as when more
+	// traffic arrives than the NAT can forward, so the round doesn't count as
+	// a path failure.
+	Congested bool `json:"congested"`
+	// CongestionLimit means this NAT has served for its whole congestion
+	// window, and at least half of its rounds in that window were congested
+	// or counted as failed. WindowRounds and WindowBadRounds count them.
+	// Only this NAT reads these, so they aren't sent to the peer.
+	CongestionLimit bool `json:"-"`
+	WindowRounds    int  `json:"-"`
+	WindowBadRounds int  `json:"-"`
 	// CanTakeover means this NAT can forward and is not in maintenance or cooldown.
 	CanTakeover     bool `json:"can_takeover"`
 	PeerReady       bool `json:"peer_ready"`
@@ -196,9 +241,13 @@ type Config struct {
 	Release string
 }
 
-// Prober sends one verified upload.
+// Prober checks a path.
 type Prober interface {
+	// Upload sends one verified upload.
 	Upload(ctx context.Context, target probe.Target) (probe.Flow, error)
+	// Handshakes opens attempts TCP connections to target's receiver at once
+	// and returns how many connected.
+	Handshakes(ctx context.Context, target probe.Target, attempts int) (int, error)
 }
 
 // Conntrack reads conntrackd's counters and copied connections.
@@ -221,6 +270,11 @@ type ConnectionTable interface {
 	ReadConnectionTable(ctx context.Context) (network.ConnectionTable, error)
 }
 
+// LoadMeter reads how busy this NAT is.
+type LoadMeter interface {
+	ReadLoad(ctx context.Context) (network.Load, error)
+}
+
 // Reports exchanges reports with the peer NAT.
 type Reports interface {
 	Publish(ctx context.Context, report any, interval time.Duration) error
@@ -234,12 +288,16 @@ type Dependencies struct {
 	Prober    Prober
 	Conntrack Conntrack
 	Table     ConnectionTable
+	Load      LoadMeter
 	Reports   Reports
 	// Serving reports whether this NAT currently forwards worker traffic.
 	Serving func() bool
 	// Inhibited reports maintenance, or the cooldown after stepping down or a
 	// failed takeover.
 	Inhibited func() bool
+	// Session returns the number of the controller's current or latest
+	// ownership session. It changes each time this NAT takes the lease.
+	Session func() uint64
 	// SharedPortsUsed returns the busiest destination's share of the shared
 	// address's ports.
 	SharedPortsUsed func() float64
@@ -255,7 +313,7 @@ type timedFlow struct {
 // roundState is the part of a round's result that is logged as soon as it
 // changes.
 type roundState struct {
-	healthy, tableFull, ready, serving, peerReady bool
+	healthy, tableFull, congested, ready, serving, peerReady bool
 }
 
 // Monitor runs health rounds and keeps the latest report.
@@ -269,7 +327,17 @@ type Monitor struct {
 	successes int
 	// uncounted is how many rounds counted neither way since the last failed
 	// round.
-	uncounted       int
+	uncounted int
+	// window holds this NAT's rounds while serving, oldest first, back to
+	// congestionWindow ago. windowBad counts those that were congested or
+	// counted as failed. servingSince is when this NAT's current stretch of
+	// serving rounds started, in ownership session windowSession, if
+	// windowStarted. Standing by or a new session clears them.
+	window          []windowRound
+	windowBad       int
+	servingSince    time.Duration
+	windowStarted   bool
+	windowSession   uint64
 	flows           []timedFlow
 	lastReplication time.Duration
 	replicated      bool
@@ -304,6 +372,8 @@ type Monitor struct {
 	tableRead bool
 	// These limit how often each warning about the connection table repeats.
 	tableUnread, nearlyFull, full, fullProbe warning
+	// These limit how often each warning about the handshake check repeats.
+	unchecked, congestedProbe, loadUnread warning
 	// logged is the state of the last logged round, logged at loggedAt.
 	logged    roundState
 	loggedAt  time.Duration
@@ -399,12 +469,36 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	if serving {
 		target = m.config.ServingProbe
 	}
+	// The load over the round runs from here to after the upload. Only an
+	// owner needs it.
+	var before network.Load
+	var beforeErr error
+	if serving {
+		before, beforeErr = m.deps.Load.ReadLoad(ctx)
+	}
 	flow, probeErr := m.deps.Prober.Upload(ctx, target)
 	healthy := probeErr == nil
 	now := m.deps.Now()
 	// Read after the upload, so the drops since the last reading include the
 	// upload's packets.
 	tableFull := m.readTable(ctx, now)
+	// Lost packets fail an upload only by running it out of time, since TCP
+	// resends them. Any other failure, such as a reply showing the wrong
+	// source address, came back over the path, so it counts without a check.
+	// A standby's load doesn't move with the shared ENI, so its failures
+	// count too.
+	completed, checked := 0, false
+	var load roundLoad
+	if serving && !tableFull && errors.Is(probeErr, probe.ErrTimeout) {
+		load = m.readLoad(ctx, before, beforeErr, now)
+	}
+	if load.loaded() {
+		completed, checked = m.handshakes(ctx, target, now)
+		// The check takes up to half a second, and the report should be as
+		// old as the round's end.
+		now = m.deps.Now()
+	}
+	congested := checked && congestedPath(completed)
 
 	// countedFailure is whether this round counts as failed.
 	countedFailure := false
@@ -426,9 +520,28 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			slog.Warn("the health probe failed because this NAT's connection table is full, so it doesn't count as a path failure",
 				slog.Any("probe_error", probeErr), slog.Int("connections", m.table.Connections), slog.Int("max_connections", m.table.Max))
 		}
+	case congested:
+		// The upload leaves through the shared Elastic IP and is translated
+		// like worker traffic, so when forwarding loses packets it loses
+		// the upload's too, and the upload runs out of time. The handshakes
+		// that completed prove the path delivers both ways, and the peer
+		// would get the same traffic on taking over. On AWS, an owner
+		// forwarding more UDP than its CPU could process stepped down, the
+		// new owner did too seconds later, and the pair moved 2 to 4 times
+		// a minute, each move pausing forwarding for about 10 s. So this
+		// round ends any run of failures. It ends any run of successes too,
+		// because no upload passed, so this NAT stops offering to take over
+		// and the peer's updater doesn't reboot the only NAT that could.
+		m.failures, m.successes = 0, 0
 	default:
 		m.failures, m.successes, m.uncounted = m.failures+1, 0, 0
 		countedFailure = true
+	}
+	limit := m.recordWindow(serving, congested || countedFailure, now)
+	if congested && m.congestedProbe.due(now) {
+		slog.Warn("the health probe failed, but the path is alive, so forwarding is congested and it doesn't count as a path failure",
+			slog.Any("probe_error", probeErr), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts),
+			slog.Int("window_bad_rounds", m.windowBad), slog.Int("window_rounds", len(m.window)))
 	}
 	var flows []timedFlow
 	for _, flow := range m.flows {
@@ -541,6 +654,10 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		ProvenWhilePeerFailing: m.peerFailing && healthy,
 		PeerConfirmedFailure:   peerOK && peer.ProvenWhilePeerFailing,
 		Release:                m.config.Release,
+		Congested:              congested,
+		CongestionLimit:        limit,
+		WindowRounds:           len(m.window),
+		WindowBadRounds:        m.windowBad,
 		Serving:                serving,
 		PeerRelease:            peer.Release,
 		PeerServing:            peerOK && peer.Serving,
@@ -562,20 +679,30 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	// up almost all of natpair's logs, about 36,000 lines a day per owner.
 	// Failed rounds and changes are logged at once, and otherwise one round
 	// each logInterval.
-	state := roundState{healthy: healthy, tableFull: report.TableFull, ready: ready, serving: serving, peerReady: report.PeerReady}
+	state := roundState{healthy: healthy, tableFull: report.TableFull, congested: congested, ready: ready, serving: serving, peerReady: report.PeerReady}
 	// Each round that counts as failed is logged. Others, including failed
-	// rounds that don't count, such as with a full table, which can last
-	// hours, are logged when something changes and once a minute.
+	// rounds that don't count, such as with a full table or a congested
+	// path, which can last hours, are logged when something changes and
+	// once a minute.
 	if countedFailure || !m.hasLogged || state != m.logged || now-m.loggedAt >= logInterval {
 		m.logged, m.loggedAt, m.hasLogged = state, now, true
-		slog.Info("health round",
+		attrs := []any{
 			slog.Bool("healthy", healthy), slog.Bool("copied", verified), slog.Bool("ready", ready),
 			slog.Bool("peer_ready", report.PeerReady), slog.Duration("duration", m.deps.Now()-started),
 			slog.Bool("serving", serving), slog.Any("probe_error", probeErr), slog.Bool("table_full", tableFull),
+			slog.Bool("congested", congested),
 			slog.Int("tracked_connections", tracked), slog.Int("copied_connections", copied),
 			slog.Int("peer_tracked_connections", peer.TrackedConnections),
 			slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
-			slog.Float64("shared_ports_used", report.SharedPortsUsed), slog.String("release", m.config.Release))
+			slog.Float64("shared_ports_used", report.SharedPortsUsed), slog.String("release", m.config.Release),
+		}
+		if load.measured {
+			attrs = append(attrs, slog.Int("busiest_cpu_percent", load.busiestCPUPercent), slog.Uint64("rx_drops", load.drops))
+		}
+		if checked {
+			attrs = append(attrs, slog.Int("handshakes", completed))
+		}
+		slog.Info("health round", attrs...)
 	}
 	return report
 }
@@ -616,6 +743,176 @@ func (m *Monitor) readTable(ctx context.Context, now time.Duration) bool {
 		}
 	}
 	return full
+}
+
+// handshakes tries handshakeAttempts TCP handshakes through target's path,
+// after an upload that timed out, and returns how many completed. It reports
+// false if it couldn't try, such as when the receiver's address is unknown.
+//
+// Some but not all completing means the path delivers but loses packets.
+// None completing means it's dead. All completing means small packets get
+// through without loss, so the upload failed for another reason, such as a
+// path that drops full-size packets, and the failure counts. A handshake
+// can't be forged from off the path, because the answer must acknowledge
+// the random sequence number the kernel chose for the SYN, and a flood can
+// only make handshakes fail.
+func (m *Monitor) handshakes(ctx context.Context, target probe.Target, now time.Duration) (int, bool) {
+	completed, err := m.deps.Prober.Handshakes(ctx, target, handshakeAttempts)
+	if err != nil {
+		if m.unchecked.due(now) {
+			slog.Warn("failed to check whether the path is alive, so the failed probe counts", slog.Any("err", err))
+		}
+		return 0, false
+	}
+	return completed, true
+}
+
+// windowRound is one serving round in a NAT's congestion window.
+type windowRound struct {
+	at  time.Duration
+	bad bool
+}
+
+// recordWindow adds this round to the congestion window and reports
+// whether the window has reached the limit: this NAT has served for the
+// whole congestionWindow, and at least half of its rounds in it were
+// congested or counted as failed.
+//
+// The share of bad rounds, not an unbroken run of them, is what counts.
+// A fault that loses most of the owner's packets still lets an upload
+// through now and then, and a burst of traffic can fail single rounds.
+// Neither resets the window, so neither can keep a damaged owner. A pair
+// whose path is mostly healthy, with the odd congested round, never
+// reaches half, so it doesn't move. A NAT that just took over must serve
+// the whole window first, so a flood that congests whichever NAT owns
+// moves the pair at most once per window.
+//
+// Rounds start at most once per BaseInterval, so the window holds at most
+// congestionWindow/BaseInterval rounds, and older ones are dropped beyond
+// that too.
+func (m *Monitor) recordWindow(serving, bad bool, now time.Duration) bool {
+	if !serving {
+		m.window, m.windowBad, m.windowStarted = nil, 0, false
+		return false
+	}
+	// A new ownership session starts a new window too. A NAT that hands
+	// over and takes the lease back, such as when its peer offered to take
+	// over but couldn't, may run no round while standing by in between.
+	if session := m.deps.Session(); !m.windowStarted || session != m.windowSession {
+		m.window, m.windowBad = nil, 0
+		m.servingSince, m.windowStarted, m.windowSession = now, true, session
+	}
+	m.window = append(m.window, windowRound{at: now, bad: bad})
+	if bad {
+		m.windowBad++
+	}
+	maxRounds := int(congestionWindow / BaseInterval)
+	for len(m.window) > 0 && (now-m.window[0].at >= congestionWindow || len(m.window) > maxRounds) {
+		if m.window[0].bad {
+			m.windowBad--
+		}
+		m.window = m.window[1:]
+	}
+	return now-m.servingSince >= congestionWindow && len(m.window) > 0 && 2*m.windowBad >= len(m.window)
+}
+
+// congestedPath reports whether completed of handshakeAttempts handshakes
+// show a congested path: some completed and the rest were lost.
+func congestedPath(completed int) bool {
+	return completed > 0 && completed < handshakeAttempts
+}
+
+// VerifyPath sends an upload through target, as a takeover does through
+// the shared Elastic IP before it opens forwarding. It also passes when the
+// upload ran out of time while this NAT was loaded and the path is
+// congested, by the same rule as a serving NAT's rounds. Under a flood that
+// follows the shared Elastic IP, uploads can time out for as long as the
+// flood lasts. Without this, a NAT taking over kept retrying until its
+// takeover timed out, with no NAT forwarding. A NAT that isn't loaded, or a
+// dead path, which completes no handshake, still fails.
+//
+// A handshake doesn't show the source address the receiver saw, as the
+// upload does, but it still proves the shared path. The takeover's target
+// is the shared canary, so the handshakes start from the canary's address
+// in its namespace (see probe.Client.Handshakes). This NAT translates that
+// address to the shared ENI's private address and routes it by the shared
+// ENI's route table (network.PrepareNetwork). The Internet gateway maps
+// that private address to the shared Elastic IP only for packets leaving
+// through the shared ENI, and the receiver's answer goes to the Elastic IP,
+// which reaches only the NAT that holds the shared ENI. So a handshake
+// completes only if the mapping works for this NAT. While the shared ENI
+// is still attached to the other NAT, answers go there, and none of this
+// NAT's handshakes completes.
+func VerifyPath(ctx context.Context, prober Prober, meter LoadMeter, target probe.Target) error {
+	before, beforeErr := meter.ReadLoad(ctx)
+	_, err := prober.Upload(ctx, target)
+	if err == nil || !errors.Is(err, probe.ErrTimeout) {
+		return err
+	}
+	after, afterErr := meter.ReadLoad(ctx)
+	if loadErr := cmp.Or(beforeErr, afterErr); loadErr != nil {
+		return fmt.Errorf("%w, and this NAT's load couldn't be read: %w", err, loadErr)
+	}
+	load := loadBetween(before, after)
+	if !load.loaded() {
+		return fmt.Errorf("%w, and this NAT isn't loaded: busiest CPU %d%%, %d packets dropped on receive", err, load.busiestCPUPercent, load.drops)
+	}
+	completed, checkErr := prober.Handshakes(ctx, target, handshakeAttempts)
+	if checkErr != nil {
+		return fmt.Errorf("%w, and the check of whether the path is alive failed: %w", err, checkErr)
+	}
+	if !congestedPath(completed) {
+		return fmt.Errorf("%w, and %d of %d handshakes completed", err, completed, handshakeAttempts)
+	}
+	slog.Warn("the upload through the shared Elastic IP timed out, but the path is alive, so forwarding is congested and the path counts as verified",
+		slog.Any("probe_error", err), slog.Int("handshakes", completed), slog.Int("attempts", handshakeAttempts),
+		slog.Int("busiest_cpu_percent", load.busiestCPUPercent), slog.Uint64("rx_drops", load.drops))
+	return nil
+}
+
+// roundLoad is how busy this NAT was over a round, if measured.
+type roundLoad struct {
+	busiestCPUPercent int
+	drops             uint64
+	measured          bool
+}
+
+// loaded reports whether the load was measured and high enough that a
+// timed-out probe may be congestion. See loadedCPUPercent.
+func (l roundLoad) loaded() bool {
+	return l.measured && (l.busiestCPUPercent >= loadedCPUPercent || l.drops >= loadedDrops)
+}
+
+// loadBetween returns the load between two readings.
+func loadBetween(before, after network.Load) roundLoad {
+	load := roundLoad{measured: true}
+	for i := range min(len(before.CPUs), len(after.CPUs)) {
+		start, end := before.CPUs[i], after.CPUs[i]
+		if end.Total <= start.Total || end.Busy < start.Busy {
+			continue
+		}
+		total := end.Total - start.Total
+		busy := min(end.Busy-start.Busy, total)
+		load.busiestCPUPercent = max(load.busiestCPUPercent, int(busy*100/total))
+	}
+	if after.RxDrops > before.RxDrops {
+		load.drops = after.RxDrops - before.RxDrops
+	}
+	return load
+}
+
+// readLoad returns this NAT's load from before, read at the start of the
+// round, to now. Without both readings, it reports the load unmeasured, so
+// the failed round counts.
+func (m *Monitor) readLoad(ctx context.Context, before network.Load, beforeErr error, now time.Duration) roundLoad {
+	after, err := m.deps.Load.ReadLoad(ctx)
+	if err = cmp.Or(beforeErr, err); err != nil {
+		if m.loadUnread.due(now) {
+			slog.Warn("failed to read this NAT's load, so the failed probe counts", slog.Any("err", err))
+		}
+		return roundLoad{}
+	}
+	return loadBetween(before, after)
 }
 
 // warning limits a repeated warning to one each tableWarnInterval.

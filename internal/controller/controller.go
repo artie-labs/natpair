@@ -72,6 +72,7 @@ var (
 	errHandover    = errors.New("handover requested")
 	errDemoted     = errors.New("stepped down after corroborated path failure")
 	errTakeover    = errors.New("takeover failed")
+	errCongested   = errors.New("handed over after too many congested rounds")
 )
 
 // Fence opens and closes worker forwarding.
@@ -129,6 +130,8 @@ type Controller struct {
 	// handover asks the owner to hand ownership to a ready peer. Each acquired
 	// lease clears it. See [Controller.SetHandover].
 	handover atomic.Bool
+	// sessions counts the leases this NAT has acquired.
+	sessions atomic.Uint64
 }
 
 // New returns a controller.
@@ -146,6 +149,12 @@ func (c *Controller) Serving() bool {
 // already true while the takeover runs.
 func (c *Controller) Owner() bool {
 	return c.owner.Load()
+}
+
+// Session returns the number of this NAT's current or latest ownership
+// session: how many times it has taken the lease since it started.
+func (c *Controller) Session() uint64 {
+	return c.sessions.Load()
 }
 
 // Inhibited reports maintenance, or the cooldown after stepping down or a
@@ -181,7 +190,10 @@ func (c *Controller) Run(ctx context.Context) error {
 		// API comes back, and the 12 s cooldown would then delay its next attempt.
 		// The cooldown starts before the release and before this NAT reports
 		// that it stopped serving, so the peer never sees it as both idle and
-		// ready to take over.
+		// ready to take over. A handover after a long congestion needs none:
+		// no upload of this NAT passed recently, so it could contend only as
+		// a last resort, after its peer, which has proven its path, takes the
+		// released lease.
 		if errors.Is(err, errDemoted) || (errors.Is(err, errTakeover) && c.deps.Health.Latest().PeerCanTakeover) {
 			c.startCooldown()
 		}
@@ -283,6 +295,7 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 					}
 				}
 				if acquired != nil {
+					c.sessions.Add(1)
 					c.owner.Store(true)
 					// A request made before this session belongs to an earlier
 					// one, so it must not hand this one over.
@@ -307,6 +320,22 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 				if c.handover.Load() {
 					return errHandover
 				}
+			}
+			// The check can't tell a flood from a fault that damaged this NAT's
+			// path, such as one losing 90% of packets, which still lets some
+			// handshakes through. So a congested owner also hands over once at
+			// least half of its rounds over its whole congestion window were
+			// congested or failed (see health.Report.CongestionLimit). A
+			// congested owner's uploads time out, so it publishes no probe
+			// flows, and its peer can't show it copied them, so a peer that can
+			// take over is enough. A flood congests the new owner too, which
+			// must then serve a whole window first, so the pair moves at most
+			// once per window. A congested peer never gets it: no upload of its
+			// passed either, so it can't take over.
+			if !report.Stale && report.Congested && report.PeerCanTakeover && report.CongestionLimit {
+				slog.Warn("handing over because at least half of this NAT's health rounds in the last 10 minutes were congested or failed, so connections the peer hasn't copied may reset",
+					slog.Int("window_bad_rounds", report.WindowBadRounds), slog.Int("window_rounds", report.WindowRounds))
+				return errCongested
 			}
 			if !storeDown {
 				if _, err := l.Valid(); err != nil {

@@ -118,6 +118,32 @@ packets it couldn't track since the last round while the table was at least
 rounds came between them. A NAT taking over also doesn't stop for such a
 round, because the copies it loads can fill its table.
 
+## Congested paths
+
+More traffic than the owner can forward loses packets, the upload's too,
+because the upload leaves through the shared Elastic IP like worker
+traffic. The standby would get the same traffic, so stepping down would
+only move the problem. So when a loaded owner's upload times out, it tries
+40 TCP handshakes with the probe receiver through the shared Elastic IP.
+Loaded means its busiest CPU was busy at least 85% of the round, or its
+network devices dropped at least 100 packets on receive. If some
+handshakes complete and some don't, the path is congested, and the round
+doesn't count as failed. If none or all complete, or the owner isn't
+loaded, as with a fault on an idle host, the round counts as before. A NAT
+taking over checks its upload through the shared Elastic IP the same way,
+so a congested shared path doesn't fail the takeover. Its health rounds
+through its own address still can, if the flood also times them out.
+
+A completed handshake can't be forged from off the path, because the
+answer must acknowledge the random sequence number the kernel chose. But
+the check can't tell a flood from a fault on a loaded owner, and an
+attacker can make a NAT look loaded by flooding it. So once an owner has
+served for 10 minutes with at least half of its health rounds in the last
+10 minutes congested or failed, it hands over to a standby that has proven
+its own path, without waiting for the standby to verify its copied
+connections. A NAT that takes over must serve 10 minutes first, so a flood
+moves the pair at most once every 10 minutes.
+
 ## Taking over
 
 When the standby takes the lease, it:
@@ -142,6 +168,41 @@ compares it with the release it runs.
 
 A release that never gets ready stays on the standby, so traffic stays on the
 old release. See [operations](operations.md#upgrade) for the steps.
+
+## Forwarding at full load
+
+Linux processes received packets in softirq context, kernel work that the
+scheduler doesn't manage like a process. How that work shares the CPU with the
+daemon depends on the kernel:
+
+- Linux 6.1 runs softirq work in the ksoftirqd threads once there is more than
+  it can finish at once. The scheduler shares the CPU between those threads
+  and the daemon, so a NAT whose forwarding fills the CPU still renews its
+  lease.
+- Linux 6.5 and later run pending softirq work in whatever task re-enables
+  bottom halves, which the daemon does in many of its own system calls.
+  Upstream made this change in commit
+  [d15121be7485](https://git.kernel.org/torvalds/c/d15121be7485655129101f3960ae6add40204463)
+  ("Revert "softirq: Let ksoftirqd do its job""), which names threaded NAPI
+  as the way to keep receive work under the scheduler. On a c7gn.large on
+  Linux 6.18 with both CPUs full of forwarding, 96.7% of the daemon's CPU
+  samples were forwarding work. It used 31.5% of a CPU, and in a 60 s run its
+  lease renewals timed out 11 times and its DNS lookups and probes 35 times.
+
+NAPI is how Linux polls a network device's receive queues. So the daemon turns
+on threaded NAPI (writes 1 to `/sys/class/net/<interface>/threaded`) for every
+ENI: when it starts, right after the shared ENI comes up during a takeover,
+and every 5 s, which also catches an ENI that wasn't up yet. Each receive
+queue is then polled by a kernel thread named `napi/<interface>-<id>`, at the
+default priority, and the scheduler shares the CPU between those threads and
+the daemon as it did with ksoftirqd on 6.1. On the same 6.18 NAT and load with
+threaded NAPI on, the daemon used about 1% of a CPU, with no lease or DNS
+timeouts, and the NAT forwarded 4 to 6% less.
+
+The daemon leaves interfaces without a device, such as `lo`, alone, and
+leaves any value other than 0 in `threaded`, such as 2 for busy polling on
+newer kernels. If something else writes 0, the daemon writes 1 again within
+5 s.
 
 ## Network details
 
@@ -184,6 +245,12 @@ old release. See [operations](operations.md#upgrade) for the steps.
   records and move only its own pair's shared ENI.
   [The module reference](../terraform/README.md#what-the-nats-may-do) lists
   every permission.
+- **Receive threads.** The daemon turns on threaded NAPI for the ENIs, as in
+  [Forwarding at full load](#forwarding-at-full-load). It needs no new
+  permission: it already runs as root. The receive threads run at the
+  default priority, so a flood of traffic to a NAT's own address competes for
+  the CPU as an equal of forwarding, not ahead of it. The host firewall still
+  drops it.
 - **Connection copies.** conntrackd sends connection state to the peer in
   cleartext over UDP port 3780. The host firewall accepts it only from inside
   the VPC.
