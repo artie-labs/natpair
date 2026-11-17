@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-17
+
+Read [Upgrade](docs/operations.md#upgrade) before you upgrade. To keep the
+2-minute wait before the owner hands over, hold the standby back while you
+pin the release.
+
 ### Added
 
 - The owner counts worker connections per destination address, port and
@@ -170,5 +176,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traffic from every CIDR of the VPC unless you set `worker_cidrs`.
 - Optional Datadog agent that ships natpair's logs and host metrics.
 
+[0.2.0]: https://github.com/artie-labs/natpair/releases/tag/v0.2.0
 [0.1.1]: https://github.com/artie-labs/natpair/releases/tag/v0.1.1
 [0.1.0]: https://github.com/artie-labs/natpair/releases/tag/v0.1.0

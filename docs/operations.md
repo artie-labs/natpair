@@ -182,6 +182,21 @@ and see
 A NAT you put in maintenance by hand isn't upgraded until you run
 `natpair resume`.
 
+The owner can hand over without the 2-minute wait. That happens when the
+standby reboots into the new release and becomes ready between two of the
+owner's once-a-minute checks. Connections still survive the handover, but a
+release that fails soon after it starts isn't caught first. To keep the wait,
+hold the standby back while you pin:
+
+1. Run `natpair maintenance` on the standby.
+2. Run `terraform apply` with the new pin.
+3. Wait for the owner's next `update` log line, within a minute, to say
+   `waiting for the peer to run the pinned release and be ready`.
+4. Run `natpair resume` on the standby.
+
+From step 1 to step 4 the standby doesn't offer to take over, so the pair has
+no failover. Keep those steps short.
+
 An upgrade doesn't change the NATs' Amazon Linux image or kernel. New NATs
 boot the newest image on the module's `kernel` line, 6.18 by default. To move
 a running pair to another line, or to a newer image on the same line,
