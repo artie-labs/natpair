@@ -242,7 +242,9 @@ func (n *Network) protectHost(ctx context.Context) error {
 		"-j REJECT --reject-with tcp-reset\n", inputChain, n.cfg.SharedAddress.Addr(), strings.Replace(workerPorts, "-", ":", 1), resetLimit, resetBurst)
 	// Everything else from outside the VPC is dropped without an answer. VPC
 	// sources and the peer were accepted above, so they still get the
-	// kernel's reset from a closed port and fail fast.
+	// kernel's reset from a closed port on the shared address and fail fast.
+	// On the NAT's own address, the module's security group drops their
+	// traffic first, apart from conntrackd's copies and ICMP errors.
 	rules += "-A " + inputChain + " -j DROP\nCOMMIT\n"
 	if _, err := n.run.RunWithInput(ctx, commandTimeout, rules, "iptables-restore", "--noflush", "-w", "1"); err != nil {
 		return err

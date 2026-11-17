@@ -54,12 +54,13 @@ run "security_groups" {
     error_message = "The shared ENI must carry only the shared group."
   }
 
-  # The own group lets in only conntrackd's copies: UDP 3780 between the own
-  # interfaces, and every protocol from the shared ENI, whose copies arrive as
-  # IP fragments without ports. No CIDR, so nothing from the internet.
+  # The own group lets in only conntrackd's copies, UDP 3780 between the own
+  # interfaces and every protocol from the shared ENI, whose copies arrive as
+  # IP fragments without ports, and ICMP errors from the VPC. Nothing from the
+  # internet.
   assert {
-    condition     = length(aws_security_group.own.ingress) == 2
-    error_message = "The own group must have exactly two inbound rules."
+    condition     = length(aws_security_group.own.ingress) == 4
+    error_message = "The own group must have exactly four inbound rules."
   }
   assert {
     condition = anytrue([for rule in aws_security_group.own.ingress :
@@ -75,6 +76,17 @@ run "security_groups" {
       try(length(rule.cidr_blocks), 0) == 0 && try(length(rule.ipv6_cidr_blocks), 0) == 0 && try(length(rule.prefix_list_ids), 0) == 0
     ])
     error_message = "The own group must allow every protocol from the shared group, and no CIDR."
+  }
+  assert {
+    condition = alltrue([for type in [3, 11] : anytrue([for rule in aws_security_group.own.ingress :
+      rule.protocol == "icmp" && rule.from_port == type && rule.to_port == -1 &&
+      toset(rule.cidr_blocks) == toset(["10.0.0.0/16", "100.64.0.0/16"]) && !coalesce(rule.self, false) && try(length(rule.security_groups), 0) == 0
+    ])])
+    error_message = "The own group must allow ICMP destination unreachable and time exceeded from every VPC CIDR only."
+  }
+  assert {
+    condition     = alltrue([for rule in aws_security_group.own.ingress : !contains(coalesce(rule.cidr_blocks, ["none"]), "0.0.0.0/0")])
+    error_message = "The own group must not allow anything from the internet."
   }
   assert {
     condition     = length(aws_security_group.own.egress) == 1 && alltrue([for rule in aws_security_group.own.egress : rule.protocol == "-1" && toset(rule.cidr_blocks) == toset(["0.0.0.0/0"])])

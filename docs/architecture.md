@@ -140,12 +140,13 @@ old release. See [operations](operations.md#upgrade) for the steps.
   replies to copied connections arrive at the other instance, and AWS would
   drop replies it tracked on the old one.
 - Each NAT's own interface, which carries its own Elastic IP, has another
-  group. Its only inbound rules let in conntrackd's copies from the peer NAT:
-  UDP port 3780 from the peer's own interface, and every protocol from the
-  shared ENI, whose copies arrive as IP fragments. So AWS tracks every
-  connection on this interface, lets in only replies to what the NAT sent,
-  and drops anything else from the internet before it reaches the NAT. This
-  traffic uses the own interface:
+  group. Its inbound rules let in only two things. The first is conntrackd's
+  copies from the peer NAT: UDP port 3780 from the peer's own interface, and
+  every protocol from the shared ENI, whose copies arrive as IP fragments.
+  The second is ICMP errors from the VPC, such as for path MTU discovery.
+  So AWS tracks every connection on this interface, lets in only replies to
+  what the NAT sent, and drops anything else from the internet before it
+  reaches the NAT. This traffic uses the own interface:
   - The NAT's own connections, out and back: lease renewals and health
     reports, AWS API calls such as moving the shared ENI, Session Manager,
     the standby's own-path probes, release downloads and Datadog.
@@ -207,7 +208,9 @@ old release. See [operations](operations.md#upgrade) for the steps.
   it only from the pair's own interfaces and the shared ENI, and the host
   firewall only from inside the VPC.
 - **Host firewall.** It accepts new connections to the NAT only from the VPC
-  and the peer, which get the kernel's usual reset from a closed port. From
+  and the peer, which get the kernel's usual reset from a closed port on the
+  shared address. On a NAT's own address, its security group drops their
+  traffic first, apart from conntrackd's copies and ICMP errors. From
   outside the VPC, it drops everything without an answer, on every port of
   the NAT's own and shared addresses. The one exception is TCP without SYN
   to the shared address that matches no connection the NAT tracks, on a

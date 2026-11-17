@@ -52,8 +52,8 @@ See [`examples/`](../examples) for complete configurations.
   with it
 - two security groups: `<name>` on the shared ENI, open to all TCP and UDP so
   AWS doesn't track forwarded connections, and `<name>-own` on each NAT's own
-  interface, which lets in only conntrackd's copies from the peer NAT and
-  replies to what the NAT sent
+  interface, which lets in only conntrackd's copies from the peer NAT, ICMP
+  errors from the VPC, and replies to what the NAT sent
 - a DynamoDB gateway endpoint on the public route table, unless
   `create_dynamodb_endpoint` is false
 - a DynamoDB table, `<name>`, with on-demand billing, and the item that pins

@@ -70,15 +70,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connections a new owner never copied, but only on ports 1024 to 60999,
   and at most 50 at once and then 10 a second for each remote address.
   Worker TCP is now translated to those ports on the shared address. The
-  VPC and the peer still get resets from closed ports.
+  VPC and the peer still get resets from closed ports on the shared address.
 - Anyone on the internet could send traffic to each NAT's own Elastic IP,
   because one security group, open to all TCP and UDP, covered every
   interface of the pair. The host firewall dropped it, but only after the NAT
   had received it. On AWS, a flood of 1 million packets a second at a 1-vCPU
   NAT's own address made it lose its lease. Each NAT's own interface now has
   its own security group, `<name>-own`. It lets in only conntrackd's copies
-  from the peer NAT and replies to what the NAT sent, so AWS drops the rest
-  before it reaches the NAT. The shared ENI keeps the open group.
+  from the peer NAT, ICMP errors from the VPC and replies to what the NAT
+  sent, so AWS drops the rest before it reaches the NAT. The shared ENI keeps
+  the open group, so a flood at the shared Elastic IP still reaches the
+  owner.
 
   AWS now tracks every connection on the NATs' own interfaces, including one
   for each worker connection on the owner, and each instance type can track

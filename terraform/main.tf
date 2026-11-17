@@ -228,6 +228,28 @@ resource "aws_security_group" "own" {
     security_groups = [aws_security_group.nat.id]
   }
 
+  # ICMP errors about the NAT's own connections into the VPC, which the old
+  # group let in with everything else from the VPC's CIDRs. Path MTU discovery
+  # needs fragmentation-needed (type 3), for example toward a peered VPC or a
+  # VPN with a smaller MTU than the NAT's 9001. The host firewall accepts the
+  # same types: destination unreachable (3) and time exceeded (11). ICMP from
+  # the internet stays blocked, as before.
+  ingress {
+    description = "ICMP destination unreachable from the VPC"
+    from_port   = 3
+    to_port     = -1
+    protocol    = "icmp"
+    cidr_blocks = local.vpc_cidrs
+  }
+
+  ingress {
+    description = "ICMP time exceeded from the VPC"
+    from_port   = 11
+    to_port     = -1
+    protocol    = "icmp"
+    cidr_blocks = local.vpc_cidrs
+  }
+
   # The NAT's own connections go anywhere, and replies to workers go to the
   # VPC. Narrowing this wouldn't contain a compromised NAT, which can send
   # anything through the shared ENI.
