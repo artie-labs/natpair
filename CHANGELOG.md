@@ -12,9 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The default `max_connections` is 524,288, up from 262,144. Each connection
   in the table costs the owner about 1.9 KB of memory and up to 2.6 KB during
   a takeover, far more than the 160 MB per 262,144 the docs said. 524,288
-  fits within half of a 4 GiB instance. NATs pick up the new default when
-  they boot into this release. On an instance with less than 4 GiB, such as
-  c7gn.medium, set `max_connections = 262144`. See
+  fits within half of a 4 GiB instance. NATs that leave `max_connections`
+  unset move to the new default when they reboot into this release, as the
+  upgrade itself does. **Before upgrading a pair whose NATs have less than
+  4 GiB, such as c7gn.medium,** set `max_connections = 262144` and replace
+  both NATs one at a time, as in
+  [Replace a NAT](docs/operations.md#replace-a-nat), while still on the
+  release they run. NATs read the setting only when they're created. See
   [Size the connection table](docs/operations.md#size-the-connection-table).
 - The kernel's connection table and conntrackd's caches have one hash bucket
   per connection, up from a quarter, so lookups in a full table stay short.
@@ -32,8 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connections as the owner tracks. One that stays short for 30 s asks for a
   full copy again, and planned maintenance and upgrades wait for it. In the
   first upgrade to this release, the upgraded standby copies from an owner
-  still on the old settings, so its first copy may come up short. Each
-  repeated copy fills more of the gaps.
+  still on the old settings. The standby's larger receive buffer is what
+  keeps the copy whole, so it should arrive complete, as it did in a local
+  test with 250,000 connections. If the standby still isn't ready after a few
+  minutes, see [Upgrade](docs/operations.md#upgrade).
 
 - On a fresh apply, the NATs' SSM agent never came online and the Datadog
   agent install failed, because the NATs booted before their IAM policy was
