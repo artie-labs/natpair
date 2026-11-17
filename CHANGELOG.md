@@ -19,8 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The default `max_connections` is 524,288, up from 262,144. Each connection
-  in the table costs the owner about 1.9 KB of memory and up to 2.6 KB during
-  a takeover, far more than the 160 MB per 262,144 the docs said. 524,288
+  in the table costs the owner about 1.1 KB of memory and up to 2.3 KB after
+  a takeover, more than the 160 MB per 262,144 the docs said. 524,288
   fits within half of a 4 GiB instance. NATs pick up the new default when
   they boot into this release. On an instance with less than 4 GiB, such as
   c7gn.medium, set `max_connections = 262144`. See

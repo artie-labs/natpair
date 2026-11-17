@@ -232,20 +232,21 @@ default of 524,288 sustains about 4,000 new connections a second on top of
 the long-lived ones.
 
 Memory follows the connections in the table, not the limit. Measured on AWS,
-each connection costs the owner about 1.9 KB: 0.4 KB in the kernel's table,
-0.55 KB in conntrackd and the rest in natpair. A takeover is the peak. The
-NAT that steps down still holds its whole table while it takes in the new
-owner's copy, about 2.6 KB a connection. Keep that peak under half the
-instance's memory:
+each connection costs the owner about 1.1 KB: 0.4 KB in the kernel's table
+and 0.55 KB in conntrackd, plus buffers. natpair itself stays at about 20 MB
+whatever the table holds. A takeover is the peak. Right after it, conntrackd
+holds both the table it tracks and the copy it received, and it doesn't give
+memory back, so a NAT reaches about 2.3 KB a connection. Keep that peak
+under half the instance's memory:
 
-| `max_connections` | Owner with a full table | Peak in a takeover | Smallest instance memory |
+| `max_connections` | Owner with a full table | Peak after a takeover | Smallest instance memory |
 | --- | --- | --- | --- |
-| 131,072 | 0.25 GB | 0.35 GB | 1 GiB |
-| 262,144 | 0.5 GB | 0.7 GB | 2 GiB, such as c7gn.medium |
-| 524,288, the default | 1.0 GB | 1.4 GB | 4 GiB, such as c7gn.large |
-| 1,048,576 | 2.0 GB | 2.7 GB | 8 GiB, such as c7gn.xlarge |
-| 2,097,152 | 4.0 GB | 5.5 GB | 16 GiB |
-| 4,194,304 | 8.0 GB | 11 GB | 32 GiB |
+| 131,072 | 0.15 GB | 0.3 GB | 1 GiB |
+| 262,144 | 0.3 GB | 0.6 GB | 2 GiB, such as c7gn.medium |
+| 524,288, the default | 0.6 GB | 1.2 GB | 4 GiB, such as c7gn.large |
+| 1,048,576 | 1.2 GB | 2.4 GB | 8 GiB, such as c7gn.xlarge |
+| 2,097,152 | 2.3 GB | 4.8 GB | 16 GiB |
+| 4,194,304 | 4.6 GB | 9.6 GB | 32 GiB |
 
 On AWS, 2,097,152 connections on a 4 GiB NAT ran it out of memory, and the
 kernel killed conntrackd, so nothing was copied. A larger table also costs
