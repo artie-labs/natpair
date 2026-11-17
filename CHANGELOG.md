@@ -10,15 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Without `max_connections`, each NAT now sizes its connection table from
-  its memory at every boot: the largest power of two whose peak use, about
-  2.6 KB a connection during a takeover, fits in half the memory. That's
-  262,144 for 2 GiB, as before, 524,288 for 4 GiB and 1,048,576 for 8 GiB. A
-  NAT that can't read its memory uses 262,144, and a set `max_connections`
-  still wins. NATs with less than about 1.3 GiB, such as t4g.micro, go down
-  to 131,072 or 65,536. Upgrading such a pair waits until the owner holds
-  fewer connections than that, because the upgraded standby can't hold a
-  larger copy. The docs said a connection cost about a third of what it does.
-  Rolling back to an earlier release puts NATs with more memory back on
+  its memory at every boot: the largest power of two whose peak use, counted
+  as 2.6 KB a connection (about 2.3 KB was measured after a takeover), fits
+  in half the memory. That's 262,144 for 2 GiB, as before, 524,288 for 4 GiB
+  and 1,048,576 for 8 GiB. A NAT that can't read its memory uses 262,144, and
+  a set `max_connections` still wins. NATs with less than about 1.3 GiB, such
+  as t4g.micro, go down to 131,072 or 65,536. Upgrading such a pair waits
+  until the owner holds fewer connections than that, because the upgraded
+  standby can't hold a larger copy. The docs said a connection cost about a
+  third of what it does. Rolling back to an earlier release puts NATs with
+  more memory back on
   262,144, so roll back only while the owner holds fewer connections than
   that. A handover to the earlier release resets the rest. See
   [Size the connection table](docs/operations.md#size-the-connection-table).
@@ -53,6 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the copy whole, so it should arrive complete, as it did in a local
   test with 250,000 connections. If the standby still isn't ready after a few
   minutes, see [Upgrade](docs/operations.md#upgrade).
+- From about 800,000 connections, natpair's checks of the standby's copy ran
+  past their 2 s limit, so the standby never became ready and planned
+  maintenance and upgrades never handed over. Every health round also read
+  one of conntrackd's whole caches as text into natpair's memory, up to
+  600 MB. natpair now reads the caches outside the health rounds, its oldest
+  connections once a minute and the copies only until it finds the owner's
+  oldest connections, keeping only the few connections it looks for. It
+  confirms that copies keep arriving from conntrackd's counters instead.
 - On Linux 6.5 and later, such as the Amazon Linux 2023 6.18 kernel, a NAT
   whose forwarding filled its CPU did that forwarding inside its daemon's
   system calls, so its lease renewals and DNS lookups timed out. The daemon

@@ -40,8 +40,10 @@ with copied connections until it's fixed. The other fields say why:
 - **`"healthy":false` with a `probe_error`.** The standby's own path to the
   internet fails. Check its Elastic IP, the public subnet's route to the
   internet gateway, and the error itself.
-- **`"copied":false`.** The standby's copy is missing the owner's recent
-  connections, or holds less than 95% as many connections as the owner
+- **`"copied":false`.** conntrackd added no copy of the owner's
+  connections in the last 15 s, the standby's copy is missing some of the
+  owner's oldest connections (`peer_oldest_copied` is less than
+  `peer_oldest`), or it holds less than 95% as many connections as the owner
   tracks and lacks more than 100: compare `copied_connections` with
   `peer_tracked_connections`. Check conntrackd on both NATs with
   `sudo systemctl status conntrackd`, and look for the conntrackd messages
@@ -127,9 +129,9 @@ NAT takes over before conntrackd is back, existing connections are reset.
 
 ### `copied connections are incomplete, requesting a full copy from the peer`
 
-For two rounds, the standby's copy missed some of the owner's oldest
-connections, or for 30 s it held less than 95% as many connections as the
-owner tracks, so it asks the owner for a full copy. This fixes itself. If it repeats for
+The standby's copy missed one of the owner's oldest connections for more
+than 70 s, or for 30 s held less than 95% as many connections as the owner
+tracks, so it asks the owner for a full copy. This fixes itself. If it repeats for
 more than 5 minutes, check the network between the NATs and conntrackd on
 both. `sudo conntrackd -C /var/lib/natpair/conntrackd.conf -s` on the standby
 shows the copies it received and lost.

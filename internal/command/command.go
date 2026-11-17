@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -44,4 +45,42 @@ func lastBytes(value string, limit int) string {
 		return value[len(value)-limit:]
 	}
 	return value
+}
+
+// Stream runs name with args and passes its standard output to read as it
+// arrives, so a large output never has to fit in memory. The command and any
+// processes it starts are killed if it outlives timeout, or if read returns an
+// error. read must otherwise read to the end, or the command waits for it
+// until timeout.
+func Stream(ctx context.Context, timeout time.Duration, read func(io.Reader) error, name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("%s failed: %w", name, err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%s failed: %w", name, err)
+	}
+	readErr := read(stdout)
+	if readErr != nil {
+		// Stop the command, so Wait doesn't block on output nobody reads.
+		cancel()
+	}
+	waitErr := cmd.Wait()
+	switch {
+	case readErr != nil:
+		return fmt.Errorf("failed to read the output of %s: %w", name, readErr)
+	case waitErr != nil:
+		return fmt.Errorf("%s failed: %w: %s", name, waitErr, lastBytes(stderr.String(), 500))
+	}
+	return nil
 }

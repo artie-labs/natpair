@@ -84,14 +84,21 @@ is up.
   second. The probe receiver, a Lambda function URL that requires IAM
   authentication, sends the upload back, so large packets are tested in both
   directions.
-- **The standby** checks its own path every 5 s through its own Elastic IP,
-  and checks that its copy of the connection table holds the owner's recent
-  probe connections, the owner's 16 oldest connections, and at least 95% as
-  many connections as the owner tracks, or all but 100 in a small table.
+- **The standby** checks its own path every 5 s through its own Elastic IP.
+  It checks that conntrackd keeps adding copies of the owner's new
+  connections, such as its probe connections, that its copy holds the
+  owner's 16 oldest established connections, and that it holds at least 95%
+  as many connections as the owner tracks, or all but 100 in a small table.
   The oldest connections are a sample, and a copy that lost part of the
   table usually still holds them, so the count catches what the sample
-  misses. A copy missing an oldest connection for two rounds, or short of
-  the count for 30 s, asks the owner for a full copy again.
+  misses. A copy missing an oldest connection for 70 s, or short of the
+  count for 30 s, asks the owner for a full copy again.
+- Finding the oldest connections, and looking for them among the copies,
+  has conntrackd write a whole cache, which takes seconds for a large
+  table. natpair does it outside the health rounds, reads its oldest
+  connections once a minute, and looks for the owner's only until it finds
+  them and then every 5 minutes. It keeps only the connections it looks
+  for, so its own memory doesn't grow with the table.
 - Each NAT writes a short report to DynamoDB after every round, so the peer
   can see it.
 

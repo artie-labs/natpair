@@ -268,23 +268,24 @@ about 30 entries: 524,288 sustains about 17,000 new connections a second on
 top of the long-lived ones.
 
 Memory follows the connections in the table, not the limit. Measured on AWS,
-each connection costs the owner about 1.9 KB: 0.4 KB in the kernel's table,
-0.55 KB in conntrackd and the rest in natpair. A takeover is the peak. The
-NAT that steps down still holds its whole table while it takes in the new
-owner's copy, about 2.6 KB a connection. Without `max_connections`, each NAT
-picks the largest limit whose peak fits in half its memory at every boot, and
-logs `connection limit` with the reason. A NAT that can't read its memory
-uses 262,144. Set `max_connections` only to go lower, or higher with that
-risk:
+each connection costs the owner about 1.1 KB: 0.4 KB in the kernel's table
+and 0.55 KB in conntrackd, plus buffers. natpair itself stays at about 20 MB
+whatever the table holds. A takeover is the peak. Right after it, conntrackd
+holds both the table it tracks and the copy it received, and it doesn't give
+memory back, so a NAT reaches about 2.3 KB a connection. Without
+`max_connections`, each NAT picks the largest limit whose peak, counted as
+2.6 KB a connection for room, fits in half its memory at every boot, and logs
+`connection limit` with the reason. A NAT that can't read its memory uses
+262,144. Set `max_connections` only to go lower, or higher with that risk:
 
-| Instance memory | Limit | Owner with a full table | Peak in a takeover |
+| Instance memory | Limit | Owner with a full table | Peak after a takeover |
 | --- | --- | --- | --- |
-| 1 GiB | 131,072 | 0.25 GB | 0.35 GB |
-| 2 GiB, such as c7gn.medium | 262,144 | 0.5 GB | 0.7 GB |
-| 4 GiB, such as c7gn.large | 524,288 | 1.0 GB | 1.4 GB |
-| 8 GiB, such as c7gn.xlarge | 1,048,576 | 2.0 GB | 2.7 GB |
-| 16 GiB | 2,097,152 | 4.0 GB | 5.5 GB |
-| 32 GiB or more | 4,194,304 | 8.0 GB | 11 GB |
+| 1 GiB | 131,072 | 0.15 GB | 0.3 GB |
+| 2 GiB, such as c7gn.medium | 262,144 | 0.3 GB | 0.6 GB |
+| 4 GiB, such as c7gn.large | 524,288 | 0.6 GB | 1.2 GB |
+| 8 GiB, such as c7gn.xlarge | 1,048,576 | 1.2 GB | 2.4 GB |
+| 16 GiB | 2,097,152 | 2.3 GB | 4.8 GB |
+| 32 GiB or more | 4,194,304 | 4.6 GB | 9.6 GB |
 
 Lower `max_connections` only while the owner holds fewer connections than the
 new limit. A new standby can't copy more than its limit, so until then it

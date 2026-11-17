@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,9 @@ import (
 	"github.com/artie-labs/natpair/internal/command"
 	"github.com/artie-labs/natpair/internal/netns"
 )
+
+// pairShared is the shared address of the replicas startPair creates.
+var pairShared = netip.MustParseAddr("10.99.1.100")
 
 // replica is one NAT's conntrackd in its own network namespace.
 type replica struct {
@@ -52,23 +56,43 @@ func TestHandover(t *testing.T) {
 		connect(t, a.ns, "10.99.0.1", 3000)
 		require.Eventually(t, func() bool { return strings.Contains(b.copies(t), "sport=1000 ") }, 5*time.Second, 100*time.Millisecond)
 		assert.NotContains(t, b.copies(t), "sport=3000 ")
-		// A lists the connection among its oldest, which needs conntrackd's ages.
-		internal, err := a.client.InternalCache(t.Context())
-		require.NoError(t, err)
+		// A lists an established connection among its oldest, which needs
+		// conntrackd's states and ages, and B finds its copy.
+		idle := Tuple{Src: netip.MustParseAddr("10.0.16.7"), Dst: netip.MustParseAddr("203.0.113.9"), SrcPort: 1100, DstPort: 443}
+		nsRun(t, a.ns, "conntrack", "-I", "-p", "tcp", "-s", "10.0.16.7", "-d", "203.0.113.9", "--sport", "1100", "--dport", "443",
+			"-r", "203.0.113.9", "-q", pairShared.String(), "--reply-port-src", "443", "--reply-port-dst", "40001",
+			"--state", "ESTABLISHED", "-u", "SEEN_REPLY,ASSURED", "-t", "3600")
+		var oldest []Tuple
+		require.Eventually(t, func() bool {
+			var err error
+			oldest, err = a.client.Oldest(t.Context(), 16)
+			return err == nil && slices.Contains(oldest, idle)
+		}, 5*time.Second, 100*time.Millisecond)
+		// The worker connection's SYN got no answer, so it isn't established.
 		worker := Tuple{Src: netip.MustParseAddr("10.0.16.5"), Dst: netip.MustParseAddr("203.0.113.9"), SrcPort: 1000, DstPort: 443}
-		assert.Contains(t, OldestTuples(internal, 16), worker)
+		assert.NotContains(t, oldest, worker)
+		require.Eventually(t, func() bool {
+			found, err := b.client.Copied(t.Context(), []Tuple{idle, worker})
+			return err == nil && found[idle] && found[worker]
+		}, 5*time.Second, 100*time.Millisecond)
 	}
 	{
 		// After B takes over, A holds copies of the connections B committed without asking for them.
 		assert.NotContains(t, a.copies(t), "sport=1000 ")
+		flushed := b.client.Flushes()
 		require.NoError(t, b.client.TakeOver(t.Context()))
+		// A takeover flushes both caches, which health rounds must know.
+		assert.Equal(t, flushed+1, b.client.Flushes())
 		assert.Contains(t, nsRun(t, b.ns, "conntrack", "-L", "-p", "tcp"), "dst=10.99.1.100 sport=443 dport=40000")
 		require.Eventually(t, func() bool { return strings.Contains(a.copies(t), "sport=1000 ") }, 5*time.Second, 100*time.Millisecond)
 	}
 	{
 		// A, the former owner, flushes its old entries, so they can't clash with a
 		// connection B later translates to the same shared port.
+		flushed := a.client.Flushes()
 		require.NoError(t, a.client.StepDown(t.Context()))
+		// A step-down flushes the copies, which health rounds must know.
+		assert.Equal(t, flushed+1, a.client.Flushes())
 		nsRun(t, b.ns, "conntrack", "-D", "-p", "tcp", "--orig-port-src", "1000")
 		connect(t, b.ns, "10.0.16.6", 2000)
 		require.Eventually(t, func() bool { return strings.Contains(a.copies(t), "sport=2000 ") }, 5*time.Second, 100*time.Millisecond)
@@ -156,9 +180,8 @@ func TestFullCopy(t *testing.T) {
 // startPair creates two replicas linked by a veth pair, without starting
 // their conntrackd.
 func startPair(t *testing.T) (replica, replica) {
-	shared := netip.MustParseAddr("10.99.1.100")
-	a := startReplica(t, "a", netip.MustParseAddr("10.99.0.1"), netip.MustParseAddr("10.99.0.2"), shared)
-	b := startReplica(t, "b", netip.MustParseAddr("10.99.0.2"), netip.MustParseAddr("10.99.0.1"), shared)
+	a := startReplica(t, "a", netip.MustParseAddr("10.99.0.1"), netip.MustParseAddr("10.99.0.2"), pairShared)
+	b := startReplica(t, "b", netip.MustParseAddr("10.99.0.2"), netip.MustParseAddr("10.99.0.1"), pairShared)
 	run(t, "ip", "link", "add", a.ns+"-s", "type", "veth", "peer", "name", b.ns+"-s")
 	for _, r := range []replica{a, b} {
 		run(t, "ip", "link", "set", r.ns+"-s", "netns", r.ns)
@@ -248,9 +271,7 @@ func (r replica) start(t *testing.T) {
 }
 
 func (r replica) copies(t *testing.T) string {
-	copies, err := r.client.ExternalCache(t.Context())
-	require.NoError(t, err)
-	return copies
+	return run(t, "conntrackd", "-C", r.client.ConfigPath, "-e")
 }
 
 // counts returns how many connections the replica's conntrackd tracks and
@@ -260,8 +281,8 @@ func (r replica) counts(t *testing.T) (tracked, copied int) {
 	if err != nil {
 		return 0, 0
 	}
-	tracked, copied, _ = CacheSizes(stats)
-	return tracked, copied
+	counts, _ := ParseStats(stats)
+	return counts.Tracked, counts.Copied
 }
 
 // connect opens a TCP connection from addr:port in namespace ns to the

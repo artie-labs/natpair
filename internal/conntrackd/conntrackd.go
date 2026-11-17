@@ -9,14 +9,20 @@
 package conntrackd
 
 import (
+	"bufio"
+	"bytes"
+	"cmp"
+	"container/heap"
 	"context"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/artie-labs/natpair/internal/command"
@@ -143,14 +149,39 @@ func (c Client) Stats(ctx context.Context) (string, error) {
 	return c.run(ctx, 2*time.Second, "-s")
 }
 
-// InternalCache returns `conntrackd -i` output: this NAT's own entries.
-func (c Client) InternalCache(ctx context.Context) (string, error) {
-	return c.run(ctx, 2*time.Second, "-i")
+// scanTimeout bounds a pass over one of conntrackd's caches. conntrackd
+// writes the cache from a forked process, so its own work doesn't wait for
+// the pass. On AWS, it wrote 1,990,000 entries in 7.3 s.
+const scanTimeout = 2 * time.Minute
+
+// Oldest reads `conntrackd -i`, this NAT's own entries, and returns the
+// original tuples of the count established connections conntrackd has held
+// longest, oldest first. It keeps only count entries while it reads, so its
+// memory doesn't grow with the table.
+func (c Client) Oldest(ctx context.Context, count int) ([]Tuple, error) {
+	var oldest []Tuple
+	err := c.scan(ctx, "-i", func(r io.Reader) error {
+		var err error
+		oldest, err = readOldest(r, count)
+		return err
+	})
+	return oldest, err
 }
 
-// ExternalCache returns `conntrackd -e` output: entries copied from the peer.
-func (c Client) ExternalCache(ctx context.Context) (string, error) {
-	return c.run(ctx, 2*time.Second, "-e")
+// Copied reads `conntrackd -e`, the entries copied from the peer, and
+// returns which of wanted it holds. It keeps only wanted while it reads.
+func (c Client) Copied(ctx context.Context, wanted []Tuple) (map[Tuple]bool, error) {
+	var found map[Tuple]bool
+	err := c.scan(ctx, "-e", func(r io.Reader) error {
+		var err error
+		found, err = readCopied(r, wanted)
+		return err
+	})
+	return found, err
+}
+
+func (c Client) scan(ctx context.Context, cache string, read func(io.Reader) error) error {
+	return command.Stream(ctx, scanTimeout, read, "conntrackd", "-C", c.ConfigPath, cache)
 }
 
 // RequestResync asks the peer to send its whole connection table again.
@@ -173,7 +204,12 @@ func (c Client) RequestResync(ctx context.Context) error {
 // conntrackd, and every later command waits behind it.
 func (c Client) TakeOver(ctx context.Context) error {
 	for _, flag := range []string{"-c", "-f", "-R", "-B"} {
-		if _, err := c.run(ctx, takeoverStepTimeout, flag); err != nil {
+		_, err := c.run(ctx, takeoverStepTimeout, flag)
+		// A flush that failed may still have emptied the caches.
+		if flag == "-f" {
+			flushes.Add(1)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -198,11 +234,26 @@ func (c Client) ScheduleFlush(ctx context.Context) error {
 // would commit them as dead connections.
 func (c Client) StepDown(ctx context.Context) error {
 	for _, args := range [][]string{{"-t"}, {"-f", "external"}, {"-n"}} {
-		if _, err := c.run(ctx, 2*time.Second, args...); err != nil {
+		_, err := c.run(ctx, 2*time.Second, args...)
+		// A flush that failed may still have emptied the copies.
+		if args[0] == "-f" {
+			flushes.Add(1)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// flushes counts the times TakeOver and StepDown had conntrackd flush its
+// caches. Each NAT runs one conntrackd, so one count serves every Client.
+var flushes atomic.Uint64
+
+// Flushes returns how many times TakeOver and StepDown have had conntrackd
+// flush its caches in this process.
+func (Client) Flushes() uint64 {
+	return flushes.Load()
 }
 
 func (c Client) run(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
@@ -217,87 +268,240 @@ type Tuple struct {
 	DstPort uint16     `json:"dport"`
 }
 
-// tuplePattern matches the first src/dst/sport/dport group on an entry line,
-// which is the connection's original direction.
-var tuplePattern = regexp.MustCompile(`src=(\S+) dst=(\S+) sport=(\d+) dport=(\d+)`)
-
-// agePattern matches how long conntrackd has held an entry.
-var agePattern = regexp.MustCompile(`\[active since (\d+)s\]`)
-
-// CachedTuples parses `conntrackd -e` output into the set of original tuples.
-func CachedTuples(output string) map[Tuple]bool {
-	tuples := map[Tuple]bool{}
-	for line := range strings.SplitSeq(output, "\n") {
-		if tuple, ok := parseTuple(line); ok {
-			tuples[tuple] = true
-		}
-	}
-	return tuples
+// text is how the tuple starts in conntrackd's output.
+func (t Tuple) text() string {
+	return fmt.Sprintf("src=%s dst=%s sport=%d dport=%d", t.Src, t.Dst, t.SrcPort, t.DstPort)
 }
 
-// OldestTuples parses `conntrackd -i` output and returns the original tuples
-// of the count entries conntrackd has held longest, oldest first.
-func OldestTuples(output string, count int) []Tuple {
-	type entry struct {
-		tuple Tuple
-		age   int
-	}
-	var entries []entry
-	for line := range strings.SplitSeq(output, "\n") {
-		tuple, ok := parseTuple(line)
-		match := agePattern.FindStringSubmatch(line)
-		if !ok || match == nil {
-			continue
-		}
-		age, err := strconv.Atoi(match[1])
-		if err != nil {
-			continue
-		}
-		entries = append(entries, entry{tuple: tuple, age: age})
-	}
-	slices.SortStableFunc(entries, func(a, b entry) int { return b.age - a.age })
-	var oldest []Tuple
-	for _, e := range entries[:min(count, len(entries))] {
-		oldest = append(oldest, e.tuple)
-	}
-	return oldest
+// newLines returns a scanner over conntrackd's output, one entry a line. An
+// entry is about 250 bytes, so a line past maxLine means the output isn't
+// what natpair expects.
+func newLines(r io.Reader) *bufio.Scanner {
+	const maxLine = 64 * 1024
+	lines := bufio.NewScanner(r)
+	lines.Buffer(make([]byte, 0, maxLine), maxLine)
+	return lines
 }
 
-func parseTuple(line string) (Tuple, bool) {
-	match := tuplePattern.FindStringSubmatch(line)
-	if match == nil {
+// readOldest returns the original tuples of the count established entries
+// with the longest age in r, oldest first. Lines look like
+//
+//	tcp      6 ESTABLISHED src=10.0.0.1 dst=10.0.0.2 sport=10 dport=443 src=... [ASSURED] mark=0 [active since 1184s]
+//
+// Only established connections count. Entries in other states, such as the
+// TIME_WAIT that follows every closed connection, leave the table within
+// minutes, and a peer checking for one that just left would find its copy
+// gone too. Of entries with the same age, the first one read wins.
+func readOldest(r io.Reader, count int) ([]Tuple, error) {
+	if count <= 0 {
+		return nil, nil
+	}
+	held := make(oldestHeap, 0, count)
+	lines := newLines(r)
+	for read := 0; lines.Scan(); read++ {
+		line := lines.Bytes()
+		start := bytes.Index(line, srcKey)
+		if start < 0 || !bytes.Contains(line[:start], established) {
+			continue
+		}
+		age, ok := parseAge(line)
+		if !ok {
+			continue
+		}
+		// The heap's top is the youngest it holds. A younger or equal entry
+		// can't replace it, so most lines are skipped before their tuple is
+		// parsed.
+		if len(held) == count && age <= held[0].age {
+			continue
+		}
+		tuple, ok := parseTuple(line[start:])
+		if !ok {
+			continue
+		}
+		entry := heldEntry{tuple: tuple, age: age, order: read}
+		if len(held) < count {
+			heap.Push(&held, entry)
+		} else {
+			held[0] = entry
+			heap.Fix(&held, 0)
+		}
+	}
+	if err := lines.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(held, func(a, b heldEntry) int {
+		if a.age != b.age {
+			return cmp.Compare(b.age, a.age)
+		}
+		return cmp.Compare(a.order, b.order)
+	})
+	oldest := make([]Tuple, len(held))
+	for i, entry := range held {
+		oldest[i] = entry.tuple
+	}
+	return oldest, nil
+}
+
+// readCopied returns which of wanted appear in r as an entry's original
+// tuple.
+func readCopied(r io.Reader, wanted []Tuple) (map[Tuple]bool, error) {
+	byText := make(map[string]Tuple, len(wanted))
+	for _, tuple := range wanted {
+		byText[tuple.text()] = tuple
+	}
+	found := make(map[Tuple]bool, len(wanted))
+	lines := newLines(r)
+	for lines.Scan() {
+		if len(found) == len(byText) {
+			// Read to the end anyway, since conntrackd waits until its output
+			// is read.
+			continue
+		}
+		text, ok := tupleText(lines.Bytes())
+		if !ok {
+			continue
+		}
+		// Converting the bytes inside the index expression doesn't copy them.
+		if tuple, ok := byText[string(text)]; ok {
+			found[tuple] = true
+		}
+	}
+	if err := lines.Err(); err != nil {
+		return nil, err
+	}
+	return found, nil
+}
+
+var (
+	srcKey      = []byte("src=")
+	established = []byte(" ESTABLISHED ")
+	ageKey      = []byte("[active since ")
+)
+
+// tupleText returns the line's first src, dst, sport and dport fields, the
+// connection's original direction, as they appear in the line.
+func tupleText(line []byte) ([]byte, bool) {
+	start := bytes.Index(line, srcKey)
+	if start < 0 {
+		return nil, false
+	}
+	rest := line[start:]
+	keys := []string{"src=", "dst=", "sport=", "dport="}
+	end := 0
+	for i, key := range keys {
+		if !bytes.HasPrefix(rest[end:], []byte(key)) {
+			return nil, false
+		}
+		space := bytes.IndexByte(rest[end:], ' ')
+		if space < 0 {
+			// Only the last field may end the line. A line cut off earlier,
+			// such as the last one read when a pass is stopped, isn't an
+			// entry.
+			if i < len(keys)-1 {
+				return nil, false
+			}
+			space = len(rest) - end
+		}
+		end += space + 1
+	}
+	return rest[:end-1], true
+}
+
+// parseTuple parses the first src, dst, sport and dport fields of line.
+func parseTuple(line []byte) (Tuple, bool) {
+	text, ok := tupleText(line)
+	if !ok {
 		return Tuple{}, false
 	}
-	src, srcErr := netip.ParseAddr(match[1])
-	dst, dstErr := netip.ParseAddr(match[2])
-	srcPort, srcPortErr := strconv.ParseUint(match[3], 10, 16)
-	dstPort, dstPortErr := strconv.ParseUint(match[4], 10, 16)
+	fields := strings.Fields(string(text))
+	src, srcErr := netip.ParseAddr(strings.TrimPrefix(fields[0], "src="))
+	dst, dstErr := netip.ParseAddr(strings.TrimPrefix(fields[1], "dst="))
+	srcPort, srcPortErr := strconv.ParseUint(strings.TrimPrefix(fields[2], "sport="), 10, 16)
+	dstPort, dstPortErr := strconv.ParseUint(strings.TrimPrefix(fields[3], "dport="), 10, 16)
 	if srcErr != nil || dstErr != nil || srcPortErr != nil || dstPortErr != nil {
 		return Tuple{}, false
 	}
 	return Tuple{Src: src, Dst: dst, SrcPort: uint16(srcPort), DstPort: uint16(dstPort)}, true
 }
 
-// cacheSizePattern matches the entry count that follows each cache's heading
-// in `conntrackd -s` output.
-var cacheSizePattern = regexp.MustCompile(`cache (internal|external):\s*current active connections:\s*(\d+)`)
+// parseAge parses how long conntrackd has held an entry, in seconds, from
+// "[active since 1184s]".
+func parseAge(line []byte) (int, bool) {
+	start := bytes.Index(line, ageKey)
+	if start < 0 {
+		return 0, false
+	}
+	digits := line[start+len(ageKey):]
+	end := bytes.IndexByte(digits, 's')
+	if end <= 0 {
+		return 0, false
+	}
+	age, err := strconv.Atoi(string(digits[:end]))
+	return age, err == nil
+}
 
-// CacheSizes parses `conntrackd -s` output into the number of connections
-// this NAT tracks (the internal cache) and the number copied from the peer
-// (the external cache). ok is false unless both counts are present.
-func CacheSizes(output string) (tracked, copied int, ok bool) {
+// heldEntry is an entry readOldest holds: its tuple, its age and its line
+// number.
+type heldEntry struct {
+	tuple Tuple
+	age   int
+	order int
+}
+
+// oldestHeap is a min-heap by age, then by line number reversed, so its top
+// is the entry readOldest would drop first.
+type oldestHeap []heldEntry
+
+func (h oldestHeap) Len() int { return len(h) }
+func (h oldestHeap) Less(i, j int) bool {
+	if h[i].age != h[j].age {
+		return h[i].age < h[j].age
+	}
+	return h[i].order > h[j].order
+}
+func (h oldestHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *oldestHeap) Push(x any)   { *h = append(*h, x.(heldEntry)) }
+func (h *oldestHeap) Pop() any {
+	old := *h
+	entry := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return entry
+}
+
+// statsPattern matches each cache's heading in `conntrackd -s` output, its
+// entry count and how many entries it has added.
+var statsPattern = regexp.MustCompile(`cache (internal|external):\s*current active connections:\s*(\d+)\s*connections created:\s*(\d+)`)
+
+// Stats are counters from `conntrackd -s`.
+type Stats struct {
+	// Tracked is the number of connections this NAT tracks, its internal
+	// cache.
+	Tracked int
+	// Copied is the number of connections copied from the peer, its external
+	// cache.
+	Copied int
+	// CopiesAdded counts the copies conntrackd added since it started. It grows
+	// as the peer opens connections, and starts over when conntrackd restarts.
+	CopiesAdded int
+}
+
+// ParseStats parses `conntrackd -s` output. ok is false unless both caches'
+// counters are present.
+func ParseStats(output string) (Stats, bool) {
+	var stats Stats
 	found := 0
-	for _, match := range cacheSizePattern.FindAllStringSubmatch(output, -1) {
-		value, err := strconv.Atoi(match[2])
-		if err != nil {
-			return 0, 0, false
+	for _, match := range statsPattern.FindAllStringSubmatch(output, -1) {
+		count, countErr := strconv.Atoi(match[2])
+		added, addedErr := strconv.Atoi(match[3])
+		if countErr != nil || addedErr != nil {
+			return Stats{}, false
 		}
 		if match[1] == "internal" {
-			tracked = value
+			stats.Tracked = count
 		} else {
-			copied = value
+			stats.Copied, stats.CopiesAdded = count, added
 		}
 		found++
 	}
-	return tracked, copied, found == 2
+	return stats, found == 2
 }

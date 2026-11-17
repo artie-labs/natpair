@@ -35,19 +35,21 @@ const (
 	// the limit sized for 2 GiB, and natpair's default before it sized the
 	// limit from memory.
 	fallbackMaxConnections = 262144
-	// peakBytesPerConnection is the memory a NAT used per connection at its
-	// peak on AWS, a takeover. Without max_connections, the limit is the
-	// largest whose peak fits in half of the instance's memory.
+	// peakBytesPerConnection is the memory counted per connection at a NAT's
+	// peak, right after a takeover. On AWS a NAT used about 2.3 KB, and 2.6 KB
+	// leaves room. Without max_connections, the limit is the largest whose
+	// peak fits in half of the instance's memory.
 	peakBytesPerConnection = 2600
 )
 
 // maxConnectionsAllowed lists the limits max_connections accepts. The owner
 // holds its table twice: in the kernel, about 0.4 KB a connection on AWS, and
 // in conntrackd's cache, about 0.55 KB. The standby holds conntrackd's copy.
-// During a takeover the NAT that steps down still holds its whole table while
-// it takes in the new owner's whole copy, so it peaks at about 2.6 KB a
-// connection, natpair's own memory included. On AWS, 2,097,152 connections on
-// a 4 GiB NAT got conntrackd killed for lack of memory.
+// Right after a takeover, conntrackd holds both the table it tracks and the
+// copy it received, and doesn't give memory back, so a NAT peaks at about
+// 2.3 KB a connection. natpair's own memory doesn't grow with the table. On
+// AWS, 2,097,152 connections on a 4 GiB NAT got conntrackd killed for lack of
+// memory.
 var maxConnectionsAllowed = []int{65536, 131072, 262144, 524288, 1048576, 2097152, 4194304}
 
 // The canary subnets come from 198.18.0.0/15, which is reserved for network

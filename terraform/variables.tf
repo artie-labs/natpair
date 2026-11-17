@@ -59,7 +59,7 @@ variable "kernel" {
 }
 
 variable "max_connections" {
-  description = "Most connections each NAT tracks and copies to its peer, a power of two from 65,536 to 4,194,304. Null sizes it from each NAT's memory at every boot: the largest whose peak use, about 2.6 KB a connection during a takeover, fits in half the memory, so 262,144 for 2 GiB, 524,288 for 4 GiB and 1,048,576 for 8 GiB. NATs read a set value at first boot, so changing it needs new NATs."
+  description = "Most connections each NAT tracks and copies to its peer, a power of two from 65,536 to 4,194,304. Null sizes it from each NAT's memory at every boot: the largest whose peak use, counted as 2.6 KB a connection (about 2.3 KB was measured after a takeover), fits in half the memory, so 262,144 for 2 GiB, 524,288 for 4 GiB and 1,048,576 for 8 GiB. NATs read a set value at first boot, so changing it needs new NATs."
   type        = number
   default     = null
 
