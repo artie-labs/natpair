@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The kernel's connection table and conntrackd's caches have one hash bucket
   per connection, up from a quarter, so lookups in a full table stay short.
   This costs about 15 MB more at 524,288.
+- The module's new `kernel` input pins the Amazon Linux 2023 kernel line the
+  NATs boot, 6.18 by default. The image lookup picked whichever line AWS
+  published last, so new NATs booted 6.1, 6.12 or 6.18 depending on the day.
+  Running NATs keep their image. Replaced NATs boot the pinned line. Linux
+  6.5 and later, so 6.12 and 6.18, need a `release` from this version or
+  later, which turns on threaded NAPI. A pair that keeps `release` at v0.1.0
+  or v0.1.1 must set `kernel = "6.1"`, or `terraform plan` fails.
 
 ### Fixed
 
@@ -48,7 +55,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connections once a minute and the copies only until it finds the owner's
   oldest connections, keeping only the few connections it looks for. It
   confirms that copies keep arriving from conntrackd's counters instead.
-
+- A full connection table cut off the NAT's own traffic: under 3,000 new
+  worker connections a second, the owner's DNS lookups failed and it stepped
+  down. Traffic within the NAT, its own TCP connections, its UDP with the
+  VPC and with Amazon Time Sync and the Route 53 Resolver, and the peer's
+  copies now skip the connection table. The host firewall accepts their replies without state,
+  only on the NAT's own ephemeral ports, with rate-limited ICMP errors. The
+  own canary's probes now use ports 61000 to 65535. NATs log `the connection
+  table is nearly full` at 90%. NATs set this up at boot, so pairs pick it
+  up when they roll to a release with this fix.
+- A full connection table made the owner step down, and then the NAT that
+  took over from it, because their probes need an entry in the table. A
+  probe that fails while the kernel drops packets for lack of room, with the
+  table at least 90% full, no longer counts as a path failure. NATs log `the
+  connection table is full` and `the health probe failed because this NAT's
+  connection table is full`. Such a probe no longer fails a takeover either,
+  so a NAT whose table fills while it loads the copies still opens
+  forwarding once its upload through the shared Elastic IP passes. Two
+  failed rounds count as in a row only if at most two such rounds came
+  between them.
+- A closed TCP connection now leaves the connection table after 30 s instead
+  of 120 s, so the same table holds 4 times as many new connections a
+  second. The NAT may then give a closed connection's address and port to a
+  new one sooner, so a connection to a server that closed the old one first
+  can take about 1 s longer to open. NATs set this at boot.
 - On a fresh apply, the NATs' SSM agent never came online and the Datadog
   agent install failed, because the NATs booted before their IAM policy was
   attached. Session Manager, release download and Datadog permissions are now
@@ -65,6 +95,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot and at every takeover, and check it every 5 s, putting it back and
   logging a warning if it's missing or wrong. Pairs pick it up when they roll
   to a release with this fix.
+
+### Security
+
+- The host firewall drops traffic from outside the VPC without an answer,
+  instead of resetting TCP, so scans of the NAT's addresses go unanswered.
+  It accepts a TCP reply to the NAT's own untracked connections only when
+  one of its sockets owns it. TCP without SYN to the shared address that
+  matches no tracked connection still gets a reset, so remote servers close
+  connections a new owner never copied, but only on ports 1024 to 60999,
+  and at most 50 at once and then 10 a second for each remote address.
+  Worker TCP is now translated to those ports on the shared address. The
+  VPC and the peer still get resets from closed ports.
 
 ## [0.1.1] - 2026-11-09
 

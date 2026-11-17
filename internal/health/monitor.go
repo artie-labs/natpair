@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/artie-labs/natpair/internal/conntrackd"
+	"github.com/artie-labs/natpair/internal/network"
 	"github.com/artie-labs/natpair/internal/probe"
 )
 
@@ -47,6 +48,11 @@ const (
 	// requiredSuccesses is the number of consecutive healthy rounds before
 	// this NAT counts as able to forward.
 	requiredSuccesses = 2
+	// failureGapRounds is how many rounds in a row that count neither way,
+	// such as with a full connection table, end a run of failed rounds. Without
+	// it, one failure, hours of full table, then one more failure would count
+	// as two in a row and make the owner step down.
+	failureGapRounds = 3
 	// oldestCount is how many of its longest-held connections a NAT publishes.
 	// The peer's copy counts as complete only when it holds all of them. A
 	// restarted conntrackd starts empty, and idle connections send no updates
@@ -98,6 +104,13 @@ const (
 	// change. Alerts that fire when a pair logs no ready standby round for 10
 	// minutes rely on it staying well below that.
 	logInterval = 60 * BaseInterval
+	// nearlyFullPercent is how full the kernel's connection table must be,
+	// in percent, before this NAT warns, and before dropped packets count as
+	// the table being full.
+	nearlyFullPercent = 90
+	// tableWarnInterval is the shortest time between repeats of each warning
+	// about the connection table.
+	tableWarnInterval = 60 * BaseInterval
 )
 
 // StaleAfter returns how old a report from rounds of the given interval may
@@ -110,7 +123,12 @@ func StaleAfter(interval time.Duration) time.Duration {
 // [Reports].
 type Report struct {
 	// PathHealthy is true when this round's upload passed.
-	PathHealthy         bool `json:"path_healthy"`
+	PathHealthy bool `json:"path_healthy"`
+	// TableFull means this round's upload failed because this NAT's
+	// connection table was full, so the failure says nothing about the path.
+	// The round counts neither as failed nor as healthy. Only this NAT reads
+	// it, so it isn't sent to the peer.
+	TableFull           bool `json:"-"`
 	ConsecutiveFailures int  `json:"consecutive_failures"`
 	// TrackedConnections is the number of connections conntrackd tracks on
 	// this NAT, which the peer should hold copies of.
@@ -190,6 +208,11 @@ type Conntrack interface {
 	RequestResync(ctx context.Context) error
 }
 
+// ConnectionTable reads the kernel's connection table.
+type ConnectionTable interface {
+	ReadConnectionTable(ctx context.Context) (network.ConnectionTable, error)
+}
+
 // Reports exchanges reports with the peer NAT.
 type Reports interface {
 	Publish(ctx context.Context, report any, interval time.Duration) error
@@ -202,6 +225,7 @@ type Reports interface {
 type Dependencies struct {
 	Prober    Prober
 	Conntrack Conntrack
+	Table     ConnectionTable
 	Reports   Reports
 	// Serving reports whether this NAT currently forwards worker traffic.
 	Serving func() bool
@@ -220,7 +244,7 @@ type timedFlow struct {
 // roundState is the part of a round's result that is logged as soon as it
 // changes.
 type roundState struct {
-	healthy, ready, serving, peerReady bool
+	healthy, tableFull, ready, serving, peerReady bool
 }
 
 // Monitor runs health rounds and keeps the latest report.
@@ -230,8 +254,11 @@ type Monitor struct {
 
 	// State carried between rounds. Round and interval use it without a lock,
 	// so only one goroutine may call them.
-	failures        int
-	successes       int
+	failures  int
+	successes int
+	// uncounted is how many rounds counted neither way since the last failed
+	// round.
+	uncounted       int
 	flows           []timedFlow
 	lastReplication time.Duration
 	replicated      bool
@@ -255,6 +282,13 @@ type Monitor struct {
 	// standby then checks its own path at the serving interval, so the owner
 	// learns quickly whether the failure is its own.
 	peerFailing bool
+	// table is the last good reading of the connection table, if tableRead.
+	// A failed reading keeps it, so the next good one still has drops to
+	// compare with. The drop counter only grows, so the comparison holds.
+	table     network.ConnectionTable
+	tableRead bool
+	// These limit how often each warning about the connection table repeats.
+	tableUnread, nearlyFull, full, fullProbe warning
 	// logged is the state of the last logged round, logged at loggedAt.
 	logged    roundState
 	loggedAt  time.Duration
@@ -352,13 +386,35 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	}
 	flow, probeErr := m.deps.Prober.Upload(ctx, target)
 	healthy := probeErr == nil
-
-	if healthy {
-		m.failures, m.successes = 0, m.successes+1
-	} else {
-		m.failures, m.successes = m.failures+1, 0
-	}
 	now := m.deps.Now()
+	// Read after the upload, so the drops since the last reading include the
+	// upload's packets.
+	tableFull := m.readTable(ctx, now)
+
+	// countedFailure is whether this round counts as failed.
+	countedFailure := false
+	switch {
+	case healthy:
+		m.failures, m.successes = 0, m.successes+1
+	case tableFull:
+		// A full table drops the upload's new connection, as it drops new
+		// worker connections. The peer loads copies of this NAT's TCP
+		// connections on taking over, so when TCP fills the table, as on AWS,
+		// it would fail the same way. This round proves nothing about the
+		// path and counts neither way. On AWS, an owner whose table
+		// filled stepped down, and so did the NAT that took over from it.
+		m.uncounted++
+		if m.uncounted >= failureGapRounds {
+			m.failures = 0
+		}
+		if m.fullProbe.due(now) {
+			slog.Warn("the health probe failed because this NAT's connection table is full, so it doesn't count as a path failure",
+				slog.Any("probe_error", probeErr), slog.Int("connections", m.table.Connections), slog.Int("max_connections", m.table.Max))
+		}
+	default:
+		m.failures, m.successes, m.uncounted = m.failures+1, 0, 0
+		countedFailure = true
+	}
 	var flows []timedFlow
 	for _, flow := range m.flows {
 		if now-flow.at < flowRounds*roundInterval {
@@ -454,6 +510,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	ready := canForward && recent && !inhibited
 	report := Report{
 		PathHealthy:            healthy,
+		TableFull:              !healthy && tableFull,
 		ConsecutiveFailures:    m.failures,
 		TrackedConnections:     tracked,
 		TrackedUnknown:         !counted,
@@ -487,19 +544,75 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	// up almost all of natpair's logs, about 36,000 lines a day per owner.
 	// Failed rounds and changes are logged at once, and otherwise one round
 	// each logInterval.
-	state := roundState{healthy: healthy, ready: ready, serving: serving, peerReady: report.PeerReady}
-	if !healthy || !m.hasLogged || state != m.logged || now-m.loggedAt >= logInterval {
+	state := roundState{healthy: healthy, tableFull: report.TableFull, ready: ready, serving: serving, peerReady: report.PeerReady}
+	// Each round that counts as failed is logged. Others, including failed
+	// rounds that don't count, such as with a full table, which can last
+	// hours, are logged when something changes and once a minute.
+	if countedFailure || !m.hasLogged || state != m.logged || now-m.loggedAt >= logInterval {
 		m.logged, m.loggedAt, m.hasLogged = state, now, true
 		slog.Info("health round",
 			slog.Bool("healthy", healthy), slog.Bool("copied", verified), slog.Bool("ready", ready),
 			slog.Bool("peer_ready", report.PeerReady), slog.Duration("duration", m.deps.Now()-started),
-			slog.Bool("serving", serving), slog.Any("probe_error", probeErr),
+			slog.Bool("serving", serving), slog.Any("probe_error", probeErr), slog.Bool("table_full", tableFull),
 			slog.Int("tracked_connections", tracked), slog.Int("copied_connections", copied),
 			slog.Int("peer_tracked_connections", peer.TrackedConnections),
 			slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
 			slog.String("release", m.config.Release))
 	}
 	return report
+}
+
+// readTable reads the kernel's connection table, warns while it is nearly
+// full or full, and reports whether it was full since the previous reading.
+//
+// Full means the kernel dropped packets it couldn't track since the previous
+// reading, while the table was at least nearlyFullPercent full. The drop
+// counter is the direct evidence: the kernel counts each packet it drops
+// because a new connection has no room for an entry, which is how a full
+// table breaks a probe. The size alone can't tell. A table at its limit can
+// still take a new connection by evicting one that is closing, and then
+// nothing is dropped. The size check rules out the counter's rarer causes,
+// such as two packets racing to insert the same entry.
+func (m *Monitor) readTable(ctx context.Context, now time.Duration) bool {
+	table, err := m.deps.Table.ReadConnectionTable(ctx)
+	if err != nil {
+		if m.tableUnread.due(now) {
+			slog.Warn("failed to read the connection table, so a full table can't be told from a path failure", slog.Any("err", err))
+		}
+		return false
+	}
+	previous, hadPrevious := m.table, m.tableRead
+	m.table, m.tableRead = table, true
+	nearlyFull := table.Max > 0 && table.Connections*100 >= table.Max*nearlyFullPercent
+	full := nearlyFull && hadPrevious && table.Drops > previous.Drops
+	switch {
+	case full:
+		if m.full.due(now) {
+			slog.Warn("the connection table is full, so the kernel drops new connections. Raise max_connections and replace the NATs.",
+				slog.Int("connections", table.Connections), slog.Int("max_connections", table.Max), slog.Uint64("dropped", table.Drops-previous.Drops))
+		}
+	case nearlyFull:
+		if m.nearlyFull.due(now) {
+			slog.Warn("the connection table is nearly full, so new connections may be dropped. Raise max_connections and replace the NATs.",
+				slog.Int("connections", table.Connections), slog.Int("max_connections", table.Max))
+		}
+	}
+	return full
+}
+
+// warning limits a repeated warning to one each tableWarnInterval.
+type warning struct {
+	at     time.Duration
+	logged bool
+}
+
+// due reports whether the warning may be logged now, and if so, records it.
+func (w *warning) due(now time.Duration) bool {
+	if w.logged && now-w.at < tableWarnInterval {
+		return false
+	}
+	w.at, w.logged = now, true
+	return true
 }
 
 // noteCopies records when conntrackd last added a copy, and forgets which of

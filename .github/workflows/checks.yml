@@ -91,6 +91,7 @@ jobs:
       - run: terraform -chdir=terraform fmt -check
       - run: terraform -chdir=terraform init -backend=false -input=false
       - run: terraform -chdir=terraform validate
+      - run: terraform -chdir=terraform test
       - run: terraform fmt -check -recursive examples
       # The examples pin the module to a release tag. Point them at this
       # checkout's module instead, so a change that breaks them fails here.
