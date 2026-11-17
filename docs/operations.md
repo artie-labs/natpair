@@ -252,8 +252,9 @@ terraform apply -target='module.natpair.aws_instance.nat["b"]'
 Do the standby first, then hand over, then do the other NAT and run
 `sudo natpair resume` on it. Without `max_connections`, each NAT sizes its
 table from its memory at boot, so while the owner holds more connections
-than a smaller NAT's table, that NAT isn't ready, and a takeover to it keeps
-only what its table holds, as when any table is full.
+than a smaller NAT's table, that NAT isn't ready and asks the owner for a
+full copy every 30 s, and a takeover to it keeps only what its table holds,
+as when any table is full.
 
 Changing only tags updates the NATs in place without a restart, so it's safe
 to apply to both at once.
@@ -287,7 +288,7 @@ risk:
 
 Lower `max_connections` only while the owner holds fewer connections than the
 new limit. A new standby can't copy more than its limit, so until then it
-never counts as ready, and the handover in
+never counts as ready, asks for a full copy every 30 s, and the handover in
 [Replace a NAT](#replace-a-nat) waits.
 
 On AWS, 2,097,152 connections on a 4 GiB NAT ran it out of memory, and the
