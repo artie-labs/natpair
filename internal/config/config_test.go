@@ -70,11 +70,39 @@ func TestReleases(t *testing.T) {
 }
 
 func TestConnectionLimit(t *testing.T) {
+	// limit returns the limit for a NAT with memory bytes and no max_connections.
+	limit := func(memory uint64) int {
+		return NAT{Instance: instance.Facts{MemoryBytes: memory}}.ConnectionLimit()
+	}
 	{
-		// Unset uses the default, so configurations without the setting still load
+		// MemTotal on 2, 4 and 8 GiB instances, less what the kernel keeps
+		assert.Equal(t, 262144, limit(1903976*1024))
+		assert.Equal(t, 524288, limit(3898756*1024))
+		assert.Equal(t, 1048576, limit(7906060*1024))
+		// and exactly 2, 4 and 8 GiB
+		assert.Equal(t, 262144, limit(2<<30))
+		assert.Equal(t, 524288, limit(4<<30))
+		assert.Equal(t, 1048576, limit(8<<30))
+	}
+	{
+		// A limit is chosen when its peak, 2,600 bytes a connection, fits in
+		// half the memory exactly, and not one byte short
+		assert.Equal(t, 262144, limit(2*262144*2600))
+		assert.Equal(t, 131072, limit(2*262144*2600-1))
+	}
+	{
+		// The limit stays within the values max_connections accepts
+		assert.Equal(t, 65536, limit(256<<20))
+		assert.Equal(t, 4194304, limit(1<<40))
+	}
+	{
+		// Without a memory reading, the limit is v0.1.1's default, not 0 or
+		// the largest
 		assert.Equal(t, 262144, NAT{}.ConnectionLimit())
 	}
 	{
-		assert.Equal(t, 524288, NAT{MaxConnections: 524288}.ConnectionLimit())
+		// An explicit max_connections wins over memory
+		assert.Equal(t, 1048576, NAT{MaxConnections: 1048576, Instance: instance.Facts{MemoryBytes: 2 << 30}}.ConnectionLimit())
+		assert.Equal(t, 65536, NAT{MaxConnections: 65536, Instance: instance.Facts{MemoryBytes: 8 << 30}}.ConnectionLimit())
 	}
 }

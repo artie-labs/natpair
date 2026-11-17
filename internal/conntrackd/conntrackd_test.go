@@ -64,12 +64,25 @@ func TestWriteConfig(t *testing.T) {
 	for _, line := range []string{
 		"StartupResync on", "IPv4_address 10.0.1.10", "IPv4_Destination_Address 10.0.1.11", "Interface ens5",
 		"LockFile " + dir + "/conntrackd.lock", "Path " + dir + "/conntrackd.ctl",
-		// The same limit sizes the kernel's connection table.
-		"HashSize 65536", "HashLimit 262144",
+		// One hash bucket per connection, as in the kernel's table.
+		"HashSize 262144", "HashLimit 262144",
+		// A full copy's updates stay queued for resending until the peer
+		// acknowledges them, and its burst fits in the socket buffers: 64
+		// bytes a connection, which the kernel doubles.
+		"ResendQueueSize 262144",
+		"SndSocketBuffer 16777216", "RcvSocketBuffer 16777216",
+		"NetlinkBufferSize 16777216", "NetlinkBufferSizeMaxGrowth 33554432",
 	} {
 		assert.Contains(t, string(contents), line)
 	}
 	// The NAT's own connections are not copied: loopback, its address and the shared address.
 	assert.Contains(t, string(contents), "Address Ignore {\n            IPv4_address 127.0.0.1\n            IPv6_address ::1\n            IPv4_address 10.0.1.10\n            IPv4_address 10.0.1.100\n        }")
 	assert.NotContains(t, string(contents), "Backlog", "conntrackd 1.4.6 ignores it and logs a warning")
+
+	// A small limit keeps conntrackd's default resend queue
+	require.NoError(t, WriteConfig(path, netip.MustParseAddr("10.0.1.10"), netip.MustParseAddr("10.0.1.11"), netip.MustParseAddr("10.0.1.100"), "ens5", dir, 65536))
+	contents, err = os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(contents), "ResendQueueSize 131072")
+	assert.Contains(t, string(contents), "HashLimit 65536")
 }

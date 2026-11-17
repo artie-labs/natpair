@@ -1,13 +1,18 @@
 // Package instance reads facts about this EC2 instance from the instance
-// metadata service, so they never have to be copied into a config file.
+// metadata service and the kernel, so they never have to be copied into a
+// config file.
 package instance
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,7 +31,22 @@ type Facts struct {
 	Interface string
 	// VPCCIDRs are the IPv4 CIDRs of the instance's VPC.
 	VPCCIDRs []netip.Prefix
+	// MemoryBytes is the instance's memory, MemTotal in /proc/meminfo, or 0
+	// if it couldn't be read.
+	MemoryBytes uint64
 }
+
+// The memory a read of /proc/meminfo may report. Anything outside it, such as
+// a misparsed unit, is treated as unreadable. The smallest arm64 instance has
+// 512 MiB, and the largest a few TiB.
+const (
+	minMemoryBytes = 256 << 20
+	maxMemoryBytes = 64 << 40
+)
+
+// meminfoPath is where Discover reads the instance's memory. Tests point it
+// at a fixture.
+var meminfoPath = "/proc/meminfo"
 
 // Discover reads the facts from the instance metadata service. The AWS SDK's
 // AWS_EC2_METADATA_SERVICE_ENDPOINT variable points it elsewhere, as the local
@@ -76,7 +96,50 @@ func Discover(ctx context.Context, cfg aws.Config) (Facts, error) {
 	if len(facts.VPCCIDRs) == 0 {
 		return Facts{}, fmt.Errorf("the instance metadata service listed no VPC CIDRs")
 	}
+	facts.MemoryBytes = readMemory(meminfoPath)
 	return facts, nil
+}
+
+// readMemory returns MemTotal from the meminfo file at path in bytes, or 0
+// after logging why it couldn't.
+func readMemory(path string) uint64 {
+	file, err := os.Open(path)
+	if err == nil {
+		defer file.Close()
+		var memory uint64
+		if memory, err = parseMemTotal(file); err == nil {
+			return memory
+		}
+	}
+	slog.Warn("failed to read this instance's memory", slog.String("path", path), slog.Any("err", err))
+	return 0
+}
+
+// parseMemTotal returns the MemTotal line of /proc/meminfo, such as
+// "MemTotal:        3884368 kB", in bytes.
+func parseMemTotal(r io.Reader) (uint64, error) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 || fields[0] != "MemTotal:" {
+			continue
+		}
+		if len(fields) != 3 || fields[2] != "kB" {
+			return 0, fmt.Errorf("unexpected MemTotal line %q", scanner.Text())
+		}
+		kilobytes, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("unexpected MemTotal line %q: %w", scanner.Text(), err)
+		}
+		if kilobytes < minMemoryBytes/1024 || kilobytes > maxMemoryBytes/1024 {
+			return 0, fmt.Errorf("MemTotal of %d kB is outside %d to %d kB", kilobytes, minMemoryBytes/1024, maxMemoryBytes/1024)
+		}
+		return kilobytes * 1024, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("no MemTotal line")
 }
 
 // interfaceWithMAC returns the name of the local interface with mac.

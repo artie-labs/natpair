@@ -59,6 +59,7 @@ func discover(ctx context.Context, cfg *config.NAT) (aws.Config, error) {
 	if cfg.Instance, err = instance.Discover(ctx, metadataConfig); err != nil {
 		return aws.Config{}, err
 	}
+	cfg.LogConnectionLimit()
 	// Retries are off: a retried conditional write or EC2 change could apply
 	// after a newer owner's change.
 	awsConfig, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.Instance.Region), awsconfig.WithRetryMaxAttempts(1))

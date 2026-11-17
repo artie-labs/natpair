@@ -66,6 +66,12 @@ ENI, where they would fragment. A host route to the peer keeps them there.
 Each NAT sets it at boot and at every takeover, checks it every 5 s, and puts
 it back if something removed or changed it.
 
+A standby whose conntrackd starts, such as after a reboot, asks the owner for
+a full copy. The owner sends its whole table at once, about 100 bytes a
+connection, 52 MB for a full default table. conntrackd's socket buffers are
+sized to hold that burst, and it keeps each update until the standby
+acknowledges it, so it can resend the ones that were lost.
+
 A connection the new owner doesn't know gets a TCP reset instead of silence,
 so the client reconnects at once rather than waiting for its own timeout.
 
@@ -80,7 +86,12 @@ is up.
   directions.
 - **The standby** checks its own path every 5 s through its own Elastic IP,
   and checks that its copy of the connection table holds the owner's recent
-  probe connections and the owner's 16 oldest connections.
+  probe connections, the owner's 16 oldest connections, and at least 95% as
+  many connections as the owner tracks, or all but 100 in a small table.
+  The oldest connections are a sample, and a copy that lost part of the
+  table usually still holds them, so the count catches what the sample
+  misses. A copy missing an oldest connection for two rounds, or short of
+  the count for 30 s, asks the owner for a full copy again.
 - Each NAT writes a short report to DynamoDB after every round, so the peer
   can see it.
 

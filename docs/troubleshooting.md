@@ -41,10 +41,12 @@ with copied connections until it's fixed. The other fields say why:
   internet fails. Check its Elastic IP, the public subnet's route to the
   internet gateway, and the error itself.
 - **`"copied":false`.** The standby's copy is missing the owner's recent
-  connections. Check conntrackd on both NATs with
+  connections, or holds less than 95% as many connections as the owner
+  tracks and lacks more than 100: compare `copied_connections` with
+  `peer_tracked_connections`. Check conntrackd on both NATs with
   `sudo systemctl status conntrackd`, and look for the conntrackd messages
   below. A standby that just started needs two rounds, about 10 s, to catch
-  up.
+  up, and longer to take in a large table.
 - **`"peer_ready":false` and `"peer_tracked_connections":0` while the owner
   is running.** The standby can't read the owner's reports. Look for
   `failed to read the peer's report`.
@@ -88,8 +90,9 @@ the NATs one at a time, as in [Replace a NAT](operations.md#replace-a-nat).
   kernel drops new connections and logs `nf_conntrack: table full, dropping
   packet` in `sudo dmesg`, and natpair logs
   [`the connection table is full`](#the-connection-table-is-full). Raise
-  `max_connections` and replace the NATs. Each 262,144 connections uses
-  about 160 MB of memory, half in the kernel and half in conntrackd.
+  `max_connections` and replace the NATs, after checking that the instance
+  has the memory for it, as in
+  [Size the connection table](operations.md#size-the-connection-table).
 
 ## Log messages
 
@@ -124,10 +127,12 @@ NAT takes over before conntrackd is back, existing connections are reset.
 
 ### `copied connections are incomplete, requesting a full copy from the peer`
 
-The standby's copy missed some of the owner's oldest connections for two
-rounds, so it asks the owner for a full copy. This fixes itself. If it repeats
-for more than 5 minutes, check the network between the NATs and
-conntrackd on both.
+For two rounds, the standby's copy missed some of the owner's oldest
+connections, or for 30 s it held less than 95% as many connections as the
+owner tracks, so it asks the owner for a full copy. This fixes itself. If it repeats for
+more than 5 minutes, check the network between the NATs and conntrackd on
+both. `sudo conntrackd -C /var/lib/natpair/conntrackd.conf -s` on the standby
+shows the copies it received and lost.
 
 ### `the route to the peer was missing or wrong and has been restored`
 

@@ -60,12 +60,28 @@ const (
 	// can't show that: on AWS, churn pushed a restarted standby's copy past 90%
 	// of the owner's count while it held none of 209 idle connections.
 	oldestCount = 16
+	// copiedPercent is how much of the owner's table, in percent, a standby's
+	// copy must hold before the standby counts as ready. The oldest
+	// connections and probe connections are a sample, which the start of a
+	// full copy usually carries. On AWS, standbys whose full copy lost 13 to
+	// 31% of the table passed that sample and reported ready, and the next
+	// takeover reset the connections they lacked. The owner's count comes
+	// from its latest report, up to a second or two old, so the margin covers
+	// the table shrinking that much in between, and copies on their way.
+	copiedPercent = 95
+	// copiedSlack is how many connections a standby's copy may lack whatever
+	// the share. In a small table, a few connections opened or closed since
+	// the owner's report are more than 5% of it. A full copy loses
+	// connections only when its burst overflows the standby's buffers, which
+	// takes tens of thousands of them, so the slack never hides that.
+	copiedSlack = 100
 	// oldestInterval is how often a NAT reads its oldest connections again.
 	// Reading them dumps conntrackd's whole cache.
 	oldestInterval = StandbyInterval
 	// incompleteRounds is how many rounds in a row a copy must miss the peer's
 	// oldest connections before this NAT asks for a full copy. One round can
-	// miss a connection that closed after the peer's report.
+	// miss a connection that closed after the peer's report. A copy holding
+	// too few connections asks after resyncInterval instead.
 	incompleteRounds = 2
 	// resyncInterval is the shortest time between requests for a full copy, so
 	// a large copy still on its way isn't requested again.
@@ -132,6 +148,10 @@ type Report struct {
 	// TrackedConnections is the number of connections conntrackd tracks on
 	// this NAT, which the peer should hold copies of.
 	TrackedConnections int `json:"tracked_connections"`
+	// TrackedUnknown means this NAT couldn't read both of conntrackd's
+	// counts this round, so TrackedConnections isn't a count to compare a
+	// copy against. Releases before it never set it.
+	TrackedUnknown bool `json:"tracked_unknown,omitempty"`
 	// Oldest are the connections conntrackd has held longest on this NAT. The
 	// peer must hold copies of all of them before it counts as ready.
 	Oldest []conntrackd.Tuple `json:"oldest"`
@@ -144,7 +164,9 @@ type Report struct {
 	// Ready means this NAT can forward, holds recently copied connections,
 	// and is not in maintenance or cooldown. A copy counts when it holds at
 	// least one of the peer's recent probe connections and all of the peer's
-	// oldest connections, and it stays recent for replicationRounds.
+	// oldest connections, and, while standing by, at least copiedPercent of
+	// the peer's TrackedConnections or all but copiedSlack of them. It stays
+	// recent for replicationRounds.
 	Ready bool `json:"ready"`
 	// ProvenWhilePeerFailing means this round proved this NAT's path while the
 	// peer was failing its own checks. That shows the peer's failure is its
@@ -291,8 +313,12 @@ type Monitor struct {
 	oldestAt        time.Duration
 	readOldest      bool
 	incomplete      int
-	lastResync      time.Duration
-	resynced        bool
+	// shortSince is when this NAT's copy started holding too few of the
+	// peer's connections, if shortRun.
+	shortSince time.Duration
+	shortRun   bool
+	lastResync time.Duration
+	resynced   bool
 	// peerFailing means the peer's latest report showed failed rounds. A
 	// standby then checks its own path at the serving interval, so the owner
 	// learns quickly whether the failure is its own.
@@ -487,8 +513,9 @@ func (m *Monitor) Round(ctx context.Context) Report {
 	m.flows = flows
 
 	var tracked, copied int
+	counted := false
 	if stats, err := m.deps.Conntrack.Stats(ctx); err == nil {
-		tracked, copied, _ = conntrackd.CacheSizes(stats)
+		tracked, copied, counted = conntrackd.CacheSizes(stats)
 	} else {
 		slog.Warn("conntrackd is not answering, so connections are not being copied", slog.Any("err", err))
 	}
@@ -510,11 +537,38 @@ func (m *Monitor) Round(ctx context.Context) Report {
 					oldestCopied++
 				}
 			}
-			complete := oldestCopied == len(peer.Oldest)
-			if complete || serving {
+			// Only a standby's copy is what a takeover would install. The
+			// owner's copy is of the standby's table, and the NAT that just
+			// stepped down still counts its old table until its flush 60 s
+			// later. Both NATs' counts must have been read: an owner whose
+			// conntrackd didn't answer reports 0, which any copy would cover.
+			// Releases before TrackedUnknown don't say so, and their 0 is
+			// trusted as before.
+			measured := counted && !peer.TrackedUnknown
+			covers := copied*100 >= peer.TrackedConnections*copiedPercent || peer.TrackedConnections-copied <= copiedSlack
+			shortfall := !serving && measured && !covers
+			complete := oldestCopied == len(peer.Oldest) && (serving || (measured && covers))
+			// A copy measured short isn't ready, even within
+			// replicationRounds of the last good one, such as just after this
+			// NAT's conntrackd restarted empty. Counts that couldn't be read
+			// only fail this round's check.
+			if shortfall {
+				m.replicated = false
+			}
+			if oldestCopied == len(peer.Oldest) || serving {
 				m.incomplete = 0
 			} else {
 				m.incomplete++
+			}
+			// Only measured rounds start or end the time a copy has been
+			// short. A round whose counts couldn't be read does neither.
+			switch {
+			case shortfall:
+				if !m.shortRun {
+					m.shortSince, m.shortRun = now, true
+				}
+			case serving || measured:
+				m.shortRun = false
 			}
 			// A standby with an incomplete copy asks for a full one, for example
 			// after its conntrackd restarted while the peer was down, so its
@@ -523,9 +577,16 @@ func (m *Monitor) Round(ctx context.Context) Report {
 			// and the former owner's scheduled flush removes them without telling
 			// the owner. On AWS, 80,000 of these copies stayed and inflated the
 			// copied count after the next handover.
-			if m.incomplete >= incompleteRounds && (!m.resynced || now-m.lastResync >= resyncInterval) {
+			// A full copy of a large table takes seconds to arrive, such as
+			// conntrackd's own request when it starts, so a copy short of the
+			// count asks again only once it has stayed short for
+			// resyncInterval. A copy missing an oldest connection still asks
+			// after incompleteRounds.
+			short := m.shortRun && now-m.shortSince >= resyncInterval
+			if (m.incomplete >= incompleteRounds || short) && (!m.resynced || now-m.lastResync >= resyncInterval) {
 				slog.Warn("copied connections are incomplete, requesting a full copy from the peer",
-					slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied))
+					slog.Int("peer_oldest", len(peer.Oldest)), slog.Int("peer_oldest_copied", oldestCopied),
+					slog.Int("copied_connections", copied), slog.Int("peer_tracked_connections", peer.TrackedConnections))
 				m.lastResync, m.resynced = now, true
 				if err := m.deps.Conntrack.RequestResync(ctx); err != nil {
 					slog.Warn("failed to request a full copy", slog.Any("err", err))
@@ -550,6 +611,7 @@ func (m *Monitor) Round(ctx context.Context) Report {
 		TableFull:              !healthy && tableFull,
 		ConsecutiveFailures:    m.failures,
 		TrackedConnections:     tracked,
+		TrackedUnknown:         !counted,
 		Oldest:                 m.oldest,
 		CanForward:             canForward,
 		CanForwardUnverified:   !canForward,

@@ -35,9 +35,29 @@ const takeoverStepTimeout = 10 * time.Second
 // The filter matches a connection's original addresses, so worker traffic,
 // which is translated to the shared address only in its reply direction, is
 // still copied.
+//
+// Sizes that follow the connection limit, from [WriteConfig]:
+//   - HashSize, the buckets in each of conntrackd's two caches, is one per
+//     connection, as in the kernel's table (see network's
+//     sizeConnectionTable). Each bucket costs 16 bytes in each cache, 16 MB
+//     for both at 524,288.
+//   - ResendQueueSize is how many sent updates conntrackd keeps until the
+//     peer acknowledges them, so it can resend those the peer reports lost.
+//     It is one per connection, and at least conntrackd's default.
+//     With the default of 131,072, less than one full copy, conntrackd
+//     discarded the start of a large copy before the peer asked for its lost
+//     parts again. The queue holds references to cache entries, not copies.
+//   - SndSocketBuffer and RcvSocketBuffer are the copies' socket buffers,
+//     and NetlinkBufferSize is the kernel event socket's (see
+//     socketBytesPerConnection). conntrackd reads no kernel events while it
+//     sends a full copy, and an event lost to a full buffer leaves the
+//     peer's copy out of date until conntrackd resyncs with the kernel 30 s
+//     later. NetlinkBufferSizeMaxGrowth lets conntrackd double that buffer
+//     once if it fills.
 const configTemplate = `Sync {
     Mode FTFW {
         StartupResync on
+        ResendQueueSize %[9]d
     }
     UDP {
         IPv4_address %[1]s
@@ -45,13 +65,15 @@ const configTemplate = `Sync {
         Port 3780
         Interface %[3]s
         Checksum on
+        SndSocketBuffer %[7]d
+        RcvSocketBuffer %[7]d
     }
 }
 General {
     HashSize %[6]d
-    HashLimit %[7]d
-    NetlinkBufferSize 2097152
-    NetlinkBufferSizeMaxGrowth 8388608
+    HashLimit %[6]d
+    NetlinkBufferSize %[7]d
+    NetlinkBufferSizeMaxGrowth %[8]d
     LogFile %[4]s/conntrackd.log
     LockFile %[4]s/conntrackd.lock
     UNIX {
@@ -71,13 +93,36 @@ General {
 }
 `
 
+// socketBytesPerConnection sizes conntrackd's socket buffers per connection
+// in the table. A full copy to the peer, which conntrackd sends when the peer
+// restarts or asks for it, is about 100 bytes a connection on the wire (26 MB
+// for 262,144 on AWS), sent in 1 to 3 s. With Linux's default buffer of
+// about 208 KB, the receiving NAT dropped most of that burst, and after the
+// resends its copy still lacked 13 to 31% of the table. conntrackd asks for
+// 64 bytes a connection, 32 MB at 524,288, which the kernel doubles to cover
+// its own bookkeeping per datagram. That held most of each burst on AWS, and
+// the resend queue covered the rest: a copy of 498,097 connections arrived
+// with 17 missing.
+// conntrackd sets its buffers with SO_RCVBUFFORCE and SO_SNDBUFFORCE, which
+// root may use past net.core.rmem_max and wmem_max, so those limits for every
+// other socket on the host stay as they are. A buffer uses memory only while
+// data waits in it.
+const socketBytesPerConnection = 64
+
+// defaultResendQueue is conntrackd's own ResendQueueSize.
+const defaultResendQueue = 131072
+
 // WriteConfig writes conntrackd's configuration to path. It replicates over
 // iface from local to peer, ignores connections to or from local and shared,
 // copies at most maxConnections, and keeps its log, lock file and control
 // socket in dir. The kernel's connection table is sized to the same limit,
 // because connections past it couldn't be copied.
 func WriteConfig(path string, local, peer, shared netip.Addr, iface, dir string, maxConnections int) error {
-	contents := fmt.Sprintf(configTemplate, local, peer, iface, dir, shared, maxConnections/4, maxConnections)
+	socketBuffer := maxConnections * socketBytesPerConnection
+	// conntrackd's default resend queue is the floor, so a small limit doesn't
+	// shrink it.
+	resendQueue := max(maxConnections, defaultResendQueue)
+	contents := fmt.Sprintf(configTemplate, local, peer, iface, dir, shared, maxConnections, socketBuffer, 2*socketBuffer, resendQueue)
 	temporary := path + ".tmp"
 	if err := os.WriteFile(temporary, []byte(contents), 0o644); err != nil {
 		return fmt.Errorf("failed to write conntrackd configuration: %w", err)

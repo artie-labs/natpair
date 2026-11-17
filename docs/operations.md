@@ -12,6 +12,7 @@ match yours.
 - [Take a NAT out of service](#take-a-nat-out-of-service)
 - [Upgrade](#upgrade)
 - [Replace a NAT](#replace-a-nat)
+- [Size the connection table](#size-the-connection-table)
 - [Monitoring](#monitoring)
 - [Download releases from your own S3 bucket](#download-releases-from-your-own-s3-bucket)
 - [Remove a pair](#remove-a-pair)
@@ -171,6 +172,13 @@ owner's old release. To roll back, pin the previous release and its SHA-256
 again, and the standby moves back. If the new release can't run at all, the
 standby can't move itself back, so replace it.
 
+The standby is ready only once its copy holds at least 95% of the owner's
+connections. While it's short, its health rounds show `copied_connections`
+below `peer_tracked_connections`, and it asks the owner for a full copy
+every 30 s. If it doesn't catch up within a few minutes, roll back as above
+and see
+[the full-copy message](troubleshooting.md#copied-connections-are-incomplete-requesting-a-full-copy-from-the-peer).
+
 A NAT you put in maintenance by hand isn't upgraded until you run
 `natpair resume`.
 
@@ -242,10 +250,51 @@ terraform apply -target='module.natpair.aws_instance.nat["b"]'
 ```
 
 Do the standby first, then hand over, then do the other NAT and run
-`sudo natpair resume` on it.
+`sudo natpair resume` on it. Without `max_connections`, each NAT sizes its
+table from its memory at boot, so while the owner holds more connections
+than a smaller NAT's table, that NAT isn't ready and asks the owner for a
+full copy every 30 s, and a takeover to it keeps only what its table holds,
+as when any table is full.
 
 Changing only tags updates the NATs in place without a restart, so it's safe
 to apply to both at once.
+
+## Size the connection table
+
+`max_connections` is the most connections each NAT tracks and copies to its
+peer. When the table is full, the kernel drops new connections. A closed TCP
+connection stays in the table for 30 s, so each new connection a second holds
+about 30 entries: 524,288 sustains about 17,000 new connections a second on
+top of the long-lived ones.
+
+Memory follows the connections in the table, not the limit. Measured on AWS,
+each connection costs the owner about 1.9 KB: 0.4 KB in the kernel's table,
+0.55 KB in conntrackd and the rest in natpair. A takeover is the peak. The
+NAT that steps down still holds its whole table while it takes in the new
+owner's copy, about 2.6 KB a connection. Without `max_connections`, each NAT
+picks the largest limit whose peak fits in half its memory at every boot, and
+logs `connection limit` with the reason. A NAT that can't read its memory
+uses 262,144. Set `max_connections` only to go lower, or higher with that
+risk:
+
+| Instance memory | Limit | Owner with a full table | Peak in a takeover |
+| --- | --- | --- | --- |
+| 1 GiB | 131,072 | 0.25 GB | 0.35 GB |
+| 2 GiB, such as c7gn.medium | 262,144 | 0.5 GB | 0.7 GB |
+| 4 GiB, such as c7gn.large | 524,288 | 1.0 GB | 1.4 GB |
+| 8 GiB, such as c7gn.xlarge | 1,048,576 | 2.0 GB | 2.7 GB |
+| 16 GiB | 2,097,152 | 4.0 GB | 5.5 GB |
+| 32 GiB or more | 4,194,304 | 8.0 GB | 11 GB |
+
+Lower `max_connections` only while the owner holds fewer connections than the
+new limit. A new standby can't copy more than its limit, so until then it
+never counts as ready, asks for a full copy every 30 s, and the handover in
+[Replace a NAT](#replace-a-nat) waits.
+
+On AWS, 2,097,152 connections on a 4 GiB NAT ran it out of memory, and the
+kernel killed conntrackd, so nothing was copied. A larger table also costs
+forwarding speed once it fills: on a c7gn.large, TCP fell from 19.0 Gbps with
+an empty table to 13.8 Gbps with 498,073 connections.
 
 ## Monitoring
 
