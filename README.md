@@ -76,7 +76,7 @@ work, such as renewing its lease. A flood of small packets beyond what one CPU
 can forward, roughly 500,000 to 600,000 64-byte packets a second, can starve
 that work and make the pair hand over again and again.
 
-If the pair must ride out floods, use a c7gn.large. In 60-second floods of
+If the pair must ride out floods, use a 2-vCPU c7gn.large. In 60-second floods of
 64-byte UDP offered at 800,000 and 1.2 million packets a second, a c7gn.medium
 pair handed over up to twice a run, and a c7gn.large pair never did. The
 c7gn.large also kept ownership under a 1 million packets a second flood of the
