@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"net/url"
 	"os"
@@ -29,11 +30,15 @@ const (
 	// DefaultReleaseURL is where releases are downloaded from when the
 	// configuration doesn't set release_url: natpair's GitHub releases.
 	DefaultReleaseURL = "https://github.com/artie-labs/natpair/releases/download"
-	// DefaultMaxConnections is the connection limit when the configuration
-	// doesn't set max_connections. At its peak, a takeover, a NAT used about
-	// 2.6 KB of memory per connection on AWS, so 524,288 connections take
-	// about 1.4 GB, under half of a 4 GiB instance.
-	DefaultMaxConnections = 524288
+	// fallbackMaxConnections is the connection limit when the configuration
+	// doesn't set max_connections and the instance's memory couldn't be read:
+	// the limit sized for 2 GiB, and natpair's default before it sized the
+	// limit from memory.
+	fallbackMaxConnections = 262144
+	// peakBytesPerConnection is the memory a NAT used per connection at its
+	// peak on AWS, a takeover. Without max_connections, the limit is the
+	// largest whose peak fits in half of the instance's memory.
+	peakBytesPerConnection = 2600
 )
 
 // maxConnectionsAllowed lists the limits max_connections accepts. The owner
@@ -103,8 +108,8 @@ type NAT struct {
 	PeerIP netip.Addr `json:"peer_ip"`
 
 	// MaxConnections is the most connections conntrackd copies and the
-	// kernel's connection table holds. Zero means DefaultMaxConnections.
-	// Bootstrap applies it at every boot.
+	// kernel's connection table holds. Zero sizes it from the instance's
+	// memory (see ConnectionLimit). Bootstrap applies it at every boot.
 	MaxConnections int `json:"max_connections,omitempty"`
 
 	// ReleaseURL is where the updater downloads releases from: an https:// or
@@ -171,12 +176,37 @@ func (c NAT) Releases() string {
 	return strings.TrimRight(c.ReleaseURL, "/")
 }
 
-// ConnectionLimit returns MaxConnections, or DefaultMaxConnections if unset.
+// ConnectionLimit returns MaxConnections if set. Otherwise it returns the
+// largest of maxConnectionsAllowed whose peak memory, peakBytesPerConnection
+// each, fits in half of Instance.MemoryBytes, or the smallest if none does:
+// 262,144 for 2 GiB, 524,288 for 4 GiB and 1,048,576 for 8 GiB. Without a
+// memory reading it returns fallbackMaxConnections.
 func (c NAT) ConnectionLimit() int {
-	if c.MaxConnections == 0 {
-		return DefaultMaxConnections
+	limit, _ := c.connectionLimit()
+	return limit
+}
+
+// LogConnectionLimit logs ConnectionLimit and why it was chosen.
+func (c NAT) LogConnectionLimit() {
+	limit, reason := c.connectionLimit()
+	slog.Info("connection limit", slog.Int("max_connections", limit), slog.String("reason", reason),
+		slog.Uint64("memory_bytes", c.Instance.MemoryBytes))
+}
+
+func (c NAT) connectionLimit() (int, string) {
+	switch {
+	case c.MaxConnections != 0:
+		return c.MaxConnections, "set by max_connections"
+	case c.Instance.MemoryBytes == 0:
+		return fallbackMaxConnections, "the instance's memory couldn't be read"
 	}
-	return c.MaxConnections
+	limit := maxConnectionsAllowed[0]
+	for _, allowed := range maxConnectionsAllowed {
+		if uint64(allowed)*peakBytesPerConnection <= c.Instance.MemoryBytes/2 {
+			limit = allowed
+		}
+	}
+	return limit, "the largest whose peak memory fits in half of the instance's"
 }
 
 // OwnCanary sends probes out through this NAT's own public IP.
