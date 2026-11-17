@@ -272,9 +272,7 @@ resource "aws_instance" "nat" {
       probe_url        = aws_lambda_function_url.receiver.function_url
       peer_ip          = aws_network_interface.nat[local.peer[each.key]].private_ip
       release_url      = trimsuffix(var.release_url, "/")
-      }, var.max_connections == null ? {} : { max_connections = var.max_connections },
-      var.congestion_handover_minutes == null ? {} : { congestion_handover_minutes = var.congestion_handover_minutes },
-    ))
+    }, var.max_connections == null ? {} : { max_connections = var.max_connections }))
   })
 
   primary_network_interface {

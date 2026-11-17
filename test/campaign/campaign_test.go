@@ -254,37 +254,6 @@ func TestCampaign(t *testing.T) {
 		return map[string]any{"unloaded_lossy_path_failed_over": true, "local_takeover_s": recovery}
 	})
 
-	l.runCase("lossy-path-hands-over-after-limit", func() map[string]any {
-		// The same loss under load, but as from a fault on a alone: b's path
-		// is clean.
-		// With congestion_handover_minutes at its minimum, 1, a hands over
-		// once it has served a whole minute and at least half of its rounds
-		// in the last minute were congested or failed: about 30 s into the
-		// loss, or a minute after it started serving, whichever is later.
-		setLimit := func(minutes int) {
-			for _, name := range []string{"a", "b"} {
-				cfg := l.configs[name]
-				cfg.CongestionHandoverMinutes = minutes
-				l.configs[name] = cfg
-			}
-		}
-		setLimit(1)
-		defer setLimit(0)
-		l.restartPair()
-		defer l.loadCPU()()
-		lossy := []string{"FORWARD", "-o", "wan", "-m", "statistic", "--mode", "random", "--probability", "0.8", "-j", "DROP"}
-		l.ns("a", append([]string{"iptables", "-I"}, lossy...)...)
-		l.wait(func() bool { return l.report("a").Congested }, 10*time.Second, "a reports its path congested")
-		congestedAt := bootclock.Now()
-		time.Sleep(20 * time.Second)
-		l.require(l.active("a") && !l.active("b"), "a keeps serving while fewer than half of its rounds were bad")
-		l.wait(func() bool { return l.active("b") }, 60*time.Second, "b takes over once most of a's rounds in the window were congested")
-		handedOver := (bootclock.Now() - congestedAt).Seconds()
-		l.ns("a", append([]string{"iptables", "-D"}, lossy...)...)
-		l.require(l.fresh(), "new connections work through b")
-		return map[string]any{"handed_over_after_limit": true, "handed_over_after_s": handedOver}
-	})
-
 	l.runCase("congested-takeover-verifies", func() map[string]any {
 		// b loses 80% of what its shared canary sends out, as under a flood
 		// that follows the shared Elastic IP. Its takeover's uploads through

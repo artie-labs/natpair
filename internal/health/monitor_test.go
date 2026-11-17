@@ -62,10 +62,9 @@ func newFixture(t *testing.T) *fixture {
 		return f.peer, nil
 	})
 	f.monitor = health.New(health.Config{
-		Probe:            probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-own"},
-		ServingProbe:     probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-shared"},
-		Release:          "v0.2.0",
-		CongestionWindow: 10 * time.Minute,
+		Probe:        probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-own"},
+		ServingProbe: probe.Target{URL: "https://probe.example.invalid/nat", Namespace: "nat-shared"},
+		Release:      "v0.2.0",
 	}, health.Dependencies{
 		Prober:    f.prober,
 		Conntrack: f.conntrack,
@@ -517,8 +516,8 @@ func TestRoundLoad(t *testing.T) {
 }
 
 func TestRoundCongestionWindow(t *testing.T) {
-	// newOwner returns a NAT that just started serving, with a 10 minute
-	// congestion window and 1 s rounds.
+	// newOwner returns a NAT that just started serving, with 1 s rounds, so
+	// the 10 minute congestion window holds 600.
 	newOwner := func(t *testing.T) *fixture {
 		f := newFixture(t)
 		f.serving = true

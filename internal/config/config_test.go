@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,20 +56,6 @@ func TestValidate(t *testing.T) {
 	assert.NoError(t, edit(func(c *NAT) { c.MaxConnections = 524288 }))
 	assert.EqualError(t, edit(func(c *NAT) { c.ReleaseURL = "http://example.com/releases" }), "release_url must start with https:// or s3://")
 	assert.NoError(t, edit(func(c *NAT) { c.ReleaseURL = "s3://example-mirror/natpair" }))
-	assert.EqualError(t, edit(func(c *NAT) { c.CongestionHandoverMinutes = -1 }), "congestion_handover_minutes must be from 1 to 60")
-	assert.EqualError(t, edit(func(c *NAT) { c.CongestionHandoverMinutes = 61 }), "congestion_handover_minutes must be from 1 to 60")
-	assert.NoError(t, edit(func(c *NAT) { c.CongestionHandoverMinutes = 1 }))
-	assert.NoError(t, edit(func(c *NAT) { c.CongestionHandoverMinutes = 60 }))
-}
-
-func TestCongestionHandover(t *testing.T) {
-	{
-		// Unset uses the default, so configurations without the setting still load
-		assert.Equal(t, 10*time.Minute, NAT{}.CongestionHandover())
-	}
-	{
-		assert.Equal(t, 2*time.Minute, NAT{CongestionHandoverMinutes: 2}.CongestionHandover())
-	}
 }
 
 func TestReleases(t *testing.T) {

@@ -165,7 +165,7 @@ func maintenance(_ context.Context, args []string) error {
 	if err := controller.RequestMaintenance(config.StateDir); err != nil {
 		return err
 	}
-	fmt.Println("Maintenance requested. An active NAT hands over once its peer passes its checks, or, while its path is congested, once the peer has proven its own path. Check that the peer serves and traffic works through it before replacing this NAT.")
+	fmt.Println("Maintenance requested. An active NAT hands over once its peer passes its checks. Check that the peer serves and traffic works through it before replacing this NAT.")
 	return nil
 }
 
@@ -210,10 +210,9 @@ func runNAT(ctx context.Context, args []string) error {
 
 	var ctrl *controller.Controller
 	monitor := health.New(health.Config{
-		Probe:            cfg.OwnProbe(),
-		ServingProbe:     cfg.SharedProbe(),
-		Release:          reportedRelease(config.BootedReleasePath),
-		CongestionWindow: cfg.CongestionHandover(),
+		Probe:        cfg.OwnProbe(),
+		ServingProbe: cfg.SharedProbe(),
+		Release:      reportedRelease(config.BootedReleasePath),
 	}, health.Dependencies{
 		Prober:    prober,
 		Conntrack: conntrack,

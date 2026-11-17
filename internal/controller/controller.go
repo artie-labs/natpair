@@ -190,10 +190,10 @@ func (c *Controller) Run(ctx context.Context) error {
 		// API comes back, and the 12 s cooldown would then delay its next attempt.
 		// The cooldown starts before the release and before this NAT reports
 		// that it stopped serving, so the peer never sees it as both idle and
-		// ready to take over. A handover after a long congestion needs none,
-		// like maintenance: no upload of this NAT passed recently, so it
-		// could contend only as a last resort, after its peer, which has
-		// proven its path, takes the released lease.
+		// ready to take over. A handover after a long congestion needs none:
+		// no upload of this NAT passed recently, so it could contend only as
+		// a last resort, after its peer, which has proven its path, takes the
+		// released lease.
 		if errors.Is(err, errDemoted) || (errors.Is(err, errTakeover) && c.deps.Health.Latest().PeerCanTakeover) {
 			c.startCooldown()
 		}
@@ -312,25 +312,7 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 			}
 		} else {
 			// Maintenance and a handover request hand over only to a peer that
-			// passes its forwarding and copied-connection checks. A congested
-			// owner's uploads time out, so it publishes no probe flows, and its
-			// peer can never show it copied them. So while this NAT is
-			// congested, maintenance needs only a peer that can take over.
-			// Handover requests come from upgrades, which wait for a ready
-			// peer.
-			//
-			// The check can't tell a flood from a fault that damaged this
-			// NAT's path, such as one losing 90% of packets, which still lets
-			// some handshakes through. So a congested owner also hands over
-			// once at least half of its rounds over its whole congestion
-			// window were congested or failed (see health.Report.
-			// CongestionLimit). A flood congests the new owner too, which must
-			// then serve a whole window first, so the pair moves at most once
-			// per window. A congested peer
-			// never gets it: no upload of its passed either, so it can't take
-			// over. A ready peer can, so it gets it too. With a fault that still
-			// lets some uploads through, the peer copies their flows and can
-			// stay ready for most of the congestion.
+			// passes its forwarding and copied-connection checks.
 			if !report.Stale && report.PeerReady {
 				if c.maintenanceRequested() {
 					return errMaintenance
@@ -339,17 +321,21 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 					return errHandover
 				}
 			}
-			if !report.Stale && report.Congested && report.PeerCanTakeover {
-				// A ready peer already got maintenance above.
-				if c.maintenanceRequested() {
-					slog.Warn("handing over to a peer that hasn't verified its copied connections, because this NAT's path is congested, so connections the peer hasn't copied may reset")
-					return errMaintenance
-				}
-				if report.CongestionLimit {
-					slog.Warn("handing over because at least half of this NAT's health rounds in the last congestion_handover_minutes were congested or failed, so connections the peer hasn't copied may reset",
-						slog.Int("window_bad_rounds", report.WindowBadRounds), slog.Int("window_rounds", report.WindowRounds))
-					return errCongested
-				}
+			// The check can't tell a flood from a fault that damaged this NAT's
+			// path, such as one losing 90% of packets, which still lets some
+			// handshakes through. So a congested owner also hands over once at
+			// least half of its rounds over its whole congestion window were
+			// congested or failed (see health.Report.CongestionLimit). A
+			// congested owner's uploads time out, so it publishes no probe
+			// flows, and its peer can't show it copied them, so a peer that can
+			// take over is enough. A flood congests the new owner too, which
+			// must then serve a whole window first, so the pair moves at most
+			// once per window. A congested peer never gets it: no upload of its
+			// passed either, so it can't take over.
+			if !report.Stale && report.Congested && report.PeerCanTakeover && report.CongestionLimit {
+				slog.Warn("handing over because at least half of this NAT's health rounds in the last 10 minutes were congested or failed, so connections the peer hasn't copied may reset",
+					slog.Int("window_bad_rounds", report.WindowBadRounds), slog.Int("window_rounds", report.WindowRounds))
+				return errCongested
 			}
 			if !storeDown {
 				if _, err := l.Valid(); err != nil {
@@ -468,8 +454,7 @@ func (c *Controller) SetHandover(want bool) {
 
 // RequestMaintenance takes the NAT in stateDir out of rotation. An owner hands
 // ownership to its peer once the peer passes its forwarding and
-// copied-connection checks, or, while the owner is congested, once the peer
-// can take over. A standby stops offering to take over. The
+// copied-connection checks, and a standby stops offering to take over. The
 // request persists until [Resume].
 func RequestMaintenance(stateDir string) error {
 	if err := os.WriteFile(filepath.Join(stateDir, maintenanceFile), nil, 0o600); err != nil {

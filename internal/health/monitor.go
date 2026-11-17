@@ -102,6 +102,14 @@ const (
 	// the owner fails over in about 15 s, as before.
 	loadedCPUPercent = 85
 	loadedDrops      = 100
+	// congestionWindow is the trailing time over which a serving NAT judges
+	// how congested its path is. See [Report.CongestionLimit]. Load excuses
+	// a congested round, and an attacker who floods a NAT can make it look
+	// loaded, so the window bounds how long a flood can delay failing over
+	// from a damaged owner. A NAT that takes over must serve a whole window
+	// first, so it is also the shortest time between the moves a flood
+	// causes.
+	congestionWindow = 10 * time.Minute
 )
 
 // StaleAfter returns how old a report from rounds of the given interval may
@@ -186,9 +194,6 @@ type Config struct {
 	// Release is the release this NAT runs, or "" if unknown, reported to the
 	// peer.
 	Release string
-	// CongestionWindow is the trailing time over which a serving NAT judges
-	// how congested its path is. See [Report.CongestionLimit].
-	CongestionWindow time.Duration
 }
 
 // Prober checks a path.
@@ -270,7 +275,7 @@ type Monitor struct {
 	// round.
 	uncounted int
 	// window holds this NAT's rounds while serving, oldest first, back to
-	// CongestionWindow ago. windowBad counts those that were congested or
+	// congestionWindow ago. windowBad counts those that were congested or
 	// counted as failed. servingSince is when this NAT's current stretch of
 	// serving rounds started, in ownership session windowSession, if
 	// windowStarted. Standing by or a new session clears them.
@@ -675,7 +680,7 @@ type windowRound struct {
 
 // recordWindow adds this round to the congestion window and reports
 // whether the window has reached the limit: this NAT has served for the
-// whole CongestionWindow, and at least half of its rounds in it were
+// whole congestionWindow, and at least half of its rounds in it were
 // congested or counted as failed.
 //
 // The share of bad rounds, not an unbroken run of them, is what counts.
@@ -688,7 +693,7 @@ type windowRound struct {
 // moves the pair at most once per window.
 //
 // Rounds start at most once per BaseInterval, so the window holds at most
-// CongestionWindow/BaseInterval rounds, and older ones are dropped beyond
+// congestionWindow/BaseInterval rounds, and older ones are dropped beyond
 // that too.
 func (m *Monitor) recordWindow(serving, bad bool, now time.Duration) bool {
 	if !serving {
@@ -706,14 +711,14 @@ func (m *Monitor) recordWindow(serving, bad bool, now time.Duration) bool {
 	if bad {
 		m.windowBad++
 	}
-	maxRounds := int(m.config.CongestionWindow / BaseInterval)
-	for len(m.window) > 0 && (now-m.window[0].at >= m.config.CongestionWindow || len(m.window) > maxRounds) {
+	maxRounds := int(congestionWindow / BaseInterval)
+	for len(m.window) > 0 && (now-m.window[0].at >= congestionWindow || len(m.window) > maxRounds) {
 		if m.window[0].bad {
 			m.windowBad--
 		}
 		m.window = m.window[1:]
 	}
-	return now-m.servingSince >= m.config.CongestionWindow && len(m.window) > 0 && 2*m.windowBad >= len(m.window)
+	return now-m.servingSince >= congestionWindow && len(m.window) > 0 && 2*m.windowBad >= len(m.window)
 }
 
 // congestedPath reports whether completed of handshakeAttempts handshakes
