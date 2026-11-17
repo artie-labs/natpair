@@ -55,13 +55,14 @@ See [`examples/`](../examples) for complete configurations.
   `create_dynamodb_endpoint` is false
 - a DynamoDB table, `<name>`, with on-demand billing, and the item that pins
   the release
-- an IAM role, instance profile and policy for the NATs, `<name>`
+- an IAM role, instance profile and policy for the NATs, `<name>`, and a
+  second policy, `<name>-boot`, for what they need from their first boot on
 - the probe receiver: a Lambda function, `<name>-receiver`, its IAM role and a
   function URL that requires IAM authentication
 
 ## What the NATs may do
 
-The NATs' IAM policy allows only:
+The NATs' two IAM policies allow only:
 
 | Permission | Scope | Why |
 | --- | --- | --- |
@@ -74,9 +75,11 @@ The NATs' IAM policy allows only:
 | `s3:GetObject` | The `release_url` prefix, only when it starts with `s3://` | Downloading releases from your bucket |
 | `secretsmanager:GetSecretValue` | `datadog_api_key_secret_arn`, only when set | The Datadog agent's API key |
 
-The policy is attached after the NATs are created, so it can rely on their
-tag. A NAT that boots before then logs `AccessDenied` errors and retries until
-the policy applies. They need no action.
+Session Manager, the release download from S3 and the Datadog key are in a
+second policy, `<name>-boot`, attached before the NATs launch, so they work at
+first boot. The rest is attached after the NATs are created, so it can rely on
+their tag. Until it applies, the daemon logs `AccessDenied` errors and
+retries. They need no action.
 
 ## Requirements
 
@@ -101,6 +104,7 @@ the policy applies. They need no action.
 | `create_dynamodb_endpoint` | Whether to add a DynamoDB gateway endpoint to the public route table. A route table can use only one, so set it to false for a second pair whose public route table already has one. | `bool` | `true` | no |
 | `datadog_api_key_secret_arn` | ARN of a Secrets Manager secret whose value is the Datadog API key alone, as plaintext. It may be in another region: NATs read it once, at first boot, so one secret can serve every pair, and changing it needs new NATs. When set, each NAT installs the Datadog agent at first boot. The agent ships natpair's logs and the host's metrics, including the connection table's size, tagged service:natpair. Null leaves the agent out. | `string` | `null` | no |
 | `datadog_site` | Datadog site the agent reports to, such as datadoghq.com or datadoghq.eu. NATs read it at first boot, so changing it needs new NATs. | `string` | `"datadoghq.com"` | no |
+| `kernel` | Amazon Linux 2023 kernel line the NATs boot: 6.1, 6.12 or 6.18. New NATs use the newest image on that line. 6.18 is the newest long-term support kernel AWS offers for Amazon Linux 2023, with the longest support ahead of it. Running NATs keep their image, so a new line applies when you replace the NATs. 6.12 and 6.18 need a release that turns on threaded NAPI, any after v0.1.1. With v0.1.0 or v0.1.1, use 6.1, or the plan fails. | `string` | `"6.18"` | no |
 | `max_connections` | Most connections each NAT tracks and copies to its peer, a power of two from 65,536 to 4,194,304. Null uses natpair's default, 262,144. A full table costs about 80 MB per 262,144 connections in the kernel, and as much again in conntrackd. NATs read it at first boot, so changing it needs new NATs. | `number` | `null` | no |
 | `release_url` | Where NATs download releases from: an https:// or s3:// prefix that holds &lt;tag&gt;/natpair_linux_arm64.tar.gz. The default is natpair's GitHub releases. The module grants the NATs' IAM role read access to an s3:// mirror. NATs read it at first boot, so changing it needs new NATs. | `string` | `"https://github.com/artie-labs/natpair/releases/download"` | no |
 | `worker_cidrs` | Source CIDRs the NATs forward and translate to the shared address. Null, the default, means every CIDR of the VPC, so any subnet whose default route points at the shared ENI works. NATs read it at first boot, so changing it needs new NATs. | `list(string)` | `null` | no |

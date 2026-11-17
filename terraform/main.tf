@@ -22,13 +22,16 @@ data "aws_vpc" "this" {
   id = data.aws_subnet.public.vpc_id
 }
 
+# The newest Amazon Linux 2023 image on the chosen kernel line. Without the
+# line in the name, most_recent picked whichever line AWS published last, so
+# new NATs booted 6.1, 6.12 or 6.18 depending on the day.
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["al2023-ami-2023.*-kernel-*-arm64"]
+    values = ["al2023-ami-2023.*-kernel-${var.kernel}-arm64"]
   }
 }
 
@@ -291,8 +294,8 @@ resource "aws_instance" "nat" {
   tags = { Name = "${var.name}-nat-${each.key}", (local.pair_tag) = var.pair_id }
 
   # The NATs boot once the shared ENI has its address, so the first takeover
-  # doesn't wait for it.
-  depends_on = [aws_eip_association.shared]
+  # doesn't wait for it, and once they may use what they need while booting.
+  depends_on = [aws_eip_association.shared, aws_iam_role_policy.nat_boot]
 
   lifecycle {
     # source_dest_check belongs to the primary interface, which turns it off.
@@ -302,6 +305,22 @@ resource "aws_instance" "nat" {
     # Changing the root volume replaces the NAT, so existing NATs keep theirs
     # until they're replaced on purpose.
     ignore_changes = [ami, user_data, source_dest_check, root_block_device]
+
+    # On Linux 6.5 and later, so 6.12 and 6.18, a task runs pending softirq
+    # work inline. On a saturated NAT, that makes the daemon forward packets
+    # inside its own system calls, and it times out lease renewals and DNS
+    # lookups. Releases after v0.1.1 turn on threaded NAPI, which moves that
+    # work to kernel threads. v0.1.0 and v0.1.1 are the only releases without
+    # it. A later release without it, such as a fix on the v0.1.1 line, must
+    # be added to the list. The check runs on every plan, so it also blocks
+    # rolling release back to one of them while kernel is 6.12 or 6.18. It
+    # reads kernel, not the image a running NAT booted, since ami is ignored,
+    # so docs/operations.md says to check uname -r on NATs of a pair that ran
+    # an older release.
+    precondition {
+      condition     = var.kernel == "6.1" || !contains(["v0.1.0", "v0.1.1"], var.release)
+      error_message = "kernel ${var.kernel} needs a natpair release with threaded NAPI, and ${var.release} doesn't have it. Set release to a version after v0.1.1, or set kernel = \"6.1\"."
+    }
   }
 }
 
@@ -362,14 +381,25 @@ resource "aws_iam_role_policy" "nat" {
   role = aws_iam_role.nat.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = concat([local.table_access, local.release_record_access, local.receiver_access, local.session_access], local.release_access, local.datadog_access, [for statement in local.ec2_access : merge(statement, {
+    Statement = concat([local.table_access, local.release_record_access, local.receiver_access], [for statement in local.ec2_access : merge(statement, {
       Condition = { StringEquals = merge(statement.Condition.StringEquals, { "aws:RequestedRegion" = data.aws_region.current.region }) }
     })])
   })
 
   # Applied after the NATs, so they carry the pair tag before the policy relies
-  # on it. A NAT boots without the policy and retries until it applies.
+  # on it. The daemon retries until it applies.
   depends_on = [aws_instance.nat]
+}
+
+# What a NAT needs from its first boot on, attached before the NATs launch:
+# Session Manager, the release download, which self-updates also use, and the
+# Datadog key. On a fresh apply, the SSM agent that started without these
+# permissions never came online, and the Datadog install, which doesn't retry,
+# failed.
+resource "aws_iam_role_policy" "nat_boot" {
+  name   = "${var.name}-boot"
+  role   = aws_iam_role.nat.id
+  policy = jsonencode({ Version = "2012-10-17", Statement = concat([local.session_access], local.release_access, local.datadog_access) })
 }
 
 # The probe receiver is a Lambda function behind a function URL that requires
