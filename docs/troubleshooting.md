@@ -134,9 +134,10 @@ shows the copies it received and lost.
 
 All worker traffic leaves from the shared address, and each connection to
 one destination address, port and protocol needs its own source port, of
-which there are 59,976 for TCP. The owner counts them once a minute and warns, at
-most every 10 minutes for each destination, when one destination passes
-70%. The `destination` field names it, such as `tcp 203.0.113.9:5432`, with
+which there are 59,976 for TCP. UDP gets 64,512, but the owner measures it
+against 59,976 too, so a UDP destination's share reads about 8% high. The
+owner counts the connections once a minute and warns, at most every 10
+minutes for each destination, when one destination passes 70%. The `destination` field names it, such as `tcp 203.0.113.9:5432`, with
 its `connections`. As its ports run out, new connections to that destination
 start to fail while others keep working. The owner logs `back under 60%`
 once the count drops under 60%. A NAT that stops serving stops counting, and
