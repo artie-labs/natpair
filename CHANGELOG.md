@@ -23,8 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as 2.6 KB a connection (about 2.3 KB was measured after a takeover), fits
   in half the memory. That's 262,144 for 2 GiB, as before, 524,288 for 4 GiB
   and 1,048,576 for 8 GiB. A NAT that can't read its memory uses 262,144, and
-  a set `max_connections` still wins. The docs said a connection cost about
-  a third of what it does. Rolling back to an earlier release puts NATs with
+  a set `max_connections` still wins. NATs with less than about 1.3 GiB, such
+  as t4g.micro, go down to 131,072 or 65,536. Upgrading such a pair waits
+  until the owner holds fewer connections than that, because the upgraded
+  standby can't hold a larger copy. The docs said a connection cost about a
+  third of what it does. Rolling back to an earlier release puts NATs with
   more memory back on
   262,144, so roll back only while the owner holds fewer connections than
   that. A handover to the earlier release resets the rest. See
