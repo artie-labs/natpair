@@ -44,6 +44,10 @@ const (
 	maxMemoryBytes = 64 << 40
 )
 
+// meminfoPath is where Discover reads the instance's memory. Tests point it
+// at a fixture.
+var meminfoPath = "/proc/meminfo"
+
 // Discover reads the facts from the instance metadata service. The AWS SDK's
 // AWS_EC2_METADATA_SERVICE_ENDPOINT variable points it elsewhere, as the local
 // campaign does.
@@ -92,7 +96,7 @@ func Discover(ctx context.Context, cfg aws.Config) (Facts, error) {
 	if len(facts.VPCCIDRs) == 0 {
 		return Facts{}, fmt.Errorf("the instance metadata service listed no VPC CIDRs")
 	}
-	facts.MemoryBytes = readMemory("/proc/meminfo")
+	facts.MemoryBytes = readMemory(meminfoPath)
 	return facts, nil
 }
 
