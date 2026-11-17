@@ -133,9 +133,9 @@ type Report struct {
 	// TrackedConnections is the number of connections conntrackd tracks on
 	// this NAT, which the peer should hold copies of.
 	TrackedConnections int `json:"tracked_connections"`
-	// TrackedUnknown means this NAT couldn't read conntrackd's counts this
-	// round, so TrackedConnections is 0 rather than a count. Releases before
-	// it never set it.
+	// TrackedUnknown means this NAT couldn't read both of conntrackd's
+	// counts this round, so TrackedConnections isn't a count to compare a
+	// copy against. Releases before it never set it.
 	TrackedUnknown bool `json:"tracked_unknown,omitempty"`
 	// Oldest are the established connections conntrackd has held longest on
 	// this NAT, read every oldestInterval. The peer must hold copies of all of

@@ -155,8 +155,8 @@ func TestHandover(t *testing.T) {
 // TestFullCopy checks that a full copy of a large table reaches the peer
 // whole. A standby's conntrackd asks the owner for one when it starts, such
 // as after a reboot. With Linux's default socket buffers, the burst overflowed
-// the standby's socket: on AWS it got 69 to 80% of the table, and here about
-// 30% of 250,000 connections.
+// the standby's socket: on AWS it got 69 to 80% of the table. With master's
+// settings, this test's copy stays short.
 func TestFullCopy(t *testing.T) {
 	const connections = 100000
 	a, b := startPair(t)
