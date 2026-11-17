@@ -134,7 +134,7 @@ shows the copies it received and lost.
 
 All worker traffic leaves from the shared address, and each connection to
 one destination address, port and protocol needs its own source port, of
-which there are 64,512. The owner counts them once a minute and warns, at
+which there are 59,976 for TCP. The owner counts them once a minute and warns, at
 most every 10 minutes for each destination, when one destination passes
 70%. The `destination` field names it, such as `tcp 203.0.113.9:5432`, with
 its `connections`. As its ports run out, new connections to that destination

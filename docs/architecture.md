@@ -167,8 +167,8 @@ old release. See [operations](operations.md#upgrade) for the steps.
   NATs like their other traffic, so it leaves from the shared Elastic IP.
 - Every worker connection leaves from the shared address, so to one
   destination address, port and protocol, such as one database's port, the
-  pair can hold at most 64,512 connections at a time, one per source port
-  the kernel picks from. The owner counts them per destination once a
+  pair can hold at most 59,976 TCP connections at a time, one per source
+  port in the range natpair translates worker TCP to. The owner counts them per destination once a
   minute, warns when one destination uses 70% of its ports, and reports the
   busiest destination's share as `shared_ports_used` in its health rounds.
   See [troubleshooting](troubleshooting.md#worker-connections-to-one-destination-use-most-of-the-shared-addresss-ports).
