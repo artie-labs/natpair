@@ -258,6 +258,28 @@ func TestRoundReplication(t *testing.T) {
 		assert.False(t, f.rounds(t, 1).Ready)
 	}
 	{
+		// A board read that fails for a round keeps what passes found, so the
+		// NAT is ready again without another pass over its copies
+		f := standby(t, true)
+		require.True(t, f.rounds(t, 2).Ready)
+		fresh := f.peer
+		f.peer = nil
+		f.rounds(t, 1)
+		f.peer = fresh
+		assert.True(t, f.rounds(t, 1).Ready)
+		assert.Equal(t, 1, f.conntrack.CopiedCallCount())
+	}
+	{
+		// When passes over the copies keep failing, what they found stops
+		// counting 10 minutes after the pass that found it, and the NAT stops
+		// being ready replicationRounds later
+		f := standby(t, true)
+		require.True(t, f.rounds(t, 2).Ready)
+		f.conntrack.CopiedReturns(nil, errors.New("conntrackd -e failed"))
+		assert.True(t, f.rounds(t, 121).Ready)
+		assert.False(t, f.rounds(t, 1).Ready)
+	}
+	{
 		// A stale peer report is not trusted
 		f := standby(t, true)
 		f.peer.Stale = true
@@ -279,10 +301,13 @@ func TestRoundCopiedShare(t *testing.T) {
 	}
 	{
 		// A copy of 70%, as after a full copy lost part of its burst, is not
-		// ready, though conntrackd keeps adding copies. After two such rounds
-		// the standby asks for a full copy.
+		// ready, though it holds the sampled connections. Once it has stayed
+		// short for 30 s, longer than a large copy takes to arrive, the
+		// standby asks for a full copy.
 		f := standby(t, 70000)
-		assert.False(t, f.rounds(t, 2).Ready)
+		assert.False(t, f.rounds(t, 6).Ready)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
+		assert.False(t, f.rounds(t, 1).Ready)
 		assert.Equal(t, 1, f.conntrack.RequestResyncCallCount())
 	}
 	{
@@ -322,6 +347,9 @@ func TestRoundCopiedShare(t *testing.T) {
 		f := standby(t, 96000)
 		f.conntrack.StatsReturns("cache internal:\ncurrent active connections: 3\n", nil)
 		assert.False(t, f.rounds(t, 2).Ready)
+		// Nor does it ask for a full copy over stats it couldn't read
+		f.rounds(t, 20)
+		assert.Zero(t, f.conntrack.RequestResyncCallCount())
 	}
 	{
 		// An owner's copy is of the standby's table, which still counts the
@@ -347,6 +375,28 @@ func TestRoundOldest(t *testing.T) {
 		f.rounds(t, 58)
 		assert.Equal(t, 1, f.conntrack.OldestCallCount())
 		f.rounds(t, 1)
+		assert.Equal(t, 2, f.conntrack.OldestCallCount())
+	}
+	{
+		// A NAT that starts or stops serving reads its oldest connections again
+		// at once: the ones it read in the other role belong to another table
+		f := newFixture(t)
+		f.conntrack.OldestReturns(oldest, nil)
+		f.rounds(t, 2)
+		require.Equal(t, 1, f.conntrack.OldestCallCount())
+		f.serving = true
+		f.rounds(t, 1)
+		assert.Equal(t, 2, f.conntrack.OldestCallCount())
+	}
+	{
+		// A failed pass keeps the previous list, since it may have read only
+		// part of the table
+		f := newFixture(t)
+		f.serving = true
+		f.conntrack.OldestReturns(oldest, nil)
+		f.rounds(t, 2)
+		f.conntrack.OldestReturns(nil, errors.New("conntrackd -i timed out"))
+		assert.Equal(t, oldest, f.rounds(t, 60).Oldest)
 		assert.Equal(t, 2, f.conntrack.OldestCallCount())
 	}
 	{

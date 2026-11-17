@@ -49,8 +49,9 @@ func lastBytes(value string, limit int) string {
 
 // Stream runs name with args and passes its standard output to read as it
 // arrives, so a large output never has to fit in memory. The command and any
-// processes it starts are killed if it outlives timeout, or if read returns
-// before the output ends.
+// processes it starts are killed if it outlives timeout, or if read returns an
+// error. read must otherwise read to the end, or the command waits for it
+// until timeout.
 func Stream(ctx context.Context, timeout time.Duration, read func(io.Reader) error, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

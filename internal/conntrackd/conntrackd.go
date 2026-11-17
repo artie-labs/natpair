@@ -48,6 +48,7 @@ const takeoverStepTimeout = 10 * time.Second
 //     for both at 524,288.
 //   - ResendQueueSize is how many sent updates conntrackd keeps until the
 //     peer acknowledges them, so it can resend those the peer reports lost.
+//     It is one per connection, and at least conntrackd's default.
 //     With the default of 131,072, less than one full copy, conntrackd
 //     discarded the start of a large copy before the peer asked for its lost
 //     parts again. The queue holds references to cache entries, not copies.
@@ -61,7 +62,7 @@ const takeoverStepTimeout = 10 * time.Second
 const configTemplate = `Sync {
     Mode FTFW {
         StartupResync on
-        ResendQueueSize %[6]d
+        ResendQueueSize %[9]d
     }
     UDP {
         IPv4_address %[1]s
@@ -111,6 +112,9 @@ General {
 // data waits in it.
 const socketBytesPerConnection = 64
 
+// defaultResendQueue is conntrackd's own ResendQueueSize.
+const defaultResendQueue = 131072
+
 // WriteConfig writes conntrackd's configuration to path. It replicates over
 // iface from local to peer, ignores connections to or from local and shared,
 // copies at most maxConnections, and keeps its log, lock file and control
@@ -118,7 +122,10 @@ const socketBytesPerConnection = 64
 // because connections past it couldn't be copied.
 func WriteConfig(path string, local, peer, shared netip.Addr, iface, dir string, maxConnections int) error {
 	socketBuffer := maxConnections * socketBytesPerConnection
-	contents := fmt.Sprintf(configTemplate, local, peer, iface, dir, shared, maxConnections, socketBuffer, 2*socketBuffer)
+	// conntrackd's default resend queue is the floor, so a small limit doesn't
+	// shrink it.
+	resendQueue := max(maxConnections, defaultResendQueue)
+	contents := fmt.Sprintf(configTemplate, local, peer, iface, dir, shared, maxConnections, socketBuffer, 2*socketBuffer, resendQueue)
 	temporary := path + ".tmp"
 	if err := os.WriteFile(temporary, []byte(contents), 0o644); err != nil {
 		return fmt.Errorf("failed to write conntrackd configuration: %w", err)
@@ -356,13 +363,20 @@ func tupleText(line []byte) ([]byte, bool) {
 		return nil, false
 	}
 	rest := line[start:]
+	keys := []string{"src=", "dst=", "sport=", "dport="}
 	end := 0
-	for _, key := range []string{"src=", "dst=", "sport=", "dport="} {
+	for i, key := range keys {
 		if !bytes.HasPrefix(rest[end:], []byte(key)) {
 			return nil, false
 		}
 		space := bytes.IndexByte(rest[end:], ' ')
 		if space < 0 {
+			// Only the last field may end the line. A line cut off earlier,
+			// such as the last one read when a pass is stopped, isn't an
+			// entry.
+			if i < len(keys)-1 {
+				return nil, false
+			}
 			space = len(rest) - end
 		}
 		end += space + 1
