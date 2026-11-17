@@ -80,10 +80,10 @@ If the pair must ride out floods, use a c7gn.large. In 60-second floods of
 64-byte UDP offered at 800,000 and 1.2 million packets a second, a c7gn.medium
 pair handed over up to twice a run, and a c7gn.large pair never did. The
 c7gn.large also kept ownership under a 1 million packets a second flood of the
-owner's own address. Those runs used two changes the current release doesn't
-have: threaded receive processing on each network interface, and a check that
-keeps a congested owner from stepping down. On the current release, the
-c7gn.large handed over under these floods too. The c7g.large also has 2 vCPUs
+owner's own address. Those runs used threaded receive processing on each
+network interface, and a check that keeps a congested owner from stepping
+down. Without those two changes, which earlier releases lack, the c7gn.large
+handed over under these floods too. The c7g.large also has 2 vCPUs
 but wasn't flood-tested. To change the type of a running pair, see
 [Replace a NAT](docs/operations.md#replace-a-nat).
 
