@@ -50,7 +50,10 @@ See [`examples/`](../examples) for complete configurations.
   and Elastic IP
 - the shared ENI, `<name>-shared`, and the association of your Elastic IP
   with it
-- a security group, `<name>`
+- two security groups: `<name>` on the shared ENI, open to all TCP and UDP so
+  AWS doesn't track forwarded connections, and `<name>-own` on each NAT's own
+  interface, which lets in only conntrackd's copies from the peer NAT, ICMP
+  errors from the VPC, and replies to what the NAT sent
 - a DynamoDB gateway endpoint on the public route table, unless
   `create_dynamodb_endpoint` is false
 - a DynamoDB table, `<name>`, with on-demand billing, and the item that pins
@@ -94,7 +97,7 @@ retries. They need no action.
 | Name | Description | Type | Default | Required |
 | --- | --- | --- | --- | :---: |
 | `instance_type` | Arm64 instance type for both NATs. Either NAT must carry the pair's full load. Changing it stops and starts each NAT, so change one NAT per apply, the standby first. | `string` | n/a | yes |
-| `name` | Name or name prefix for the pair's resources: the lease table, security group, IAM role and instance profile, Lambda function and Name tags. IAM names are global to the AWS account, so it must be unique in the account. Changing it replaces the lease table and security group, so don't change it on a running pair. | `string` | n/a | yes |
+| `name` | Name or name prefix for the pair's resources: the lease table, security groups, IAM role and instance profile, Lambda function and Name tags. IAM names are global to the AWS account, so it must be unique in the account. Changing it replaces the lease table and security groups, so don't change it on a running pair. | `string` | n/a | yes |
 | `pair_id` | ID for this NAT pair, unique in the AWS account. Its lease records start with it, and the natpair-pair tag that scopes each NAT's EC2 permissions carries it. Don't change it on a running pair. | `string` | n/a | yes |
 | `public_route_table_id` | Route table of the public subnet. The DynamoDB gateway endpoint is added to it. | `string` | n/a | yes |
 | `public_subnet_id` | Public subnet for both NATs and the shared ENI. An ENI can't move between availability zones, so the pair lives in this subnet's zone. | `string` | n/a | yes |

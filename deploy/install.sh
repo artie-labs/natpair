@@ -24,8 +24,8 @@ install -m 0644 "$deploy_dir/90-natpair.conf" /etc/sysctl.d/
 install -m 0644 "$deploy_dir/networkd-natpair.conf" /etc/systemd/networkd.conf.d/natpair.conf
 systemctl daemon-reload
 systemctl enable natpair-bootstrap.service natpair.service conntrackd.service
-# Open shells with Session Manager, not SSH. The security group must
-# leave port 22 open to the Internet, and the host firewall only closes it once
-# the bootstrap service runs, so sshd is turned off.
+# Open shells with Session Manager, not SSH. The shared ENI's security group
+# must leave port 22 open to the Internet, and the host firewall only closes it
+# once the bootstrap service runs, so sshd is turned off.
 systemctl disable --now sshd.service
 echo "Installed for the next boot. No services were started."

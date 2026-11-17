@@ -101,7 +101,8 @@ func TestBootstrap(t *testing.T) {
 	// The connection table matches conntrackd's limit, not the kernel's default from memory.
 	assert.Contains(t, log.commands, "sysctl -qw net.netfilter.nf_conntrack_max=262144 net.netfilter.nf_conntrack_buckets=65536")
 	// New inbound connections to the NAT itself come only from the VPC or the
-	// peer, because its security group lets the whole Internet through.
+	// peer, because the shared ENI's security group lets the whole Internet
+	// through.
 	require.NotEmpty(t, log.inputs)
 	assert.Equal(t, "*filter\n:NATPAIR_INPUT - [0:0]\n-F NATPAIR_INPUT\n"+
 		"-A NATPAIR_INPUT -i lo -j ACCEPT\n"+

@@ -1,5 +1,5 @@
 variable "name" {
-  description = "Name or name prefix for the pair's resources: the lease table, security group, IAM role and instance profile, Lambda function and Name tags. IAM names are global to the AWS account, so it must be unique in the account. Changing it replaces the lease table and security group, so don't change it on a running pair."
+  description = "Name or name prefix for the pair's resources: the lease table, security groups, IAM role and instance profile, Lambda function and Name tags. IAM names are global to the AWS account, so it must be unique in the account. Changing it replaces the lease table and security groups, so don't change it on a running pair."
   type        = string
 }
 
