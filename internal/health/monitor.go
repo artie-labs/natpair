@@ -674,13 +674,11 @@ type scanner struct {
 
 	mu      sync.Mutex
 	running bool
-	// oldest are this NAT's oldest connections, read by the latest pass that
-	// read them, and oldestFailed counts the failed passes since. The latest
-	// pass started at oldestAt, if oldestRead.
-	oldest       []conntrackd.Tuple
-	oldestFailed int
-	oldestAt     time.Duration
-	oldestRead   bool
+	// oldest are this NAT's oldest connections, read by the latest pass,
+	// which started at oldestAt, if oldestRead.
+	oldest     []conntrackd.Tuple
+	oldestAt   time.Duration
+	oldestRead bool
 	// copiesAt is when the latest pass over this NAT's copies started, if
 	// copiesRead.
 	copiesAt   time.Duration
@@ -730,18 +728,17 @@ func (s *scanner) start(ctx context.Context, now time.Duration, peerOldest []con
 	go func() {
 		defer s.done.Done()
 		if readOldest {
-			// A failed pass keeps the previous list: what it read may cover
-			// only part of the table. results drops a list kept too long.
+			// A failed pass publishes no list. What it read may cover only
+			// part of the table, and the previous list may hold a connection
+			// that closed since. The peer would miss its copy for longer than
+			// missingFor and ask for full copies until the next pass.
 			oldest, err := s.conntrack.Oldest(ctx, oldestCount)
 			if err != nil {
 				slog.Warn("failed to read this NAT's oldest connections from conntrackd", slog.Any("err", err))
+				oldest = nil
 			}
 			s.mu.Lock()
-			if err != nil {
-				s.oldestFailed++
-			} else {
-				s.oldest, s.oldestFailed = oldest, 0
-			}
+			s.oldest = oldest
 			s.mu.Unlock()
 		}
 		var found map[conntrackd.Tuple]bool
@@ -802,14 +799,7 @@ func (s *scanner) results(peerOldest []conntrackd.Tuple, current bool, now time.
 			lost = true
 		}
 	}
-	// A list kept through a failed pass is dropped once a second one fails. A
-	// connection on it may have closed since, and the peer would never find
-	// its copy, so it would never be ready.
-	oldest := s.oldest
-	if s.oldestFailed >= 2 {
-		oldest = nil
-	}
-	return oldest, copied, lost
+	return s.oldest, copied, lost
 }
 
 // rereadOldest makes the next pass read this NAT's oldest connections.

@@ -615,18 +615,19 @@ func TestRoundOldest(t *testing.T) {
 		assert.Equal(t, 2, f.conntrack.OldestCallCount())
 	}
 	{
-		// A failed pass keeps the previous list, since it may have read only
-		// part of the table
+		// A failed pass publishes no list. What it read may cover only part
+		// of the table, and the previous list may hold a connection that
+		// closed since, which the peer would miss for longer than it waits.
 		f := newFixture(t)
 		f.serving = true
 		f.conntrack.OldestReturns(oldest, nil)
 		f.rounds(t, 2)
 		f.conntrack.OldestReturns(nil, errors.New("conntrackd -i timed out"))
-		assert.Equal(t, oldest, f.rounds(t, 60).Oldest)
-		assert.Equal(t, 2, f.conntrack.OldestCallCount())
-		// but not after a second failure. A connection on a kept list may have
-		// closed, and the peer would wait for its copy forever.
 		assert.Empty(t, f.rounds(t, 60).Oldest)
+		assert.Equal(t, 2, f.conntrack.OldestCallCount())
+		// The next pass that reads them publishes them again
+		f.conntrack.OldestReturns(oldest, nil)
+		assert.Equal(t, oldest, f.rounds(t, 61).Oldest)
 	}
 	{
 		// A round doesn't wait for a pass, however long conntrackd takes to
