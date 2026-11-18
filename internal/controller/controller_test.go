@@ -374,6 +374,9 @@ func TestRun(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		assert.True(t, f.controller.Serving())
 		assert.False(t, f.controller.Inhibited())
+		// The log says the first lease was new and the second was released.
+		assert.Contains(t, logs.String(), `"msg":"ownership acquired","epoch":1,"from":"none"`)
+		assert.Contains(t, logs.String(), `"msg":"ownership acquired","epoch":2,"from":"released"`)
 	}
 	{
 		// A withdrawn handover request doesn't hand over once the peer is ready

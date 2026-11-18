@@ -116,6 +116,23 @@ until DynamoDB is back. Check that the DynamoDB gateway endpoint is still on
 the public route table, and that the NATs' IAM role is intact. The owner logs
 `lease store reachable again` when it recovers.
 
+### `ownership acquired`
+
+This NAT took the lease and is taking over. The `from` field says how the
+previous owner left:
+
+- `none`: no NAT had held the lease yet, as for a new pair's first owner.
+- `released`: the previous owner closed forwarding and handed over. It does
+  that for maintenance, a handover request or a shutdown, and also when its
+  own path failed its checks or its takeover failed. Except after a shutdown,
+  its `ownership session ended` line gives the reason.
+- `expired`: the previous owner stopped renewing without handing over, so
+  this NAT waited out the takeover interval. For example, it crashed, lost its
+  instance, couldn't reach DynamoDB, or couldn't close forwarding. Check its
+  logs and its instance.
+
+Releases up to 0.2.0 don't log `from`.
+
 ### `taking over without copied connections`
 
 A NAT took over without loading the copies, usually because its conntrackd

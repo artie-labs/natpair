@@ -81,11 +81,33 @@ type Record struct {
 	Released bool `json:"released,omitempty"`
 }
 
+// From says what the stored record was when a Lease took it, which tells an
+// orderly handover apart from a takeover after the owner stopped renewing.
+type From string
+
+const (
+	// FromNone means there was no record yet, as for a new pair's first owner.
+	FromNone From = "none"
+	// FromReleased means the previous owner stopped forwarding and then
+	// released the record, so it handed over in order. The record doesn't say
+	// why: the controller releases after maintenance, a handover request or a
+	// shutdown, and also after a failure of its own, such as its path failing
+	// its checks.
+	FromReleased From = "released"
+	// FromExpired means the record stayed unchanged for the takeover
+	// interval: the previous owner stopped renewing without releasing it, for
+	// example because it crashed, lost power or could not reach the store.
+	FromExpired From = "expired"
+)
+
 // Grant is permission to forward until Deadline, measured on the boot clock.
 type Grant struct {
 	Record   Record
 	Deadline time.Duration
-	raw      []byte
+	// From is what the record was when this Lease acquired it. Renewals keep
+	// it.
+	From From
+	raw  []byte
 }
 
 // Lease is one attempt to hold the shared lease record. Acquire and Renew must
@@ -135,6 +157,7 @@ func (l *Lease) Acquire(ctx context.Context) (*Grant, error) {
 	}
 	now := l.now()
 	var epoch int64
+	from := FromNone
 	if raw != nil {
 		var current Record
 		if err := json.Unmarshal(raw, &current); err != nil {
@@ -143,6 +166,7 @@ func (l *Lease) Acquire(ctx context.Context) (*Grant, error) {
 		if current.Protocol != protocolVersion || current.HoldMillis != Hold.Milliseconds() || current.TakeoverMillis != takeover.Milliseconds() {
 			return nil, fmt.Errorf("%w: the other NAT uses a different lease protocol or timing", ErrLost)
 		}
+		from = FromReleased
 		if !current.Released {
 			if !bytes.Equal(raw, l.observed) {
 				l.observed, l.observedAt = raw, now
@@ -151,6 +175,7 @@ func (l *Lease) Acquire(ctx context.Context) (*Grant, error) {
 			if now-l.observedAt < takeover {
 				return nil, nil
 			}
+			from = FromExpired
 		}
 		epoch = current.Epoch
 	}
@@ -176,7 +201,7 @@ func (l *Lease) Acquire(ctx context.Context) (*Grant, error) {
 		l.observed = nil
 		return nil, nil
 	}
-	return l.accept(replacement, encoded, started)
+	return l.accept(from, replacement, encoded, started)
 }
 
 // Renew extends the current grant. If the store can't be reached, it returns
@@ -206,7 +231,7 @@ func (l *Lease) Renew(ctx context.Context) (*Grant, error) {
 		return nil, fmt.Errorf("%w: ownership changed during renewal", ErrLost)
 	}
 	l.setUnavailable(false)
-	return l.accept(record, encoded, started)
+	return l.accept(l.Current().From, record, encoded, started)
 }
 
 // renewable returns the stored value a renewal must replace, and its record.
@@ -301,7 +326,7 @@ func (l *Lease) Release(ctx context.Context) error {
 	return nil
 }
 
-func (l *Lease) accept(record Record, raw []byte, started time.Duration) (*Grant, error) {
+func (l *Lease) accept(from From, record Record, raw []byte, started time.Duration) (*Grant, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	deadline := started + Hold
@@ -309,7 +334,7 @@ func (l *Lease) accept(record Record, raw []byte, started time.Duration) (*Grant
 		l.lost = true
 		return nil, fmt.Errorf("%w: the store replied after the forwarding deadline", ErrLost)
 	}
-	l.grant = &Grant{Record: record, Deadline: deadline, raw: raw}
+	l.grant = &Grant{Record: record, Deadline: deadline, From: from, raw: raw}
 	return l.grant, nil
 }
 
