@@ -122,12 +122,14 @@ This NAT took the lease and is taking over. The `from` field says how the
 previous owner left:
 
 - `none`: no NAT had held the lease yet, as for a new pair's first owner.
-- `released`: the previous owner stopped forwarding and handed over, for
-  maintenance, a handover request or a shutdown, or because its own checks
-  failed. Its `ownership session ended` line gives the reason.
+- `released`: the previous owner closed forwarding and handed over. It does
+  that for maintenance, a handover request or a shutdown, and also when its
+  own path failed its checks or its takeover failed. Except after a shutdown,
+  its `ownership session ended` line gives the reason.
 - `expired`: the previous owner stopped renewing without handing over, so
-  this NAT waited out the takeover interval. The previous owner crashed, lost
-  its instance, or couldn't reach DynamoDB. Check its logs and its instance.
+  this NAT waited out the takeover interval. For example, it crashed, lost its
+  instance, couldn't reach DynamoDB, or couldn't close forwarding. Check its
+  logs and its instance.
 
 Releases up to 0.2.0 don't log `from`.
 

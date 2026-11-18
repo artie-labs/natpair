@@ -324,7 +324,8 @@ If you ship the NATs' logs, these alerts cover the rest:
 | Alert when | Why |
 | --- | --- |
 | No `health round` with `"ready":true` from the standby for 10 minutes | The pair can't fail over. |
-| `ownership acquired` is logged with `"from":"expired"` | The previous owner stopped renewing without handing over, such as after a crash. Find out why. An owner whose own path fails hands over instead and logs `ownership session ended` with `"reason":"stepped down after corroborated path failure"`. See [troubleshooting](troubleshooting.md#ownership-acquired). |
+| `ownership acquired` is logged with `"from":"expired"` | The previous owner stopped renewing without handing over, such as after a crash. Find out why. See [troubleshooting](troubleshooting.md#ownership-acquired). |
+| `ownership session ended` is logged with `"reason":"stepped down after corroborated path failure"` or a reason starting `takeover failed` | The owner's path failed its checks, or its takeover failed, so it handed over. The new owner logs `"from":"released"`, so the row above doesn't catch it. |
 | `forced the stuck shared ENI detach. Stop and start the NAT it was attached to before it serves again.` is logged | That NAT needs a stop and start. See [troubleshooting](troubleshooting.md#forced-the-stuck-shared-eni-detach). |
 | `update` lines continue for more than an hour | An upgrade is stuck. The `reason` field says why. |
 | `conntrackd is not answering` or `copied connections are incomplete` lasts more than 5 minutes | A takeover would reset connections. |

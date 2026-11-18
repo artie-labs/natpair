@@ -11,8 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ownership acquired` has a `from` field that says how the previous owner
   left: `none` for a new pair's first owner, `released` when it handed over,
-  and `expired` when it stopped renewing without handing over. Alert on
-  `expired` to skip planned handovers. See
+  and `expired` when it stopped renewing without handing over. An owner also
+  hands over after its own path or takeover failed, so the suggested alerts
+  in [Monitoring](docs/operations.md#monitoring) now watch `expired` and
+  those failures, instead of every `ownership acquired`. See
   [troubleshooting](docs/troubleshooting.md#ownership-acquired).
 
 ## [0.2.0] - 2026-11-17
