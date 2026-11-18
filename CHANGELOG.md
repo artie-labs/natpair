@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ownership acquired` has a `from` field that says how the previous owner
+  left: `none` for a new pair's first owner, `released` when it handed over,
+  and `expired` when it stopped renewing without handing over. Alert on
+  `expired` to skip planned handovers. See
+  [troubleshooting](docs/troubleshooting.md#ownership-acquired).
+
 ## [0.2.0] - 2026-11-17
 
 Read [Upgrade](docs/operations.md#upgrade) before you upgrade. To keep the

@@ -300,7 +300,7 @@ func (c *Controller) contendAndServe(ctx context.Context, l *lease.Lease) error 
 					// A request made before this session belongs to an earlier
 					// one, so it must not hand this one over.
 					c.handover.Store(false)
-					slog.Info("ownership acquired", slog.Int64("epoch", acquired.Record.Epoch), slog.Bool("copied_state_ready", report.Ready), slog.Bool("path_proven", verified))
+					slog.Info("ownership acquired", slog.Int64("epoch", acquired.Record.Epoch), slog.String("from", string(acquired.From)), slog.Bool("copied_state_ready", report.Ready), slog.Bool("path_proven", verified))
 					stageStarted, nextRenewal = c.deps.Now(), c.deps.Now()+renewInterval
 					preparer := c.deps.NewHandoff(func() error {
 						_, err := l.Valid()

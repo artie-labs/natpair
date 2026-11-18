@@ -126,6 +126,92 @@ func TestAcquire(t *testing.T) {
 	}
 }
 
+func TestAcquireFrom(t *testing.T) {
+	{
+		// With no record yet, as for a new pair, the grant says none, and renewals keep it
+		clock, store := &fakeClock{now: time.Second}, memoryStore()
+		a := newLease(t, store, "a", clock)
+		grant, err := a.Acquire(t.Context())
+		require.NoError(t, err)
+		require.NotNil(t, grant)
+		assert.Equal(t, lease.FromNone, grant.From)
+		grant, err = a.Renew(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, lease.FromNone, grant.From)
+	}
+	{
+		// A record that stayed unchanged for the takeover interval expired
+		clock, store := &fakeClock{now: time.Second}, memoryStore()
+		_, err := store.Swap(t.Context(), nil, []byte(`{"protocol":3,"hold_ms":4000,"takeover_ms":6000,"owner":"a","revision":"r","epoch":7}`))
+		require.NoError(t, err)
+		b := newLease(t, store, "b", clock)
+		grant, err := b.Acquire(t.Context())
+		require.NoError(t, err)
+		require.Nil(t, grant)
+		clock.now += 6 * time.Second
+		grant, err = b.Acquire(t.Context())
+		require.NoError(t, err)
+		require.NotNil(t, grant)
+		assert.Equal(t, lease.FromExpired, grant.From)
+		assert.Equal(t, int64(8), grant.Record.Epoch)
+		grant, err = b.Renew(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, lease.FromExpired, grant.From)
+	}
+	{
+		// A released record is taken at once, including one written by another
+		// release of this protocol, which spells the record the same way
+		clock, store := &fakeClock{now: time.Second}, memoryStore()
+		_, err := store.Swap(t.Context(), nil, []byte(`{"protocol":3,"hold_ms":4000,"takeover_ms":6000,"owner":"a","revision":"r","epoch":7,"released":true}`))
+		require.NoError(t, err)
+		grant, err := newLease(t, store, "b", clock).Acquire(t.Context())
+		require.NoError(t, err)
+		require.NotNil(t, grant)
+		assert.Equal(t, lease.FromReleased, grant.From)
+	}
+	{
+		// A contender already waiting on the owner's record, which the owner
+		// then releases, takes it at once as released, not expired
+		clock, store := &fakeClock{now: time.Second}, memoryStore()
+		a := newLease(t, store, "a", clock)
+		b := newLease(t, store, "b", clock)
+		_, err := a.Acquire(t.Context())
+		require.NoError(t, err)
+		grant, err := b.Acquire(t.Context())
+		require.NoError(t, err)
+		require.Nil(t, grant)
+		clock.now += 3 * time.Second
+		require.NoError(t, a.Release(t.Context()))
+		grant, err = b.Acquire(t.Context())
+		require.NoError(t, err)
+		require.NotNil(t, grant)
+		assert.Equal(t, lease.FromReleased, grant.From)
+	}
+	{
+		// A contender's old observation doesn't count once the owner renews:
+		// it waits the full interval from the renewed record, and then it expired
+		clock, store := &fakeClock{now: time.Second}, memoryStore()
+		a := newLease(t, store, "a", clock)
+		b := newLease(t, store, "b", clock)
+		_, err := a.Acquire(t.Context())
+		require.NoError(t, err)
+		_, err = b.Acquire(t.Context())
+		require.NoError(t, err)
+		clock.now += 3 * time.Second
+		_, err = a.Renew(t.Context())
+		require.NoError(t, err)
+		clock.now += 3 * time.Second
+		grant, err := b.Acquire(t.Context())
+		require.NoError(t, err)
+		require.Nil(t, grant, "the record changed since b first saw it")
+		clock.now += 6 * time.Second
+		grant, err = b.Acquire(t.Context())
+		require.NoError(t, err)
+		require.NotNil(t, grant)
+		assert.Equal(t, lease.FromExpired, grant.From)
+	}
+}
+
 func TestRenew(t *testing.T) {
 	{
 		// Each renewal starts a new deadline from the request start
