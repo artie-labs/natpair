@@ -613,7 +613,7 @@ func (l *lab) setup() {
 		management := fmt.Sprintf("10.94.2.%d", nat.host)
 		l.serve(nat.name, "127.0.0.1:8081", fakeMetadata(map[string]string{
 			"instance-id": "i-" + nat.name, "placement/region": "us-east-1",
-			"local-ipv4": management, "public-ipv4": management, "mac": wanMAC,
+			"local-ipv4": management, "public-ipv4": management, "mac": wanMAC, "instance-type": "c7gn.medium",
 			"network/interfaces/macs/" + wanMAC + "/vpc-ipv4-cidr-blocks": "10.94.0.0/16",
 		}), nil)
 
