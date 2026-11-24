@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,6 +57,61 @@ func TestValidate(t *testing.T) {
 	assert.NoError(t, edit(func(c *NAT) { c.MaxConnections = 524288 }))
 	assert.EqualError(t, edit(func(c *NAT) { c.ReleaseURL = "http://example.com/releases" }), "release_url must start with https:// or s3://")
 	assert.NoError(t, edit(func(c *NAT) { c.ReleaseURL = "s3://example-mirror/natpair" }))
+	assert.EqualError(t, edit(func(c *NAT) { c.Shaping = &Shaping{RateMbps: -1} }), "shaping.rate_mbps must be 0, to compute it from the instance type, or more")
+	assert.NoError(t, edit(func(c *NAT) { c.Shaping = &Shaping{} }))
+}
+
+func TestLoadNATShaping(t *testing.T) {
+	load := func(shaping string) *Shaping {
+		contents, err := os.ReadFile("testdata/nat.json")
+		require.NoError(t, err)
+		path := filepath.Join(t.TempDir(), "nat.json")
+		require.NoError(t, os.WriteFile(path, []byte(strings.Replace(string(contents), "{", "{"+shaping, 1)), 0o600))
+		cfg, err := LoadNAT(path)
+		require.NoError(t, err)
+		return cfg.Shaping
+	}
+	assert.Nil(t, load(""))
+	assert.Equal(t, &Shaping{}, load(`"shaping": {},`))
+	assert.Equal(t, &Shaping{RateMbps: 4000}, load(`"shaping": {"rate_mbps": 4000},`))
+}
+
+func TestUploadRate(t *testing.T) {
+	// rate returns the computed rate for an instance type's baseline
+	// bandwidth in Mbit/s and vCPUs.
+	rate := func(baselineMbps, vcpus int) int {
+		return NAT{Shaping: &Shaping{}, Instance: instance.Facts{Bandwidth: instance.Bandwidth{BaselineMbps: baselineMbps, VCPUs: vcpus}}}.UploadRate()
+	}
+	{
+		// c7gn.medium: 90% of its 3.125 Gbit/s baseline, under the gateway cap
+		assert.Equal(t, 2812, rate(3125, 1))
+		// c7gn.large and c7gn.xlarge: 95% of the 5 Gbit/s gateway cap
+		assert.Equal(t, 4750, rate(6250, 2))
+		assert.Equal(t, 4750, rate(12500, 4))
+		// c6gn.medium, whose baseline is 1.6 Gbit/s
+		assert.Equal(t, 1440, rate(1600, 1))
+	}
+	{
+		// From 32 vCPUs, the gateway cap is half the baseline: c7gn.8xlarge
+		// has 100 Gbit/s. One vCPU fewer keeps the 5 Gbit/s cap.
+		assert.Equal(t, 47500, rate(100000, 32))
+		assert.Equal(t, 4750, rate(100000, 31))
+	}
+	{
+		// The two limits meet at 5,277 Mbit/s of baseline
+		assert.Equal(t, 4749, rate(5277, 2))
+		assert.Equal(t, 4750, rate(5278, 2))
+	}
+	{
+		// shaping.rate_mbps wins over the instance type
+		assert.Equal(t, 4000, NAT{Shaping: &Shaping{RateMbps: 4000}, Instance: instance.Facts{Bandwidth: instance.Bandwidth{BaselineMbps: 3125, VCPUs: 1}}}.UploadRate())
+	}
+	{
+		// Without shaping, or without the instance type's bandwidth, uploads
+		// aren't shaped
+		assert.Equal(t, 0, NAT{Instance: instance.Facts{Bandwidth: instance.Bandwidth{BaselineMbps: 3125, VCPUs: 1}}}.UploadRate())
+		assert.Equal(t, 0, NAT{Shaping: &Shaping{}}.UploadRate())
+	}
 }
 
 func TestReleases(t *testing.T) {

@@ -789,7 +789,51 @@ func (n *Network) ActivateShared(ctx context.Context, mac string) error {
 			return err
 		}
 	}
+	if rate := n.cfg.UploadRate(); rate > 0 {
+		n.shapeUploads(ctx, name, rate)
+	}
 	return nil
+}
+
+// shapeUploads caps what the shared ENI sends, the workers' uploads, at rate
+// Mbit/s and shares it fairly between workers. A token bucket (TBF) holds the
+// rate, and under it an fq_codel queue keeps one flow per worker, so a worker
+// with many connections gets the same share as a worker with one. SNAT has
+// already rewritten the source when the packet reaches the queue, so the flow
+// classifier reads the worker's address from the connection table. The queue
+// takes the bandwidth any worker leaves unused, so a lone worker can still
+// send at the full rate.
+//
+// A failure is only logged, after removing the half-built shaper, because
+// forwarding unshaped beats a failed takeover. The commands replace what is
+// already there, so a takeover by the NAT that holds the ENI applies the same
+// shaper again.
+func (n *Network) shapeUploads(ctx context.Context, dev string, rate int) {
+	steps := [][]string{
+		{"tc", "qdisc", "replace", "dev", dev, "root", "handle", "1:", "tbf", "rate", fmt.Sprintf("%dmbit", rate), "burst", strconv.Itoa(shapingBurst(rate)), "latency", "50ms"},
+		{"tc", "qdisc", "replace", "dev", dev, "parent", "1:1", "handle", "10:", "fq_codel"},
+		// fq_codel drops a packet no filter matches, so the filter takes every
+		// protocol. 1,024 is fq_codel's number of flows.
+		{"tc", "filter", "replace", "dev", dev, "parent", "10:", "protocol", "all", "prio", "1", "handle", "1", "flow", "hash", "keys", "nfct-src", "divisor", "1024"},
+	}
+	for _, step := range steps {
+		if _, err := n.run.Run(ctx, commandTimeout, step[0], step[1:]...); err != nil {
+			slog.Warn("failed to shape uploads, so they leave unshaped", slog.String("interface", dev), slog.Int("rate_mbps", rate), slog.Any("err", err))
+			if _, err := n.run.Run(ctx, commandTimeout, "tc", "qdisc", "del", "dev", dev, "root"); err != nil {
+				slog.Warn("failed to remove the upload shaper after it failed", slog.String("interface", dev), slog.Any("err", err))
+			}
+			return
+		}
+	}
+	slog.Info("shaping uploads", slog.String("interface", dev), slog.Int("rate_mbps", rate))
+}
+
+// shapingBurst returns the token bucket's size in bytes for rate Mbit/s: what
+// the rate sends in 1.5 ms, and at least 1 MiB. Too small a bucket caps
+// throughput below the rate, since the kernel can't send each packet on time.
+// On AWS, 1 MiB held 2.8 and 4.75 Gbit/s.
+func shapingBurst(rate int) int {
+	return max(1<<20, rate*1_000_000/8*3/2000)
 }
 
 // gateway is the VPC router of the shared ENI's subnet, which AWS always

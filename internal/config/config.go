@@ -40,6 +40,23 @@ const (
 	// leaves room. Without max_connections, the limit is the largest whose
 	// peak fits in half of the instance's memory.
 	peakBytesPerConnection = 2600
+	// gatewayCapMbps is AWS's cap on an instance's traffic to an internet
+	// gateway when it has fewer than 32 vCPUs. From 32 vCPUs, the cap is half
+	// the instance's bandwidth. Every worker upload a NAT forwards goes there.
+	gatewayCapMbps = 5000
+	// gatewayCapVCPUs is the smallest vCPU count whose internet gateway cap
+	// is half the instance's bandwidth instead of gatewayCapMbps.
+	gatewayCapVCPUs = 32
+	// gatewayCapPercent and baselinePercent set the computed upload rate:
+	// 95% of the gateway cap or 90% of the baseline bandwidth, whichever is
+	// lower. AWS holds traffic over the gateway cap back without dropping it,
+	// so 95% passed with no drops on AWS. Over the baseline, once the burst
+	// is spent, AWS drops. It counts what the NAT receives as well as what
+	// it sends, and downloads to workers and the NAT's own traffic leave
+	// through the primary interface, outside the cap. On a c7gn.medium, 95%
+	// dropped when downloads were 5% of uploads, and 90% didn't.
+	gatewayCapPercent = 95
+	baselinePercent   = 90
 )
 
 // maxConnectionsAllowed lists the limits max_connections accepts. The owner
@@ -114,6 +131,10 @@ type NAT struct {
 	// memory (see ConnectionLimit). Bootstrap applies it at every boot.
 	MaxConnections int `json:"max_connections,omitempty"`
 
+	// Shaping, when set, caps uploads through the shared ENI and shares them
+	// fairly between workers. Nil, the default, leaves uploads unshaped.
+	Shaping *Shaping `json:"shaping,omitempty"`
+
 	// ReleaseURL is where the updater downloads releases from: an https:// or
 	// s3:// prefix that holds "<tag>/natpair_linux_arm64.tar.gz". Empty means
 	// DefaultReleaseURL.
@@ -122,6 +143,17 @@ type NAT struct {
 	// Instance holds facts read from the instance metadata service at
 	// startup. It is not part of the file.
 	Instance instance.Facts `json:"-"`
+}
+
+// Shaping caps the owner's uploads, the traffic workers send out through the
+// shared ENI, below the instance's network limits, and shares the cap fairly
+// between workers by their address before NAT. Without it, AWS drops or holds
+// back packets at those limits, whichever worker sent them, so one worker's
+// backfill can slow every other worker's connections.
+type Shaping struct {
+	// RateMbps is the cap in Mbit/s. Zero computes it from the instance type
+	// (see UploadRate).
+	RateMbps int `json:"rate_mbps,omitempty"`
 }
 
 // LoadNAT reads and validates a NAT configuration.
@@ -162,6 +194,9 @@ func (c NAT) Validate() error {
 	}
 	if c.MaxConnections != 0 && !slices.Contains(maxConnectionsAllowed, c.MaxConnections) {
 		return fmt.Errorf("max_connections must be one of %v", maxConnectionsAllowed)
+	}
+	if c.Shaping != nil && c.Shaping.RateMbps < 0 {
+		return fmt.Errorf("shaping.rate_mbps must be 0, to compute it from the instance type, or more")
 	}
 	if !c.SharedAddress.Addr().Is4() || c.SharedAddress.Bits() < 16 || c.SharedAddress.Bits() > 28 {
 		return fmt.Errorf("shared_address must be an IPv4 address with its subnet prefix length, such as 10.0.1.100/24")
@@ -209,6 +244,49 @@ func (c NAT) connectionLimit() (int, string) {
 		}
 	}
 	return limit, "the largest whose peak memory fits in half of the instance's"
+}
+
+// UploadRate returns the rate in Mbit/s the owner caps uploads at, or 0 to
+// leave them unshaped: 0 without Shaping, Shaping.RateMbps if set, and
+// otherwise 95% of the instance's internet gateway cap or 90% of its baseline
+// bandwidth, whichever is lower. That is 2,812 for a c7gn.medium and 4,750
+// for a c7gn.large or c7gn.xlarge. Without Instance.Bandwidth it returns 0,
+// since a cap computed from a wrong guess could slow every worker.
+func (c NAT) UploadRate() int {
+	rate, _ := c.uploadRate()
+	return rate
+}
+
+// LogUploadRate logs UploadRate and why it was chosen.
+func (c NAT) LogUploadRate() {
+	rate, reason := c.uploadRate()
+	attrs := []any{slog.Int("rate_mbps", rate), slog.String("reason", reason)}
+	if c.Instance.Bandwidth.BaselineMbps > 0 {
+		attrs = append(attrs, slog.String("instance_type", c.Instance.Type), slog.Int("baseline_mbps", c.Instance.Bandwidth.BaselineMbps), slog.Int("vcpus", c.Instance.Bandwidth.VCPUs))
+	}
+	if rate == 0 && c.Shaping != nil {
+		slog.Warn("uploads aren't shaped", attrs...)
+		return
+	}
+	slog.Info("upload rate", attrs...)
+}
+
+func (c NAT) uploadRate() (int, string) {
+	bandwidth := c.Instance.Bandwidth
+	switch {
+	case c.Shaping == nil:
+		return 0, "shaping isn't set"
+	case c.Shaping.RateMbps != 0:
+		return c.Shaping.RateMbps, "set by shaping.rate_mbps"
+	case bandwidth.BaselineMbps <= 0:
+		return 0, "the instance type's bandwidth couldn't be read"
+	}
+	gateway := gatewayCapMbps
+	if bandwidth.VCPUs >= gatewayCapVCPUs {
+		gateway = bandwidth.BaselineMbps / 2
+	}
+	return min(gateway*gatewayCapPercent/100, bandwidth.BaselineMbps*baselinePercent/100),
+		"95% of the internet gateway cap or 90% of the baseline bandwidth, whichever is lower"
 }
 
 // OwnCanary sends probes out through this NAT's own public IP.

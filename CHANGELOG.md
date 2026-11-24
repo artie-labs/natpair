@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Pairs that set `shaping` need this release or later. The module's plan fails
+for an older `release`.
+
 ### Added
+
+- `shaping` caps uploads through the shared ENI just below the owner's network
+  limits, and shares the cap fairly between workers by their address, so one
+  worker's backfill no longer slows every other worker. `{}` computes the rate
+  from the instance type when natpair starts: 2,812 Mbit/s on a c7gn.medium
+  and 4,750 on a c7gn.large. NATs need `ec2:DescribeInstanceTypes`, which the
+  module grants, and the `iproute-tc` package, which they install. Off by
+  default. See [Shape uploads](docs/operations.md#shape-uploads).
 
 - `ownership acquired` has a `from` field that says how the previous owner
   left: `none` for a new pair's first owner, `released` when it handed over,

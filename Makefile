@@ -19,10 +19,12 @@ test: generate
 
 # Tests that change iptables, network namespaces and BPF objects. They run in a
 # disposable privileged container so they never touch the host's networking.
+# CI is passed through, so tests that skip on a kernel without a module, such
+# as Docker Desktop's, fail in CI instead.
 .PHONY: test-privileged
 test-privileged: generate
 	docker build -q -t natpair-test -f test.Dockerfile .
-	docker run --rm --privileged -v "$(CURDIR):/src" -v natpair-go-cache:/root/.cache -v natpair-go-mod:/go/pkg/mod \
+	docker run --rm --privileged -e CI -v "$(CURDIR):/src" -v natpair-go-cache:/root/.cache -v natpair-go-mod:/go/pkg/mod \
 		natpair-test go test -tags privileged ./...
 
 # Fault campaign: two real NATs, conntrackd and the kernel deadline inside one

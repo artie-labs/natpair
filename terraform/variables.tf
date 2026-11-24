@@ -69,6 +69,19 @@ variable "max_connections" {
   }
 }
 
+variable "shaping" {
+  description = "Caps uploads, the traffic workers send out through the pair, below the owner's network limits, and shares the cap fairly between workers by their address. Without it, AWS drops or holds back packets at the instance's limits whichever worker sent them, so one worker's backfill slows every other worker. Null, the default, leaves uploads unshaped. {} computes the cap from each NAT's instance type when natpair starts: 95% of the internet gateway cap or 90% of the baseline bandwidth, whichever is lower, so 2,812 Mbit/s on a c7gn.medium and 4,750 on a c7gn.large or c7gn.xlarge. { rate_mbps = N } sets it. Downloads to workers aren't shaped. Needs a release after v0.2.0. NATs read it at first boot, so changing it needs new NATs."
+  type = object({
+    rate_mbps = optional(number)
+  })
+  default = null
+
+  validation {
+    condition     = var.shaping == null ? true : var.shaping.rate_mbps == null ? true : var.shaping.rate_mbps >= 1 && floor(var.shaping.rate_mbps) == var.shaping.rate_mbps
+    error_message = "shaping.rate_mbps must be a whole number of Mbit/s, 1 or more. Leave it out to compute it from the instance type."
+  }
+}
+
 variable "release" {
   description = "natpair release tag the pair runs, such as v0.1.1. New NATs install it at first boot. Changing it pins a new release, which the NATs roll out to themselves one at a time."
   type        = string

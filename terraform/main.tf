@@ -73,7 +73,8 @@ locals {
   }
   # The only EC2 changes are attaching and detaching the shared ENI on the NATs.
   # Reading instances tells a forced detach from a stopping instance, which
-  # needs no action, from one that does.
+  # needs no action, from one that does. Reading instance types gives a NAT
+  # its bandwidth, which sets its upload rate when shaping is on.
   #
   # The NATs are allowed by their pair tag, not by instance ARN. With ARNs,
   # replacing a NAT with -target would leave the policy naming the old
@@ -81,7 +82,7 @@ locals {
   ec2_access = [
     {
       Effect    = "Allow"
-      Action    = ["ec2:DescribeNetworkInterfaces", "ec2:DescribeInstances"]
+      Action    = ["ec2:DescribeNetworkInterfaces", "ec2:DescribeInstances", "ec2:DescribeInstanceTypes"]
       Resource  = "*"
       Condition = { StringEquals = {} }
     },
@@ -272,7 +273,11 @@ resource "aws_instance" "nat" {
       probe_url        = aws_lambda_function_url.receiver.function_url
       peer_ip          = aws_network_interface.nat[local.peer[each.key]].private_ip
       release_url      = trimsuffix(var.release_url, "/")
-    }, var.max_connections == null ? {} : { max_connections = var.max_connections }))
+      },
+      var.max_connections == null ? {} : { max_connections = var.max_connections },
+      # {} computes the rate from the instance type.
+      var.shaping == null ? {} : { shaping = { for key, value in var.shaping : key => value if value != null } },
+    ))
   })
 
   primary_network_interface {
@@ -320,6 +325,13 @@ resource "aws_instance" "nat" {
     precondition {
       condition     = var.kernel == "6.1" || !contains(["v0.1.0", "v0.1.1"], var.release)
       error_message = "kernel ${var.kernel} needs a natpair release with threaded NAPI, and ${var.release} doesn't have it. Set release to a version after v0.1.1, or set kernel = \"6.1\"."
+    }
+
+    # Releases up to v0.2.0 reject a config file with shaping in it, so a NAT
+    # would fail at first boot, or after the updater rolls the pair back.
+    precondition {
+      condition     = var.shaping == null || !contains(["v0.1.0", "v0.1.1", "v0.2.0"], var.release)
+      error_message = "shaping needs a natpair release after v0.2.0, and ${var.release} doesn't have it. Set release to a later version, or remove shaping."
     }
   }
 }
