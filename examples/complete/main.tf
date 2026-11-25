@@ -67,7 +67,7 @@ variable "release_sha256" {
 }
 
 module "natpair" {
-  source = "git::https://github.com/artie-labs/natpair.git//terraform?ref=v0.1.1"
+  source = "git::https://github.com/artie-labs/natpair.git//terraform?ref=v0.2.0"
 
   name    = "natpair-main"
   pair_id = "natpair-main"
