@@ -331,8 +331,10 @@ module "natpair" {
 
 `{}` computes the rate when natpair starts, from the instance type the EC2 API
 describes: 95% of the internet gateway cap or 90% of the baseline bandwidth,
-whichever is lower. AWS caps an instance with fewer than 32 vCPUs at 5 Gbps to
-an internet gateway, and one with 32 or more at half its bandwidth.
+whichever is lower. AWS caps traffic to an internet gateway at 5 Gbps under 32
+vCPUs and at half the bandwidth over 32
+([AWS docs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-network-bandwidth.html)).
+natpair uses half at exactly 32, which the docs don't cover.
 
 | Instance type | Baseline | Internet gateway cap | Rate |
 | --- | --- | --- | --- |
@@ -361,6 +363,9 @@ What shaping doesn't cover:
   on a c7gn.medium and 330 ns on a c7gn.large. That is under 4% of a CPU at
   1.3 Gbps of uploads, but in a flood of small packets the NAT forwards 11%
   fewer on a c7gn.medium and 21% fewer on a c7gn.large.
+- **Bandwidth weighting.** The rate uses the instance type's default
+  baseline. A NAT set to `ebs-1` weighting has a lower one, so set
+  `rate_mbps` for it.
 - **Types larger than a c7gn.large.** Shaping was measured only on the
   c7gn.medium and c7gn.large. The shaper is one queue that every CPU sends
   through, so on a type with many CPUs it may not reach the computed rate.

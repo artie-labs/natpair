@@ -40,12 +40,15 @@ const (
 	// leaves room. Without max_connections, the limit is the largest whose
 	// peak fits in half of the instance's memory.
 	peakBytesPerConnection = 2600
-	// gatewayCapMbps is AWS's cap on an instance's traffic to an internet
-	// gateway when it has fewer than 32 vCPUs. From 32 vCPUs, the cap is half
-	// the instance's bandwidth. Every worker upload a NAT forwards goes there.
+	// gatewayCapMbps is AWS's cap on traffic to an internet gateway, where
+	// every worker upload goes, for instances under 32 vCPUs. Over 32, the
+	// cap is half the bandwidth. No API reports it. See
+	// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-network-bandwidth.html
 	gatewayCapMbps = 5000
-	// gatewayCapVCPUs is the smallest vCPU count whose internet gateway cap
-	// is half the instance's bandwidth instead of gatewayCapMbps.
+	// gatewayCapVCPUs is the smallest vCPU count whose cap is half the
+	// bandwidth. AWS doesn't say which rule covers exactly 32. Half is
+	// chosen because a cap above the gateway's only queues, while one below
+	// wastes bandwidth.
 	gatewayCapVCPUs = 32
 	// gatewayCapPercent and baselinePercent set the computed upload rate:
 	// 95% of the gateway cap or 90% of the baseline bandwidth, whichever is
