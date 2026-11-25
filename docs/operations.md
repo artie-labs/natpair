@@ -359,10 +359,11 @@ What shaping doesn't cover:
 - **The burst.** A c7gn.medium can send about 8 Gbps for about 14 minutes
   before AWS holds it to its baseline. Shaping caps it at 2,812 Mbit/s from
   the start.
-- **The CPU cost.** The cap and the per-worker queue cost about 210 ns a packet
-  on a c7gn.medium and 330 ns on a c7gn.large. That is under 4% of a CPU at
-  1.3 Gbps of uploads, but in a flood of small packets the NAT forwards 11%
-  fewer on a c7gn.medium and 21% fewer on a c7gn.large.
+- **The CPU cost.** Below the cap, shaping costs 190 to 230 ns a packet on a
+  c7gn.medium and 130 to 320 ns on a c7gn.large: under 3% of a CPU at
+  1.3 Gbps of uploads. In a flood of small packets the NAT forwards 11% fewer
+  on a c7gn.medium and 20% fewer on a c7gn.large. A takeover takes about
+  10 ms longer.
 - **Bandwidth weighting.** The rate uses the instance type's default
   baseline. A NAT set to `ebs-1` weighting has a lower one, so set
   `rate_mbps` for it.
