@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 232" width="760" height="232" role="img" aria-label="Crash failover timeline showing the 4-second kernel fence, 2-second safety gap, 6-second lease wait, and takeover completing around 16 seconds">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .title { font-size: 14px; font-weight: 600; fill: #e6edf3; }
+    .subtitle { font-size: 11.5px; fill: #9198a1; }
+    .lane-label { font-size: 12px; font-weight: 600; fill: #e6edf3; }
+    .lane-sub { font-size: 10.5px; fill: #9198a1; }
+    .bar-text { font-size: 11px; font-weight: 500; }
+    .axis-label { font-size: 11.5px; font-weight: 600; fill: #e6edf3; }
+    .gap-label { font-size: 10.5px; font-weight: 600; fill: #3fb950; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 3 3; }
+  </style>
+
+  <rect width="760" height="232" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+
+  <text x="20" y="25" class="title">What happens when the owner crashes</text>
+  <text x="20" y="42" class="subtitle">The 4 s forwarding fence always closes before the 6 s lease wait ends, so two NATs never forward at once.</text>
+
+  <!-- 2 s safety gap highlight (4 s to 6 s) -->
+  <rect x="265" y="56" width="70" height="142" fill="#238636" fill-opacity="0.16"/>
+  <text x="300" y="68" text-anchor="middle" class="gap-label">2 s gap</text>
+
+  <!-- Vertical time markers -->
+  <line x1="125" y1="56" x2="125" y2="202" class="grid"/>
+  <line x1="265" y1="56" x2="265" y2="202" stroke="#f85149" stroke-width="1.25" stroke-dasharray="3 3"/>
+  <line x1="335" y1="56" x2="335" y2="202" stroke="#58a6ff" stroke-width="1.25" stroke-dasharray="3 3"/>
+  <line x1="685" y1="56" x2="685" y2="202" stroke="#3fb950" stroke-width="1.25" stroke-dasharray="3 3"/>
+
+  <!-- Lane 1: NAT A (owner) -->
+  <text x="20" y="92" class="lane-label">NAT A</text>
+  <text x="20" y="106" class="lane-sub">old owner</text>
+  <rect x="125" y="78" width="140" height="30" rx="5" fill="#3b2e00" stroke="#d29922" stroke-width="1"/>
+  <text x="195" y="97" text-anchor="middle" class="bar-text" fill="#e3b341">Stops renewing</text>
+  <rect x="265" y="84" width="475" height="18" rx="4" fill="#3c1618" stroke="#f85149" stroke-width="1"/>
+  <text x="502" y="97" text-anchor="middle" class="bar-text" fill="#ffa198">Kernel BPF fence drops forwarded packets</text>
+
+  <!-- Lane 2: NAT B (standby) -->
+  <text x="20" y="136" class="lane-label">NAT B</text>
+  <text x="20" y="150" class="lane-sub">standby</text>
+  <rect x="125" y="122" width="210" height="30" rx="5" fill="#161b22" stroke="#6e7681" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="230" y="141" text-anchor="middle" class="bar-text" fill="#9198a1">Waits for 6 s unchanged lease</text>
+  <rect x="335" y="122" width="350" height="30" rx="5" fill="#0d2644" stroke="#58a6ff" stroke-width="1"/>
+  <text x="510" y="141" text-anchor="middle" class="bar-text" fill="#79c0ff">Claims lease · loads TCP copies · moves ENI · checks upload</text>
+  <rect x="685" y="122" width="55" height="30" rx="5" fill="#122d1b" stroke="#3fb950" stroke-width="1"/>
+  <text x="712.5" y="141" text-anchor="middle" class="bar-text" fill="#56d364">Serving</text>
+
+  <!-- Lane 3: Worker traffic -->
+  <text x="20" y="182" class="lane-label">Workers</text>
+  <rect x="125" y="166" width="560" height="24" rx="5" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="405" y="182" text-anchor="middle" class="bar-text" fill="#9198a1">~16 s pause (existing TCP connections stay open and retry)</text>
+  <rect x="685" y="166" width="55" height="24" rx="5" fill="#122d1b" stroke="#3fb950" stroke-width="1"/>
+  <text x="712.5" y="182" text-anchor="middle" class="bar-text" fill="#56d364">Flows</text>
+
+  <!-- Bottom axis -->
+  <line x1="125" y1="202" x2="740" y2="202" stroke="#6e7681" stroke-width="1"/>
+  <circle cx="125" cy="202" r="3" fill="#9198a1"/>
+  <circle cx="265" cy="202" r="3" fill="#f85149"/>
+  <circle cx="335" cy="202" r="3" fill="#58a6ff"/>
+  <circle cx="685" cy="202" r="3" fill="#3fb950"/>
+
+  <text x="125" y="220" text-anchor="middle" class="axis-label">0 s</text>
+  <text x="265" y="220" text-anchor="middle" class="axis-label" fill="#f85149">4 s</text>
+  <text x="335" y="220" text-anchor="middle" class="axis-label" fill="#58a6ff">6 s</text>
+  <text x="685" y="220" text-anchor="middle" class="axis-label" fill="#3fb950">~16 s</text>
+</svg>
