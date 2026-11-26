@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 310" width="760" height="310" role="img" aria-label="Monthly cost comparison chart: AWS NAT Gateway scales linearly at $0.045 per GB from $36.50, while natpair stays flat at $75 for c7g.medium (cheaper above 850 GB), $113 for c7gn.medium (cheaper above 1.7 TB), and $204 for c7gn.large (cheaper above 3.7 TB)">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .title { font-size: 14px; font-weight: 600; fill: #e6edf3; }
+    .subtitle { font-size: 11.5px; fill: #9198a1; }
+    .tick { font-size: 11px; fill: #9198a1; }
+    .axis-title { font-size: 11.5px; font-weight: 500; fill: #9198a1; }
+    .series-name { font-size: 11.5px; font-weight: 600; }
+    .series-val { font-size: 10.5px; fill: #9198a1; }
+    .breakeven { font-size: 10.5px; font-weight: 600; }
+    .grid { stroke: #21262d; stroke-width: 1; }
+    .axis { stroke: #6e7681; stroke-width: 1; }
+  </style>
+
+  <rect width="760" height="310" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+
+  <text x="20" y="25" class="title">Monthly cost: natpair vs AWS NAT Gateway</text>
+  <text x="20" y="42" class="subtitle">us-east-1 on-demand, 1 availability zone, Nov 2026 (excludes AWS internet egress transfer, which is the same for both)</text>
+
+  <!-- Horizontal gridlines ($0 to $400, 0.5 px/$ from y=262 to y=62) -->
+  <line x1="68" y1="62" x2="604" y2="62" class="grid"/>
+  <line x1="68" y1="112" x2="604" y2="112" class="grid"/>
+  <line x1="68" y1="162" x2="604" y2="162" class="grid"/>
+  <line x1="68" y1="212" x2="604" y2="212" class="grid"/>
+  <line x1="68" y1="262" x2="604" y2="262" class="axis"/>
+  <line x1="68" y1="62" x2="68" y2="262" class="axis"/>
+
+  <!-- Y ticks -->
+  <text x="60" y="66" text-anchor="end" class="tick">$400</text>
+  <text x="60" y="116" text-anchor="end" class="tick">$300</text>
+  <text x="60" y="166" text-anchor="end" class="tick">$200</text>
+  <text x="60" y="216" text-anchor="end" class="tick">$100</text>
+  <text x="60" y="266" text-anchor="end" class="tick">$0</text>
+
+  <!-- X ticks (0 to 8 TB, 67 px/TB: 68 + tb*67) -->
+  <text x="68" y="280" text-anchor="middle" class="tick">0 TB</text>
+  <text x="202" y="280" text-anchor="middle" class="tick">2 TB</text>
+  <text x="336" y="280" text-anchor="middle" class="tick">4 TB</text>
+  <text x="470" y="280" text-anchor="middle" class="tick">6 TB</text>
+  <text x="604" y="280" text-anchor="middle" class="tick">8 TB</text>
+  <text x="336" y="299" text-anchor="middle" class="axis-title">Monthly traffic processed through NAT</text>
+
+  <!-- Break-even drop lines -->
+  <line x1="125.3" y1="224.5" x2="125.3" y2="262" stroke="#3fb950" stroke-width="1" stroke-dasharray="2 2" opacity="0.6"/>
+  <line x1="181.9" y1="205.5" x2="181.9" y2="262" stroke="#58a6ff" stroke-width="1" stroke-dasharray="2 2" opacity="0.6"/>
+  <line x1="317.4" y1="160.0" x2="317.4" y2="262" stroke="#bc8cff" stroke-width="1" stroke-dasharray="2 2" opacity="0.6"/>
+
+  <!-- Flat natpair lines -->
+  <line x1="68" y1="160.0" x2="604" y2="160.0" stroke="#bc8cff" stroke-width="2.25"/>
+  <line x1="68" y1="205.5" x2="604" y2="205.5" stroke="#58a6ff" stroke-width="2.25"/>
+  <line x1="68" y1="224.5" x2="604" y2="224.5" stroke="#3fb950" stroke-width="2.25"/>
+
+  <!-- AWS NAT Gateway line: 0 TB=$36.50 (y=243.75) to 8 TB=$396.50 (y=63.75) -->
+  <line x1="68" y1="243.75" x2="604" y2="63.75" stroke="#f85149" stroke-width="2.5"/>
+
+  <!-- Break-even dots and labels -->
+  <circle cx="125.3" cy="224.5" r="4" fill="#3fb950" stroke="#0d1117" stroke-width="1.5"/>
+  <text x="115" y="219" text-anchor="end" class="breakeven" fill="#3fb950">850 GB</text>
+
+  <circle cx="181.9" cy="205.5" r="4" fill="#58a6ff" stroke="#0d1117" stroke-width="1.5"/>
+  <text x="174" y="195" text-anchor="end" class="breakeven" fill="#58a6ff">1.7 TB</text>
+
+  <circle cx="317.4" cy="160.0" r="4" fill="#bc8cff" stroke="#0d1117" stroke-width="1.5"/>
+  <text x="308" y="149" text-anchor="end" class="breakeven" fill="#bc8cff">3.7 TB</text>
+
+  <!-- Direct right-side labels -->
+  <text x="614" y="64" class="series-name" fill="#f85149">AWS NAT Gateway</text>
+  <text x="614" y="78" class="series-val">$36.50 + $0.045/GB</text>
+
+  <text x="614" y="159" class="series-name" fill="#bc8cff">2 × c7gn.large</text>
+  <text x="614" y="173" class="series-val">~$204/mo flat</text>
+
+  <text x="614" y="201" class="series-name" fill="#58a6ff">2 × c7gn.medium</text>
+  <text x="614" y="215" class="series-val">~$113/mo flat</text>
+
+  <text x="614" y="237" class="series-name" fill="#3fb950">2 × c7g.medium</text>
+  <text x="614" y="251" class="series-val">~$75/mo flat</text>
+</svg>
