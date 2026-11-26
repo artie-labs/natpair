@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -17,12 +18,16 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
 // Facts describe this instance.
 type Facts struct {
 	ID     string
 	Region string
+	// Type is the instance type, such as c7gn.medium.
+	Type string
 	// PrivateIP is the primary private IP, on Interface.
 	PrivateIP netip.Addr
 	// PublicIP is the public IP of the primary interface.
@@ -34,6 +39,23 @@ type Facts struct {
 	// MemoryBytes is the instance's memory, MemTotal in /proc/meminfo, or 0
 	// if it couldn't be read.
 	MemoryBytes uint64
+	// Bandwidth is the instance type's network limits. Discover leaves it
+	// zero. ReadBandwidth fills it, only when traffic shaping needs it.
+	Bandwidth Bandwidth
+}
+
+// Bandwidth is an instance type's network limits, from the EC2 API.
+type Bandwidth struct {
+	// BaselineMbps is the baseline bandwidth of the network card that holds
+	// the primary interface, in Mbit/s: 3,125 for a c7gn.medium.
+	BaselineMbps int
+	// VCPUs is the instance type's default number of vCPUs.
+	VCPUs int
+}
+
+// InstanceTypes is the part of the EC2 client ReadBandwidth uses.
+type InstanceTypes interface {
+	DescribeInstanceTypes(ctx context.Context, params *ec2.DescribeInstanceTypesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error)
 }
 
 // The memory a read of /proc/meminfo may report. Anything outside it, such as
@@ -54,24 +76,18 @@ var meminfoPath = "/proc/meminfo"
 func Discover(ctx context.Context, cfg aws.Config) (Facts, error) {
 	client := imds.NewFromConfig(cfg)
 	get := func(path string) (string, error) {
-		output, err := client.GetMetadata(ctx, &imds.GetMetadataInput{Path: path})
-		if err != nil {
-			return "", fmt.Errorf("failed to read %s from the instance metadata service: %w", path, err)
-		}
-		defer output.Content.Close()
-		value, err := io.ReadAll(output.Content)
-		return strings.TrimSpace(string(value)), err
+		return getMetadata(ctx, client, path)
 	}
 	var facts Facts
-	var values [5]string
-	for i, path := range []string{"instance-id", "placement/region", "local-ipv4", "public-ipv4", "mac"} {
+	var values [6]string
+	for i, path := range []string{"instance-id", "placement/region", "local-ipv4", "public-ipv4", "mac", "instance-type"} {
 		value, err := get(path)
 		if err != nil {
 			return Facts{}, err
 		}
 		values[i] = value
 	}
-	facts.ID, facts.Region = values[0], values[1]
+	facts.ID, facts.Region, facts.Type = values[0], values[1], values[5]
 	var err error
 	if facts.PrivateIP, err = netip.ParseAddr(values[2]); err != nil {
 		return Facts{}, fmt.Errorf("invalid private IP from the instance metadata service: %w", err)
@@ -98,6 +114,42 @@ func Discover(ctx context.Context, cfg aws.Config) (Facts, error) {
 	}
 	facts.MemoryBytes = readMemory(meminfoPath)
 	return facts, nil
+}
+
+// ReadBandwidth reads an instance type's baseline bandwidth and vCPUs from
+// the EC2 API.
+func ReadBandwidth(ctx context.Context, client InstanceTypes, instanceType string) (Bandwidth, error) {
+	output, err := client.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)}})
+	if err != nil {
+		return Bandwidth{}, fmt.Errorf("failed to describe instance type %s: %w", instanceType, err)
+	}
+	if len(output.InstanceTypes) != 1 {
+		return Bandwidth{}, fmt.Errorf("EC2 described %d instance types for %s, not 1", len(output.InstanceTypes), instanceType)
+	}
+	info := output.InstanceTypes[0]
+	if info.NetworkInfo == nil || info.VCpuInfo == nil || aws.ToInt32(info.VCpuInfo.DefaultVCpus) <= 0 {
+		return Bandwidth{}, fmt.Errorf("EC2 didn't describe the network or vCPUs of instance type %s", instanceType)
+	}
+	card := aws.ToInt32(info.NetworkInfo.DefaultNetworkCardIndex)
+	for _, nic := range info.NetworkInfo.NetworkCards {
+		baseline := aws.ToFloat64(nic.BaselineBandwidthInGbps)
+		if aws.ToInt32(nic.NetworkCardIndex) != card || baseline <= 0 {
+			continue
+		}
+		return Bandwidth{BaselineMbps: int(math.Round(baseline * 1000)), VCPUs: int(aws.ToInt32(info.VCpuInfo.DefaultVCpus))}, nil
+	}
+	return Bandwidth{}, fmt.Errorf("EC2 didn't describe the baseline bandwidth of network card %d of instance type %s", card, instanceType)
+}
+
+// getMetadata reads one path from the instance metadata service.
+func getMetadata(ctx context.Context, client *imds.Client, path string) (string, error) {
+	output, err := client.GetMetadata(ctx, &imds.GetMetadataInput{Path: path})
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s from the instance metadata service: %w", path, err)
+	}
+	defer output.Content.Close()
+	value, err := io.ReadAll(output.Content)
+	return strings.TrimSpace(string(value)), err
 }
 
 // readMemory returns MemTotal from the meminfo file at path in bytes, or 0

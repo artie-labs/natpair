@@ -70,6 +70,24 @@ func discover(ctx context.Context, cfg *config.NAT) (aws.Config, error) {
 	return awsConfig, nil
 }
 
+// bandwidthTimeout bounds the instance type lookup, which a NAT runs once at
+// startup when it computes its upload rate.
+const bandwidthTimeout = 30 * time.Second
+
+// readBandwidth reads the instance type's network limits for the upload rate,
+// or returns none after logging why, so the NAT runs without shaping. The
+// call only reads, so unlike the NAT's other AWS calls it may retry.
+func readBandwidth(ctx context.Context, awsConfig aws.Config, instanceType string) instance.Bandwidth {
+	ctx, cancel := context.WithTimeout(ctx, bandwidthTimeout)
+	defer cancel()
+	client := ec2.NewFromConfig(awsConfig, func(o *ec2.Options) { o.RetryMaxAttempts = 5 })
+	bandwidth, err := instance.ReadBandwidth(ctx, client, instanceType)
+	if err != nil {
+		slog.Warn("failed to read the instance type's bandwidth", slog.Any("err", err))
+	}
+	return bandwidth
+}
+
 func newFence(cfg config.NAT) (*fence.Fence, error) {
 	return fence.New(config.BPFDir, cfg.ProtectedCIDRs)
 }
@@ -197,6 +215,10 @@ func runNAT(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Shaping != nil && cfg.Shaping.RateMbps == 0 {
+		cfg.Instance.Bandwidth = readBandwidth(ctx, awsConfig, cfg.Instance.Type)
+	}
+	cfg.LogUploadRate()
 	db := dynamodb.NewFromConfig(awsConfig)
 	ownership := dynamo.NewRecord(db, cfg.LeaseTable, cfg.LeaseRecordID("ownership"))
 	reports := health.NewNATExchange(dynamo.NewBoard(db, cfg.LeaseTable, cfg.LeaseRecordID(config.BoardRecord)), cfg.Instance.ID, bootclock.Now)

@@ -364,6 +364,53 @@ func TestActivateShared(t *testing.T) {
 	}
 }
 
+func TestActivateSharedShapesUploads(t *testing.T) {
+	shaper := []string{
+		"tc qdisc replace dev ens6 root handle 1: tbf rate 4750mbit burst 1048576 latency 50ms",
+		"tc qdisc replace dev ens6 parent 1:1 handle 10: fq_codel",
+		"tc filter replace dev ens6 parent 10: protocol all prio 1 handle 1 flow hash keys nfct-src divisor 1024",
+	}
+	tcCommands := func(log *commandLog) []string {
+		return slices.DeleteFunc(slices.Clone(log.commands), func(c string) bool { return !strings.HasPrefix(c, "tc ") })
+	}
+	{
+		// The shaper goes on after the address and route, at the computed rate
+		cfg := testConfig(t)
+		cfg.Shaping = &config.Shaping{}
+		cfg.Instance.Bandwidth = instance.Bandwidth{BaselineMbps: 6250, VCPUs: 2}
+		log := &commandLog{}
+		require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, log.runner()).ActivateShared(t.Context(), sharedMAC))
+		assert.Equal(t, shaper, tcCommands(log))
+		assert.Equal(t, "ip route replace default via 10.0.1.1 dev ens6 table 7001", log.commands[len(log.commands)-4])
+	}
+	{
+		// A bucket of 1.5 ms at the rate once that is over 1 MiB
+		cfg := testConfig(t)
+		cfg.Shaping = &config.Shaping{RateMbps: 47500}
+		log := &commandLog{}
+		require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, log.runner()).ActivateShared(t.Context(), sharedMAC))
+		assert.Equal(t, "tc qdisc replace dev ens6 root handle 1: tbf rate 47500mbit burst 8906250 latency 50ms", tcCommands(log)[0])
+	}
+	{
+		// Without shaping, or without the instance type's bandwidth, the
+		// shared ENI keeps the kernel's default queues
+		cfg := testConfig(t)
+		log := &commandLog{}
+		require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, log.runner()).ActivateShared(t.Context(), sharedMAC))
+		cfg.Shaping = &config.Shaping{}
+		require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, log.runner()).ActivateShared(t.Context(), sharedMAC))
+		assert.Empty(t, tcCommands(log))
+	}
+	{
+		// A failed step removes the half-built shaper, and the takeover goes on
+		cfg := testConfig(t)
+		cfg.Shaping = &config.Shaping{RateMbps: 4750}
+		log := &commandLog{fail: map[string]error{shaper[2]: errors.New("Unknown filter \"flow\", hence option \"hash\" is unparsable")}}
+		require.NoError(t, network.New(cfg, &mocks.FakeNetworkFence{}, log.runner()).ActivateShared(t.Context(), sharedMAC))
+		assert.Equal(t, append(slices.Clone(shaper), "tc qdisc del dev ens6 root"), tcCommands(log))
+	}
+}
+
 func TestEnsureForwarding(t *testing.T) {
 	{
 		log := &commandLog{}

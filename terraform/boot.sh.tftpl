@@ -20,7 +20,7 @@ esac
 until download; do
   sleep 5
 done
-until dnf install -y conntrack-tools iptables-nft; do
+until dnf install -y conntrack-tools iptables-nft iproute-tc; do
   sleep 5
 done
 echo "${release_sha256}  release.tar.gz" | sha256sum -c -

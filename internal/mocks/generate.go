@@ -12,6 +12,7 @@ package mocks
 //counterfeiter:generate -fake-name=FakeBoard -o=board.mock.go ../health Board
 //counterfeiter:generate -fake-name=FakeEC2 -o=ec2.mock.go ../handoff EC2
 //counterfeiter:generate -fake-name=FakeHandoffLocal -o=handoff_local.mock.go ../handoff Local
+//counterfeiter:generate -fake-name=FakeInstanceTypes -o=instance_types.mock.go ../instance InstanceTypes
 //counterfeiter:generate -fake-name=FakeRunner -o=runner.mock.go ../network Runner
 //counterfeiter:generate -fake-name=FakeNetworkFence -o=network_fence.mock.go ../network Fence
 //counterfeiter:generate -fake-name=FakeFence -o=fence.mock.go ../controller Fence

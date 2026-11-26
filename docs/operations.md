@@ -228,7 +228,7 @@ pair fails, even though running NATs keep their image.
 Running NATs keep the image, configuration and boot script they launched
 with. These changes need new NATs:
 
-- `worker_cidrs`, `max_connections`, `release_url`,
+- `worker_cidrs`, `max_connections`, `shaping`, `release_url`,
   `datadog_api_key_secret_arn`, `datadog_site` and `kernel`, and a new CIDR
   on the VPC when `worker_cidrs` is left at its default
 - a newer Amazon Linux image
@@ -312,6 +312,71 @@ kernel killed conntrackd, so nothing was copied. A larger table also costs
 forwarding speed once it fills: on a c7gn.large, TCP fell from 19.0 Gbps with
 an empty table to 13.8 Gbps with 498,073 connections.
 
+## Shape uploads
+
+Without shaping, a worker that uploads as fast as it can, such as a backfill,
+fills the owner's network limits. AWS then drops or holds back packets
+whichever worker sent them, so every other worker's connections slow down,
+and small requests time out. With `shaping`, the owner caps uploads just
+below those limits and shares the cap fairly between workers: each worker
+address gets an equal share, however many connections it opens, and takes
+what the others leave unused. A lone worker still uploads at the full rate.
+
+```hcl
+module "natpair" {
+  # ...
+  shaping = {}
+}
+```
+
+`{}` computes the rate when natpair starts, from the instance type the EC2 API
+describes: 95% of the internet gateway cap or 90% of the baseline bandwidth,
+whichever is lower. AWS caps traffic to an internet gateway at 5 Gbps under 32
+vCPUs and at half the bandwidth over 32
+([AWS docs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-network-bandwidth.html)).
+natpair uses half at exactly 32, which the docs don't cover.
+
+| Instance type | Baseline | Internet gateway cap | Rate |
+| --- | --- | --- | --- |
+| c7gn.medium | 3.125 Gbps | 5 Gbps | 2,812 Mbit/s |
+| c7gn.large | 6.25 Gbps | 5 Gbps | 4,750 Mbit/s |
+| c7gn.xlarge | 12.5 Gbps | 5 Gbps | 4,750 Mbit/s |
+
+Each NAT logs `upload rate` with the rate and the reason when it starts, and
+`shaping uploads` when it takes over. If it can't read its instance type, it
+logs `uploads aren't shaped` and forwards without a cap, because a cap from a
+guess could slow every worker. `shaping = { rate_mbps = N }` sets the rate
+instead.
+
+What shaping doesn't cover:
+
+- **Downloads.** Replies to workers leave through each NAT's own interface,
+  outside the cap. AWS counts them, and everything the NAT receives, against
+  the same baseline. On a c7gn.medium, 90% of the baseline left room for
+  downloads of 5% of uploads, and 95% didn't. If your workers download much
+  more than that, use a c7gn.large or larger. Its rate is set by the
+  internet gateway cap, which leaves 1.5 Gbps of its baseline for downloads.
+- **The burst.** A c7gn.medium can send about 8 Gbps for about 14 minutes
+  before AWS holds it to its baseline. Shaping caps it at 2,812 Mbit/s from
+  the start.
+- **The CPU cost.** Below the cap, shaping costs 190 to 230 ns a packet on a
+  c7gn.medium and 130 to 320 ns on a c7gn.large: under 3% of a CPU at
+  1.3 Gbps of uploads. In a flood of small packets the NAT forwards 11% fewer
+  on a c7gn.medium and 20% fewer on a c7gn.large. A takeover takes about
+  10 ms longer.
+- **Bandwidth weighting.** The rate uses the instance type's default
+  baseline. A NAT set to `ebs-1` weighting has a lower one, so set
+  `rate_mbps` for it.
+- **Types larger than a c7gn.large.** Shaping was measured only on the
+  c7gn.medium and c7gn.large. The shaper is one queue that every CPU sends
+  through, so on a type with many CPUs it may not reach the computed rate.
+
+To check the shaper on the owner:
+
+```sh
+sudo tc -s qdisc show dev <shared ENI interface>
+```
+
 ## Monitoring
 
 natpair tests its own uploads, not your workers' traffic. **Run an egress
@@ -334,6 +399,7 @@ If you ship the NATs' logs, these alerts cover the rest:
 | `handing over because at least half of this NAT's health rounds in the last 10 minutes were congested or failed` is logged | The owner lost packets for most of 10 minutes and handed over. Connections the new owner hadn't copied may have reset. See [troubleshooting](troubleshooting.md#handing-over-because-at-least-half-of-this-nats-health-rounds-in-the-last-10-minutes-were-congested-or-failed). |
 | `the health probe failed because this NAT's connection table is full` is logged | The owner's uploads fail because of the full table, not its path, so it stays the owner instead of stepping down. Workers' new connections fail the same way. See [troubleshooting](troubleshooting.md#the-health-probe-failed-because-this-nats-connection-table-is-full). |
 | `worker connections to one destination use most of the shared address's ports` is logged, or the owner's `shared_ports_used` passes 0.7 | New connections to that destination will soon fail. See [troubleshooting](troubleshooting.md#worker-connections-to-one-destination-use-most-of-the-shared-addresss-ports). |
+| `uploads aren't shaped` or `failed to shape uploads` is logged | `shaping` is set, but the NAT couldn't read its instance type or apply the shaper, so it forwards without a cap. The `err` field says why. |
 | `failed to count the shared address's ports in use` repeats for 10 minutes | `shared_ports_used` keeps the latest count that succeeded, so the alert above can't see the ports in use now. |
 
 Set `datadog_api_key_secret_arn` to have each NAT install the Datadog agent.

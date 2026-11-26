@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/artie-labs/natpair/internal/command"
+	"github.com/artie-labs/natpair/internal/config"
 	"github.com/artie-labs/natpair/internal/mocks"
 	"github.com/artie-labs/natpair/internal/netns"
 	"github.com/artie-labs/natpair/internal/network"
@@ -52,6 +54,46 @@ func TestSharedPath(t *testing.T) {
 	require.NoError(t, n.ActivateShared(t.Context(), mac))
 	assert.Contains(t, run(t, "ip", "-4", "addr", "show", "dev", "shared-test"), "10.94.2.100/24")
 	assert.Contains(t, run(t, "ip", "route", "show", "table", "7001"), "default via 10.94.2.1 dev shared-test")
+}
+
+func TestShapeUploads(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.SharedAddress = netip.MustParsePrefix("10.94.2.100/24")
+	cfg.Shaping = &config.Shaping{RateMbps: 2812}
+
+	run(t, "ip", "link", "add", "shape-test", "type", "dummy")
+	t.Cleanup(func() {
+		_, err := command.Run(context.WithoutCancel(t.Context()), 2*time.Second, "ip", "link", "del", "shape-test")
+		assert.NoError(t, err)
+	})
+	var links []struct {
+		Address string `json:"address"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(run(t, "ip", "-j", "link", "show", "shape-test")), &links))
+
+	// Docker Desktop's kernel has neither fq_codel nor the flow classifier.
+	// CI's has both, so the test only skips outside CI.
+	if output, err := command.Run(t.Context(), 2*time.Second, "tc", "qdisc", "add", "dev", "shape-test", "root", "handle", "1:", "fq_codel"); err != nil && os.Getenv("CI") == "" {
+		t.Skipf("this kernel can't run fq_codel: %v %s", err, output)
+	}
+	if output, err := command.Run(t.Context(), 2*time.Second, "tc", "filter", "add", "dev", "shape-test", "parent", "1:", "protocol", "all", "prio", "1", "handle", "1", "flow", "hash", "keys", "nfct-src", "divisor", "1024"); err != nil && os.Getenv("CI") == "" {
+		t.Skipf("this kernel can't run the flow classifier: %v %s", err, output)
+	}
+	run(t, "tc", "qdisc", "del", "dev", "shape-test", "root")
+
+	n := network.New(cfg, &mocks.FakeNetworkFence{}, network.SystemRunner{})
+	// A takeover by the NAT that already holds the ENI applies the shaper
+	// again over the one in place.
+	for range 2 {
+		require.NoError(t, n.ActivateShared(t.Context(), links[0].Address))
+	}
+	qdiscs := run(t, "tc", "qdisc", "show", "dev", "shape-test")
+	assert.Regexp(t, `qdisc tbf 1: root refcnt \d+ rate 2812Mbit burst \d+b lat 50ms`, qdiscs)
+	assert.Contains(t, qdiscs, "qdisc fq_codel 10: parent 1:1 ")
+	assert.Equal(t, 2, strings.Count(qdiscs, "qdisc "))
+	filters := run(t, "tc", "filter", "show", "dev", "shape-test", "parent", "10:")
+	assert.Contains(t, filters, "keys nfct-src divisor 1024")
+	assert.Equal(t, 1, strings.Count(filters, "handle 0x1 "))
 }
 
 func TestSharedRules(t *testing.T) {

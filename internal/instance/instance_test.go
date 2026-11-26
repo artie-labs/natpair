@@ -24,6 +24,7 @@ func fakeMetadata(t *testing.T, mac string) {
 		"local-ipv4":       "10.0.1.10",
 		"public-ipv4":      "192.0.2.10",
 		"mac":              mac,
+		"instance-type":    "c7gn.medium",
 		// A VPC can have several CIDRs, one per line.
 		"network/interfaces/macs/" + mac + "/vpc-ipv4-cidr-blocks": "10.0.0.0/16\n100.64.0.0/16",
 	}
@@ -72,6 +73,7 @@ func TestDiscover(t *testing.T) {
 		assert.Equal(t, Facts{
 			ID:        "i-0123456789abcdef0",
 			Region:    "us-east-2",
+			Type:      "c7gn.medium",
 			PrivateIP: netip.MustParseAddr("10.0.1.10"),
 			PublicIP:  netip.MustParseAddr("192.0.2.10"),
 			Interface: primary.Name,

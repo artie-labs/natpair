@@ -11,7 +11,7 @@ binary=$1
 deploy_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 test -f /etc/natpair/config.json
-dnf install -y conntrack-tools iptables-nft
+dnf install -y conntrack-tools iptables-nft iproute-tc
 install -m 0755 "$binary" /usr/local/bin/natpair
 /usr/local/bin/natpair validate --config /etc/natpair/config.json
 chmod 0600 /etc/natpair/config.json
